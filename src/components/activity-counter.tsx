@@ -48,13 +48,20 @@ export function ActivityCounter({
       </Label>
       <div className="flex flex-wrap items-center gap-2">
         {showProgress ? (
-          <span className="mr-1 text-base tabular-nums">
-            <span className="font-semibold">{current}</span>
-            <span className="text-muted-foreground"> / {target}</span>
-            <span className={cn("ml-1 font-semibold", percentColor)}>
+          <div className="mr-1 flex flex-col items-start leading-tight">
+            <span className="text-base tabular-nums">
+              <span className="font-semibold">{current}</span>
+              <span className="text-muted-foreground"> / {target}</span>
+            </span>
+            <span
+              className={cn(
+                "text-sm font-semibold tabular-nums",
+                percentColor,
+              )}
+            >
               {percent}%
             </span>
-          </span>
+          </div>
         ) : hasGoal ? (
           <span className="mr-1 text-base tabular-nums text-muted-foreground">
             {current}
