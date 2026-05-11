@@ -20,8 +20,6 @@ type Props = {
   onSaved?: () => void;
 };
 
-const QUICK_ADD_EXCLUDE: ReadonlySet<ActivityKey> = new Set(["impressions"]);
-
 export function DailyEntryForm({
   salespersonId,
   refreshKey = 0,
@@ -132,11 +130,7 @@ export function DailyEntryForm({
               hasGoal={hasGoals}
               onChange={(n) => setKey(a.key, n)}
               onSave={() => handleSaveRow(a.key)}
-              onQuickAdd={
-                QUICK_ADD_EXCLUDE.has(a.key)
-                  ? undefined
-                  : () => handleQuickAdd(a.key)
-              }
+              onQuickAdd={() => handleQuickAdd(a.key)}
               saving={savingKey === a.key}
               disabled={savingKey !== null && savingKey !== a.key}
             />
