@@ -38,6 +38,10 @@ export default function AdminPage() {
       router.replace("/dashboard");
     }
   }, [loaded, salesperson, router]);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
   const [from, setFrom] = useState(() =>
     format(startOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),
   );

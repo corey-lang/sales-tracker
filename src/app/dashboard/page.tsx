@@ -36,6 +36,10 @@ export default function DashboardPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
+  useEffect(() => {
     // Picking a random quote on the client only (avoids SSR/CSR hydration
     // mismatch from Math.random). Synchronous setState here is the right
     // pattern for this case.
