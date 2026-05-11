@@ -227,6 +227,8 @@ function shortLabel(key: ActivityKey): string {
       return "1:1 Sch";
     case "ones_held":
       return "1:1 Held";
+    case "presentations":
+      return "Pres";
     case "impressions":
       return "Impr";
     case "team_meetings":

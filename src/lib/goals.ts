@@ -5,10 +5,13 @@ import { ZERO_ACTIVITY } from "@/lib/activities";
 // The `weekly_goals` table stores DAILY targets despite the legacy table name.
 // Weekly targets = daily * WORK_DAYS_PER_WEEK.
 // `salesperson_id IS NULL` = global default; a UUID = per-person override.
+// gold_list_touches is in the schema but not yet in the daily entry form
+// (ACTIVITIES) — admin views (which iterate ADMIN_ACTIVITY_KEYS) do read it.
 export type WeeklyGoal = ActivityValues & {
   id: string;
   effective_from: string;
   salesperson_id: string | null;
+  gold_list_touches: number;
   created_at?: string;
 };
 
