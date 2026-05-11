@@ -15,13 +15,7 @@ import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 
 type Person = { id: string; first_name: string };
 type GoalRow = ActivityValues & {
@@ -175,35 +169,25 @@ export function MiniLeaderboardCard({
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <div>
-            <CardTitle>Team leaderboard</CardTitle>
-            <CardDescription>
-              % of pace through this work week.
-            </CardDescription>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {standings && standings.length > 3 && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setExpanded((v) => !v)}
-              >
-                {expanded ? "Show top 3" : `Show all (${standings.length})`}
-              </Button>
-            )}
-            <Link
-              href="/leaderboard"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {standings && standings.length > 3 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setExpanded((v) => !v)}
             >
-              View full →
-            </Link>
-          </div>
+              {expanded ? "Show top 3" : `Show all (${standings.length})`}
+            </Button>
+          )}
+          <Link
+            href="/leaderboard"
+            className={buttonVariants({ variant: "outline", size: "sm" })}
+          >
+            View full →
+          </Link>
         </div>
-      </CardHeader>
-      <CardContent>
         {error ? (
           <p className="text-sm text-destructive">Couldn&apos;t load: {error}</p>
         ) : !standings ? (

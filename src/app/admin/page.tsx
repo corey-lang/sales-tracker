@@ -41,6 +41,8 @@ export default function AdminPage() {
 
   useEffect(() => {
     window.scrollTo(0, 0);
+    const id = requestAnimationFrame(() => window.scrollTo(0, 0));
+    return () => cancelAnimationFrame(id);
   }, []);
   const [from, setFrom] = useState(() =>
     format(startOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),

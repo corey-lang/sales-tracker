@@ -36,7 +36,12 @@ export default function DashboardPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
+    // Defeat any browser/framework scroll-restoration: scroll now AND on the
+    // next animation frame, so we end up at the top even if something else
+    // scrolled us after mount.
     window.scrollTo(0, 0);
+    const id = requestAnimationFrame(() => window.scrollTo(0, 0));
+    return () => cancelAnimationFrame(id);
   }, []);
 
   useEffect(() => {
