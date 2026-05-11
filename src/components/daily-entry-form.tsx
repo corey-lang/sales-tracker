@@ -119,29 +119,32 @@ export function DailyEntryForm({
   };
 
   return (
-    <div className="space-y-3">
-      {ACTIVITIES.map((a) => (
-        <ActivityCounter
-          key={a.key}
-          id={`activity-${a.key}`}
-          label={a.label}
-          value={inputs[a.key]}
-          current={todaysTotals[a.key]}
-          target={targets[a.key]}
-          hasGoal={hasGoals}
-          onChange={(n) => setKey(a.key, n)}
-          onSave={() => handleSaveRow(a.key)}
-          onQuickAdd={
-            QUICK_ADD_EXCLUDE.has(a.key)
-              ? undefined
-              : () => handleQuickAdd(a.key)
-          }
-          saving={savingKey === a.key}
-          disabled={savingKey !== null && savingKey !== a.key}
-        />
-      ))}
+    <div>
+      <div className="divide-y divide-border">
+        {ACTIVITIES.map((a) => (
+          <div key={a.key} className="py-4 first:pt-0 last:pb-0">
+            <ActivityCounter
+              id={`activity-${a.key}`}
+              label={a.label}
+              value={inputs[a.key]}
+              current={todaysTotals[a.key]}
+              target={targets[a.key]}
+              hasGoal={hasGoals}
+              onChange={(n) => setKey(a.key, n)}
+              onSave={() => handleSaveRow(a.key)}
+              onQuickAdd={
+                QUICK_ADD_EXCLUDE.has(a.key)
+                  ? undefined
+                  : () => handleQuickAdd(a.key)
+              }
+              saving={savingKey === a.key}
+              disabled={savingKey !== null && savingKey !== a.key}
+            />
+          </div>
+        ))}
+      </div>
       {error && (
-        <p className="pt-2 text-sm text-destructive">
+        <p className="pt-3 text-sm text-destructive">
           Couldn&apos;t save: {error}
         </p>
       )}
