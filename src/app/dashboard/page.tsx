@@ -77,45 +77,49 @@ export default function DashboardPage() {
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm text-muted-foreground">{today}</p>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Hi, {salesperson.first_name}
-          </h1>
-          {quote && (
-            <p className="mt-2 max-w-xl rounded-md border-l-4 border-primary bg-primary/5 px-3 py-2 text-base font-semibold italic sm:text-lg">
-              &ldquo;{quote}&rdquo;
-            </p>
-          )}
-        </div>
-        <Image
-          src="/logo.png"
-          alt="Elevate Homescriptions"
-          width={180}
-          height={55}
-          priority
-          className="shrink-0"
-        />
-        <div className="flex flex-wrap items-center gap-2">
-          <Link
-            href="/leaderboard"
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-          >
-            Leaderboard
-          </Link>
-          {salesperson.is_admin && (
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div>
+              <p className="text-sm text-muted-foreground">{today}</p>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Hi, {salesperson.first_name}
+              </h1>
+            </div>
+            <Image
+              src="/logo.png"
+              alt="Elevate Homescriptions"
+              width={180}
+              height={55}
+              priority
+              className="shrink-0"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Link
-              href="/admin"
+              href="/leaderboard"
               className={buttonVariants({ variant: "outline", size: "sm" })}
             >
-              Admin
+              Leaderboard
             </Link>
-          )}
-          <Button variant="outline" size="sm" onClick={handleSwitchUser}>
-            Log out
-          </Button>
+            {salesperson.is_admin && (
+              <Link
+                href="/admin"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                Admin
+              </Link>
+            )}
+            <Button variant="outline" size="sm" onClick={handleSwitchUser}>
+              Log out
+            </Button>
+          </div>
         </div>
+        {quote && (
+          <p className="max-w-xl rounded-md border-l-4 border-primary bg-primary/5 px-3 py-2 text-base font-semibold italic sm:text-lg">
+            &ldquo;{quote}&rdquo;
+          </p>
+        )}
       </header>
 
       <MessagesCard salespersonId={salesperson.id} />
