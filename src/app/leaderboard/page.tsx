@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { format, subDays } from "date-fns";
+import { format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
@@ -50,7 +50,10 @@ export default function LeaderboardPage() {
   useEffect(() => {
     if (!loaded || !salesperson) return;
     let cancelled = false;
-    const since = format(subDays(new Date(), 6), "yyyy-MM-dd");
+    const since = format(
+      startOfWeek(new Date(), { weekStartsOn: 0 }),
+      "yyyy-MM-dd",
+    );
 
     Promise.all([
       // Admins (is_admin=true) and test accounts (is_test=true) don't compete.
@@ -116,7 +119,7 @@ export default function LeaderboardPage() {
     <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm text-muted-foreground">Last 7 days</p>
+          <p className="text-sm text-muted-foreground">This week (Sun–Sat)</p>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             Leaderboard
           </h1>
@@ -141,7 +144,7 @@ export default function LeaderboardPage() {
         <CardHeader>
           <CardTitle>Team standings</CardTitle>
           <CardDescription>
-            Ranked by total activities over the last 7 days.
+            Ranked by total activities this week (Sun–Sat).
           </CardDescription>
         </CardHeader>
         <CardContent>
