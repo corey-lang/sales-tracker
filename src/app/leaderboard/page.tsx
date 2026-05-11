@@ -8,6 +8,7 @@ import { format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
+import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import {
   ACTIVITIES,
   ZERO_ACTIVITY,
@@ -39,6 +40,7 @@ type Standing = {
 export default function LeaderboardPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
+  useScrollToTop();
 
   const [standings, setStandings] = useState<Standing[] | null>(null);
   const [error, setError] = useState<string | null>(null);

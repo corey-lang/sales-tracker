@@ -8,6 +8,7 @@ import { endOfWeek, format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
+import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { FiltersCard } from "@/components/admin/filters-card";
@@ -39,26 +40,7 @@ export default function AdminPage() {
     }
   }, [loaded, salesperson, router]);
 
-  useEffect(() => {
-    if ("scrollRestoration" in window.history) {
-      window.history.scrollRestoration = "manual";
-    }
-    const scroll = () => window.scrollTo(0, 0);
-    scroll();
-    const rafId = requestAnimationFrame(scroll);
-    const t1 = setTimeout(scroll, 50);
-    const t2 = setTimeout(scroll, 200);
-    const onPageShow = (e: PageTransitionEvent) => {
-      if (e.persisted) scroll();
-    };
-    window.addEventListener("pageshow", onPageShow);
-    return () => {
-      cancelAnimationFrame(rafId);
-      clearTimeout(t1);
-      clearTimeout(t2);
-      window.removeEventListener("pageshow", onPageShow);
-    };
-  }, []);
+  useScrollToTop();
   const [from, setFrom] = useState(() =>
     format(startOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),
   );
