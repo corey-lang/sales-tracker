@@ -43,7 +43,7 @@ export function ActivityCounter({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-baseline justify-between gap-2">
+      <div className="flex flex-wrap items-baseline justify-center gap-x-2 gap-y-1">
         <Label htmlFor={id} className="text-base">
           {label}
         </Label>
@@ -61,7 +61,7 @@ export function ActivityCounter({
           </span>
         ) : null}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-center gap-2">
         <Button
           type="button"
           variant="outline"
