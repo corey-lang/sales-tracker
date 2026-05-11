@@ -134,15 +134,15 @@ export default function DashboardPage() {
         refreshKey={entryVersion}
       />
 
+      <MyWeekCard
+        salespersonId={salesperson.id}
+        refreshKey={entryVersion}
+      />
+
       <EditEntryCard
         salespersonId={salesperson.id}
         refreshKey={entryVersion}
         onSaved={() => setEntryVersion((n) => n + 1)}
-      />
-
-      <MyWeekCard
-        salespersonId={salesperson.id}
-        refreshKey={entryVersion}
       />
     </main>
   );
