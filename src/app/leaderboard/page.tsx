@@ -15,6 +15,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
+import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -30,12 +31,53 @@ type Salesperson = { id: string; first_name: string };
 
 type EntryRow = ActivityValues & { salesperson_id: string };
 
+type GoalRow = ActivityValues & {
+  id: string;
+  salesperson_id: string | null;
+  effective_from: string;
+  created_at?: string;
+};
+
 type Standing = {
   id: string;
   first_name: string;
   total: number;
   totals: ActivityValues;
+  paceTarget: number;
+  percent: number | null;
 };
+
+function workdaysElapsed(today: Date): number {
+  const dow = today.getDay();
+  if (dow === 0 || dow === 6) return 5;
+  return dow;
+}
+
+function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
+  const eff = b.effective_from.localeCompare(a.effective_from);
+  if (eff !== 0) return eff;
+  return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+}
+
+function activeGoalFor(
+  personId: string,
+  allGoals: GoalRow[],
+  todayStr: string,
+): GoalRow | null {
+  const personal = allGoals
+    .filter(
+      (g) =>
+        g.salesperson_id === personId && g.effective_from <= todayStr,
+    )
+    .sort(sortGoalsByRecency);
+  if (personal[0]) return personal[0];
+  const global = allGoals
+    .filter(
+      (g) => g.salesperson_id === null && g.effective_from <= todayStr,
+    )
+    .sort(sortGoalsByRecency);
+  return global[0] ?? null;
+}
 
 export default function LeaderboardPage() {
   const router = useRouter();
@@ -52,10 +94,13 @@ export default function LeaderboardPage() {
   useEffect(() => {
     if (!loaded || !salesperson) return;
     let cancelled = false;
+    const now = new Date();
+    const todayStr = format(now, "yyyy-MM-dd");
     const since = format(
-      startOfWeek(new Date(), { weekStartsOn: 0 }),
+      startOfWeek(now, { weekStartsOn: 0 }),
       "yyyy-MM-dd",
     );
+    const days = workdaysElapsed(now);
 
     Promise.all([
       // Admins (is_admin=true) and test accounts (is_test=true) don't compete.
@@ -68,15 +113,18 @@ export default function LeaderboardPage() {
         .from("activity_entries")
         .select(["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","))
         .gte("entry_date", since),
-    ]).then(([peopleRes, entriesRes]) => {
+      supabase.from("weekly_goals").select("*"),
+    ]).then(([peopleRes, entriesRes, goalsRes]) => {
       if (cancelled) return;
-      const firstErr = peopleRes.error ?? entriesRes.error;
+      const firstErr =
+        peopleRes.error ?? entriesRes.error ?? goalsRes.error;
       if (firstErr) {
         setError(firstErr.message);
         return;
       }
       const people = (peopleRes.data ?? []) as Salesperson[];
       const entries = (entriesRes.data ?? []) as unknown as EntryRow[];
+      const allGoals = (goalsRes.data ?? []) as GoalRow[];
 
       const byPerson = new Map<string, ActivityValues>();
       for (const p of people) {
@@ -96,11 +144,39 @@ export default function LeaderboardPage() {
           (sum, k) => sum + totals[k],
           0,
         );
-        return { id: p.id, first_name: p.first_name, total, totals };
+        const goal = activeGoalFor(p.id, allGoals, todayStr);
+        let dailySum = 0;
+        if (goal) {
+          for (const a of ACTIVITIES) {
+            dailySum += Number(goal[a.key as ActivityKey] ?? 0);
+          }
+        }
+        const paceTarget = dailySum * days;
+        const percent =
+          paceTarget > 0 ? Math.round((total / paceTarget) * 100) : null;
+        return {
+          id: p.id,
+          first_name: p.first_name,
+          total,
+          totals,
+          paceTarget,
+          percent,
+        };
       });
-      result.sort(
-        (a, b) => b.total - a.total || a.first_name.localeCompare(b.first_name),
-      );
+
+      // Sort by percent desc (null goes last); name as tiebreaker.
+      result.sort((a, b) => {
+        if (a.percent === null && b.percent === null) {
+          return b.total - a.total || a.first_name.localeCompare(b.first_name);
+        }
+        if (a.percent === null) return 1;
+        if (b.percent === null) return -1;
+        return (
+          b.percent - a.percent ||
+          b.total - a.total ||
+          a.first_name.localeCompare(b.first_name)
+        );
+      });
       setStandings(result);
     });
 
@@ -146,7 +222,7 @@ export default function LeaderboardPage() {
         <CardHeader>
           <CardTitle>Team standings</CardTitle>
           <CardDescription>
-            Ranked by total activities this week (Sun–Sat).
+            Ranked by % of pace this week (Sun–Sat).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -185,6 +261,9 @@ function StandingRow({
   standing: Standing;
   isMe: boolean;
 }) {
+  const percent = standing.percent;
+  const { text: percentColor } =
+    percent === null ? { text: "" } : progressColor(percent);
   return (
     <li
       className={cn(
@@ -204,9 +283,18 @@ function StandingRow({
             )}
           </span>
         </div>
-        <span className="text-2xl font-semibold tabular-nums">
-          {standing.total}
-        </span>
+        <div className="flex flex-col items-end leading-tight">
+          <span className="text-2xl font-semibold tabular-nums">
+            {standing.total}
+          </span>
+          {percent !== null && (
+            <span
+              className={cn("text-sm font-semibold tabular-nums", percentColor)}
+            >
+              {percent}%
+            </span>
+          )}
+        </div>
       </div>
       <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-muted-foreground sm:grid-cols-6">
         {ACTIVITIES.map((a) => (
