@@ -56,6 +56,10 @@ export function FiltersCard({
     onChangeTo(fmt(end));
   };
 
+  const applyToday = () => {
+    const n = new Date();
+    apply(n, n);
+  };
   const applyThisWeek = () => {
     const n = new Date();
     apply(
@@ -129,6 +133,9 @@ export function FiltersCard({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Quick range:</span>
+          <Button type="button" variant="outline" size="sm" onClick={applyToday}>
+            Today
+          </Button>
           <Button type="button" variant="outline" size="sm" onClick={applyThisWeek}>
             This week
           </Button>
