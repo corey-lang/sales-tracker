@@ -110,18 +110,27 @@ export function ActivityCounter({
             {saving ? "…" : "Save"}
           </Button>
         )}
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={onQuickAdd}
-          disabled={inactive || !onQuickAdd}
-          aria-hidden={!onQuickAdd}
-          tabIndex={onQuickAdd ? 0 : -1}
-          aria-label={`Add one to ${label}`}
-          className={cn(!onQuickAdd && "invisible")}
+        <div
+          className={cn(
+            "flex flex-col items-center",
+            !onQuickAdd && "invisible",
+          )}
         >
-          +1
-        </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onQuickAdd}
+            disabled={inactive || !onQuickAdd}
+            aria-hidden={!onQuickAdd}
+            tabIndex={onQuickAdd ? 0 : -1}
+            aria-label={`Add one to ${label}`}
+          >
+            +1
+          </Button>
+          <span className="mt-0.5 text-[10px] leading-none text-muted-foreground">
+            quick add
+          </span>
+        </div>
       </div>
     </div>
   );
