@@ -40,15 +40,22 @@ export default function AdminPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
     const scroll = () => window.scrollTo(0, 0);
     scroll();
     const rafId = requestAnimationFrame(scroll);
+    const t1 = setTimeout(scroll, 50);
+    const t2 = setTimeout(scroll, 200);
     const onPageShow = (e: PageTransitionEvent) => {
       if (e.persisted) scroll();
     };
     window.addEventListener("pageshow", onPageShow);
     return () => {
       cancelAnimationFrame(rafId);
+      clearTimeout(t1);
+      clearTimeout(t2);
       window.removeEventListener("pageshow", onPageShow);
     };
   }, []);

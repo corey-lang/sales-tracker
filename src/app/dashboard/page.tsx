@@ -35,18 +35,27 @@ export default function DashboardPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
-    // Defeat browser/framework scroll-restoration on:
-    // (1) initial mount  (2) the next animation frame
-    // (3) bfcache restore (iOS Safari reopening a closed tab/PWA)
+    // Turn off the browser's automatic scroll restoration so our explicit
+    // scrollTo calls are the source of truth.
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
     const scroll = () => window.scrollTo(0, 0);
     scroll();
+    // Multiple staggered attempts: defeats any late layout shift from async
+    // data fetches (leaderboard, totals, messages) that could otherwise
+    // leave the page mid-scroll.
     const rafId = requestAnimationFrame(scroll);
+    const t1 = setTimeout(scroll, 50);
+    const t2 = setTimeout(scroll, 200);
     const onPageShow = (e: PageTransitionEvent) => {
       if (e.persisted) scroll();
     };
     window.addEventListener("pageshow", onPageShow);
     return () => {
       cancelAnimationFrame(rafId);
+      clearTimeout(t1);
+      clearTimeout(t2);
       window.removeEventListener("pageshow", onPageShow);
     };
   }, []);
