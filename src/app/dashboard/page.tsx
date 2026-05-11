@@ -84,7 +84,7 @@ export default function DashboardPage() {
             Hi, {salesperson.first_name}
           </h1>
           {quote && (
-            <p className="mt-2 max-w-xl text-base font-semibold italic text-muted-foreground sm:text-lg">
+            <p className="mt-2 max-w-xl rounded-md border-l-4 border-primary bg-primary/5 px-3 py-2 text-base font-semibold italic sm:text-lg">
               &ldquo;{quote}&rdquo;
             </p>
           )}
