@@ -31,11 +31,11 @@ export function ActivityCounter({
   const inactive = disabled || saving;
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
+    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
       <Label htmlFor={id} className="text-base">
         {label}
       </Label>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex items-center gap-2">
         <Button
           type="button"
           variant="outline"
