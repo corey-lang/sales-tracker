@@ -131,8 +131,8 @@ export default function DashboardPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Log activity</CardTitle>
-          <CardDescription>
+          <CardTitle className="text-xl">Log activity</CardTitle>
+          <CardDescription className="text-base">
             Enter what you did, then tap Save on that row. The number resets
             so you can log more later.
           </CardDescription>

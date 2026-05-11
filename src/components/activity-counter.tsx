@@ -43,25 +43,23 @@ export function ActivityCounter({
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <Label htmlFor={id} className="text-lg">
-          {label}
-        </Label>
+      <Label htmlFor={id} className="text-lg font-semibold">
+        {label}
+      </Label>
+      <div className="flex flex-wrap items-center gap-2">
         {showProgress ? (
-          <span className="text-base tabular-nums">
+          <span className="mr-1 text-base tabular-nums">
             <span className="font-semibold">{current}</span>
             <span className="text-muted-foreground"> / {target}</span>
-            <span className={cn("ml-2 font-semibold", percentColor)}>
+            <span className={cn("ml-1 font-semibold", percentColor)}>
               {percent}%
             </span>
           </span>
         ) : hasGoal ? (
-          <span className="text-base tabular-nums text-muted-foreground">
+          <span className="mr-1 text-base tabular-nums text-muted-foreground">
             {current}
           </span>
         ) : null}
-      </div>
-      <div className="flex items-center gap-2">
         <Button
           type="button"
           variant="outline"
@@ -85,7 +83,7 @@ export function ActivityCounter({
           }}
           onFocus={(e) => e.currentTarget.select()}
           disabled={inactive}
-          className="w-20 text-center text-base font-medium tabular-nums"
+          className="w-24 text-center text-base font-medium tabular-nums"
         />
         <Button
           type="button"
@@ -100,7 +98,6 @@ export function ActivityCounter({
         {onSave && (
           <Button
             type="button"
-            size="sm"
             onClick={onSave}
             disabled={inactive || value <= 0}
             aria-label={`Save ${label}`}
@@ -116,7 +113,6 @@ export function ActivityCounter({
         <Button
           type="button"
           variant="secondary"
-          size="sm"
           onClick={onQuickAdd}
           disabled={inactive || !onQuickAdd}
           aria-hidden={!onQuickAdd}
