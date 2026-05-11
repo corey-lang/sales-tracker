@@ -78,9 +78,9 @@ export default function AdminPage() {
     <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm text-muted-foreground">Internal tools</p>
+          <p className="text-sm text-muted-foreground">Admin</p>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Admin
+            Hi, {salesperson.first_name}
           </h1>
         </div>
         <Image
