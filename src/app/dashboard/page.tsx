@@ -81,7 +81,7 @@ export default function DashboardPage() {
               className="shrink-0"
             />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             <Link
               href="/leaderboard"
               className={buttonVariants({ variant: "outline", size: "sm" })}
@@ -96,9 +96,14 @@ export default function DashboardPage() {
                 Admin
               </Link>
             )}
-            <Button variant="outline" size="sm" onClick={handleSwitchUser}>
-              Log out
-            </Button>
+            <div className="flex flex-col items-end">
+              <Button variant="outline" size="sm" onClick={handleSwitchUser}>
+                Log out
+              </Button>
+              <span className="mt-0.5 max-w-[140px] text-right text-[10px] leading-tight text-muted-foreground">
+                Stay signed in to skip retyping your name
+              </span>
+            </div>
           </div>
         </div>
         {quote && (
