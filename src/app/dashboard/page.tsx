@@ -82,12 +82,6 @@ export default function DashboardPage() {
             />
           </div>
           <div className="flex flex-wrap items-start gap-2">
-            <Link
-              href="/leaderboard"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
-            >
-              Leaderboard
-            </Link>
             {salesperson.is_admin && (
               <Link
                 href="/admin"
@@ -111,6 +105,13 @@ export default function DashboardPage() {
             &ldquo;{quote}&rdquo;
           </p>
         )}
+        <Link
+          href="/leaderboard"
+          className={buttonVariants({ variant: "outline", size: "sm" })}
+          style={{ width: "fit-content" }}
+        >
+          Leaderboard
+        </Link>
       </header>
 
       <MessagesCard salespersonId={salesperson.id} />
