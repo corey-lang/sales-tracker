@@ -221,38 +221,35 @@ export function MiniLeaderboardCard({
                   <div
                     key={s.id}
                     className={cn(
-                      "flex flex-col items-center gap-1 rounded-md border p-2 text-center sm:p-3",
+                      "rounded-md border p-2 text-center",
                       isMe
                         ? "border-primary bg-primary/5"
                         : "border-border",
                     )}
                   >
-                    <Trophy
+                    <div className="flex items-center justify-center gap-1">
+                      <span className="text-xs font-semibold tabular-nums text-muted-foreground">
+                        #{rank}
+                      </span>
+                      <Trophy
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0",
+                          trophyClass(rank),
+                        )}
+                        aria-label={`Rank ${rank}`}
+                      />
+                      <span className="truncate text-sm font-medium">
+                        {s.first_name}
+                      </span>
+                    </div>
+                    <p
                       className={cn(
-                        "h-5 w-5 shrink-0 sm:h-6 sm:w-6",
-                        trophyClass(rank),
-                      )}
-                      aria-label={`Rank ${rank}`}
-                    />
-                    <span className="text-xs font-semibold tabular-nums text-muted-foreground">
-                      #{rank}
-                    </span>
-                    <span className="text-sm font-medium leading-tight">
-                      {s.first_name}
-                      {isMe && (
-                        <span className="block text-xs text-muted-foreground">
-                          (you)
-                        </span>
-                      )}
-                    </span>
-                    <span
-                      className={cn(
-                        "text-lg font-semibold tabular-nums sm:text-xl",
+                        "mt-0.5 text-base font-semibold tabular-nums",
                         percentColor,
                       )}
                     >
                       {s.percent}%
-                    </span>
+                    </p>
                   </div>
                 );
               })}
