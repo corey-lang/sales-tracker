@@ -5,11 +5,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { progressColor } from "@/lib/goals";
 
 type Props = {
   id: string;
   label: string;
   value: number;
+  current: number;
+  target: number;
+  hasGoal: boolean;
   onChange: (next: number) => void;
   onSave?: () => void;
   onQuickAdd?: () => void;
@@ -21,6 +25,9 @@ export function ActivityCounter({
   id,
   label,
   value,
+  current,
+  target,
+  hasGoal,
   onChange,
   onSave,
   onQuickAdd,
@@ -30,11 +37,30 @@ export function ActivityCounter({
   const set = (n: number) => onChange(Math.max(0, Math.floor(n) || 0));
   const inactive = disabled || saving;
 
+  const showProgress = hasGoal && target > 0;
+  const percent = showProgress ? Math.round((current / target) * 100) : 0;
+  const { text: percentColor } = progressColor(percent);
+
   return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-      <Label htmlFor={id} className="text-base">
-        {label}
-      </Label>
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <Label htmlFor={id} className="text-base">
+          {label}
+        </Label>
+        {showProgress ? (
+          <span className="text-sm tabular-nums">
+            <span className="font-semibold">{current}</span>
+            <span className="text-muted-foreground"> / {target}</span>
+            <span className={cn("ml-2 font-semibold", percentColor)}>
+              {percent}%
+            </span>
+          </span>
+        ) : hasGoal ? (
+          <span className="text-sm tabular-nums text-muted-foreground">
+            {current}
+          </span>
+        ) : null}
+      </div>
       <div className="flex items-center gap-2">
         <Button
           type="button"

@@ -40,9 +40,17 @@ export default function AdminPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
-    window.scrollTo(0, 0);
-    const id = requestAnimationFrame(() => window.scrollTo(0, 0));
-    return () => cancelAnimationFrame(id);
+    const scroll = () => window.scrollTo(0, 0);
+    scroll();
+    const rafId = requestAnimationFrame(scroll);
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) scroll();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, []);
   const [from, setFrom] = useState(() =>
     format(startOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),

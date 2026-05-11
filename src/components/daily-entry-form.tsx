@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { format } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
@@ -10,20 +10,69 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
+import { dailyTargetsFrom, fetchActiveGoalFor } from "@/lib/goals";
 
 import { ActivityCounter } from "@/components/activity-counter";
 
 type Props = {
   salespersonId: string;
+  refreshKey?: number;
   onSaved?: () => void;
 };
 
 const QUICK_ADD_EXCLUDE: ReadonlySet<ActivityKey> = new Set(["impressions"]);
 
-export function DailyEntryForm({ salespersonId, onSaved }: Props) {
+export function DailyEntryForm({
+  salespersonId,
+  refreshKey = 0,
+  onSaved,
+}: Props) {
   const [inputs, setInputs] = useState<ActivityValues>(ZERO_ACTIVITY);
+  const [todaysTotals, setTodaysTotals] =
+    useState<ActivityValues>(ZERO_ACTIVITY);
+  const [targets, setTargets] = useState<ActivityValues>(ZERO_ACTIVITY);
+  const [hasGoals, setHasGoals] = useState(false);
   const [savingKey, setSavingKey] = useState<ActivityKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const today = format(new Date(), "yyyy-MM-dd");
+
+    Promise.all([
+      supabase
+        .from("activity_entries")
+        .select(ACTIVITIES.map((a) => a.key).join(","))
+        .eq("salesperson_id", salespersonId)
+        .eq("entry_date", today)
+        .maybeSingle(),
+      fetchActiveGoalFor(salespersonId),
+    ]).then(([totalsRes, goalRes]) => {
+      if (cancelled) return;
+      const firstErr = totalsRes.error ?? goalRes.error;
+      if (firstErr) {
+        setError(firstErr.message);
+        return;
+      }
+      const nextTotals = { ...ZERO_ACTIVITY };
+      if (totalsRes.data) {
+        const row = totalsRes.data as unknown as Partial<ActivityValues>;
+        for (const a of ACTIVITIES) {
+          nextTotals[a.key] = Number(row[a.key] ?? 0);
+        }
+      }
+      setTodaysTotals(nextTotals);
+
+      const goal = goalRes.data;
+      setHasGoals(!!goal);
+      setTargets(dailyTargetsFrom(goal));
+      setError(null);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [salespersonId, refreshKey]);
 
   const setKey = (key: ActivityKey, next: number) =>
     setInputs((v) => ({ ...v, [key]: next }));
@@ -35,22 +84,7 @@ export function DailyEntryForm({ salespersonId, onSaved }: Props) {
     setSavingKey(key);
     setError(null);
 
-    const { data: existing, error: fetchErr } = await supabase
-      .from("activity_entries")
-      .select(key)
-      .eq("salesperson_id", salespersonId)
-      .eq("entry_date", today)
-      .maybeSingle();
-
-    if (fetchErr) {
-      setError(fetchErr.message);
-      setSavingKey(null);
-      return false;
-    }
-
-    const current = Number(
-      (existing as unknown as Record<string, number> | null)?.[key] ?? 0,
-    );
+    const current = todaysTotals[key];
     const next = current + delta;
 
     const { error: upsertErr } = await supabase.from("activity_entries").upsert(
@@ -68,6 +102,9 @@ export function DailyEntryForm({ salespersonId, onSaved }: Props) {
       setError(upsertErr.message);
       return false;
     }
+    // Optimistic update to local cache; entryVersion refetch will reconcile
+    // with any concurrent writes from EditEntryCard etc.
+    setTodaysTotals((v) => ({ ...v, [key]: next }));
     onSaved?.();
     return true;
   };
@@ -89,6 +126,9 @@ export function DailyEntryForm({ salespersonId, onSaved }: Props) {
           id={`activity-${a.key}`}
           label={a.label}
           value={inputs[a.key]}
+          current={todaysTotals[a.key]}
+          target={targets[a.key]}
+          hasGoal={hasGoals}
           onChange={(n) => setKey(a.key, n)}
           onSave={() => handleSaveRow(a.key)}
           onQuickAdd={
@@ -101,7 +141,9 @@ export function DailyEntryForm({ salespersonId, onSaved }: Props) {
         />
       ))}
       {error && (
-        <p className="pt-2 text-sm text-destructive">Couldn&apos;t save: {error}</p>
+        <p className="pt-2 text-sm text-destructive">
+          Couldn&apos;t save: {error}
+        </p>
       )}
     </div>
   );

@@ -19,7 +19,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { DailyEntryForm } from "@/components/daily-entry-form";
-import { TodayTotalsCard } from "@/components/today-totals-card";
 import { MyWeekCard } from "@/components/my-week-card";
 import { MiniLeaderboardCard } from "@/components/mini-leaderboard-card";
 import { EditEntryCard } from "@/components/edit-entry-card";
@@ -36,12 +35,20 @@ export default function DashboardPage() {
   }, [loaded, salesperson, router]);
 
   useEffect(() => {
-    // Defeat any browser/framework scroll-restoration: scroll now AND on the
-    // next animation frame, so we end up at the top even if something else
-    // scrolled us after mount.
-    window.scrollTo(0, 0);
-    const id = requestAnimationFrame(() => window.scrollTo(0, 0));
-    return () => cancelAnimationFrame(id);
+    // Defeat browser/framework scroll-restoration on:
+    // (1) initial mount  (2) the next animation frame
+    // (3) bfcache restore (iOS Safari reopening a closed tab/PWA)
+    const scroll = () => window.scrollTo(0, 0);
+    scroll();
+    const rafId = requestAnimationFrame(scroll);
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) scroll();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, []);
 
   useEffect(() => {
@@ -129,15 +136,11 @@ export default function DashboardPage() {
         <CardContent>
           <DailyEntryForm
             salespersonId={salesperson.id}
+            refreshKey={entryVersion}
             onSaved={() => setEntryVersion((n) => n + 1)}
           />
         </CardContent>
       </Card>
-
-      <TodayTotalsCard
-        salespersonId={salesperson.id}
-        refreshKey={entryVersion}
-      />
 
       <MyWeekCard
         salespersonId={salesperson.id}
