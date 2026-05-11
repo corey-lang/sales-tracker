@@ -108,28 +108,26 @@ export default function DashboardPage() {
 
       <MessagesCard salespersonId={salesperson.id} />
 
-      <div className="grid grid-cols-[3fr_2fr] gap-3 sm:gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Log activity</CardTitle>
-            <CardDescription>
-              Enter what you did, then tap Save on that row. The number resets
-              so you can log more later.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DailyEntryForm
-              salespersonId={salesperson.id}
-              onSaved={() => setEntryVersion((n) => n + 1)}
-            />
-          </CardContent>
-        </Card>
+      <MiniLeaderboardCard
+        currentSalespersonId={salesperson.id}
+        refreshKey={entryVersion}
+      />
 
-        <MiniLeaderboardCard
-          currentSalespersonId={salesperson.id}
-          refreshKey={entryVersion}
-        />
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Log activity</CardTitle>
+          <CardDescription>
+            Enter what you did, then tap Save on that row. The number resets
+            so you can log more later.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <DailyEntryForm
+            salespersonId={salesperson.id}
+            onSaved={() => setEntryVersion((n) => n + 1)}
+          />
+        </CardContent>
+      </Card>
 
       <TodayTotalsCard
         salespersonId={salesperson.id}

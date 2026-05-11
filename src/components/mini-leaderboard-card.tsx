@@ -95,7 +95,6 @@ export function MiniLeaderboardCard({
     const days = workdaysElapsed(now);
 
     Promise.all([
-      // Admins (is_admin=true) and test accounts (is_test=true) don't compete.
       supabase
         .from("salespeople")
         .select("id, first_name")
@@ -167,25 +166,44 @@ export function MiniLeaderboardCard({
     };
   }, [currentSalespersonId, refreshKey]);
 
+  const trophyClass = (rank: number) =>
+    rank === 1
+      ? "text-yellow-500"
+      : rank === 2
+        ? "text-slate-400"
+        : "text-amber-700";
+
   return (
-    <Card className="flex h-full flex-col">
+    <Card>
       <CardHeader>
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <CardTitle>Team leaderboard</CardTitle>
             <CardDescription>
               % of pace through this work week.
             </CardDescription>
           </div>
-          <Link
-            href="/leaderboard"
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-          >
-            View full →
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            {standings && standings.length > 3 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setExpanded((v) => !v)}
+              >
+                {expanded ? "Show top 3" : `Show all (${standings.length})`}
+              </Button>
+            )}
+            <Link
+              href="/leaderboard"
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
+              View full →
+            </Link>
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="flex flex-1 flex-col">
+      <CardContent>
         {error ? (
           <p className="text-sm text-destructive">Couldn&apos;t load: {error}</p>
         ) : !standings ? (
@@ -193,79 +211,96 @@ export function MiniLeaderboardCard({
         ) : standings.length === 0 ? (
           <p className="text-sm text-muted-foreground">No salespeople yet.</p>
         ) : (
-          <ol className="space-y-2">
-            {(expanded ? standings : standings.slice(0, 3)).map((s, i) => {
-              const rank = i + 1;
-              const isMe = s.id === currentSalespersonId;
-              const isTop3 = rank <= 3;
-              const trophyColor =
-                rank === 1
-                  ? "text-yellow-500"
-                  : rank === 2
-                    ? "text-slate-400"
-                    : "text-amber-700";
-              const { text: percentColor } = progressColor(s.percent);
-
-              return (
-                <li
-                  key={s.id}
-                  className={cn(
-                    "flex items-center justify-between rounded-md border px-3",
-                    isTop3 ? "py-3" : "py-2",
-                    isMe
-                      ? "border-primary bg-primary/5"
-                      : "border-border",
-                  )}
-                >
-                  <div className="flex items-center gap-3">
-                    {isTop3 ? (
-                      <Trophy
-                        className={cn("h-5 w-5 shrink-0", trophyColor)}
-                        aria-label={`Rank ${rank}`}
-                      />
-                    ) : (
-                      <span className="w-5 text-center text-sm font-semibold tabular-nums text-muted-foreground">
-                        #{rank}
-                      </span>
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 sm:gap-3">
+              {standings.slice(0, 3).map((s, i) => {
+                const rank = i + 1;
+                const { text: percentColor } = progressColor(s.percent);
+                const isMe = s.id === currentSalespersonId;
+                return (
+                  <div
+                    key={s.id}
+                    className={cn(
+                      "flex flex-col items-center gap-1 rounded-md border p-2 text-center sm:p-3",
+                      isMe
+                        ? "border-primary bg-primary/5"
+                        : "border-border",
                     )}
-                    <span
+                  >
+                    <Trophy
                       className={cn(
-                        "font-medium",
-                        isTop3 ? "text-base font-semibold" : "text-sm",
+                        "h-5 w-5 shrink-0 sm:h-6 sm:w-6",
+                        trophyClass(rank),
                       )}
-                    >
+                      aria-label={`Rank ${rank}`}
+                    />
+                    <span className="text-xs font-semibold tabular-nums text-muted-foreground">
+                      #{rank}
+                    </span>
+                    <span className="text-sm font-medium leading-tight">
                       {s.first_name}
                       {isMe && (
-                        <span className="ml-2 text-xs text-muted-foreground">
+                        <span className="block text-xs text-muted-foreground">
                           (you)
                         </span>
                       )}
                     </span>
+                    <span
+                      className={cn(
+                        "text-lg font-semibold tabular-nums sm:text-xl",
+                        percentColor,
+                      )}
+                    >
+                      {s.percent}%
+                    </span>
                   </div>
-                  <span
-                    className={cn(
-                      "font-semibold tabular-nums",
-                      percentColor,
-                      isTop3 ? "text-xl" : "text-base",
-                    )}
-                  >
-                    {s.percent}%
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
-        )}
-        {standings && standings.length > 3 && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="mt-auto self-start"
-            onClick={() => setExpanded((v) => !v)}
-          >
-            {expanded ? "Show top 3" : `Show all (${standings.length})`}
-          </Button>
+                );
+              })}
+            </div>
+
+            {expanded && standings.length > 3 && (
+              <ol className="space-y-2">
+                {standings.slice(3).map((s, i) => {
+                  const rank = i + 4;
+                  const isMe = s.id === currentSalespersonId;
+                  const { text: percentColor } = progressColor(s.percent);
+                  return (
+                    <li
+                      key={s.id}
+                      className={cn(
+                        "flex items-center justify-between rounded-md border px-3 py-2",
+                        isMe
+                          ? "border-primary bg-primary/5"
+                          : "border-border",
+                      )}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="w-5 text-center text-sm font-semibold tabular-nums text-muted-foreground">
+                          #{rank}
+                        </span>
+                        <span className="text-sm font-medium">
+                          {s.first_name}
+                          {isMe && (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              (you)
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <span
+                        className={cn(
+                          "text-base font-semibold tabular-nums",
+                          percentColor,
+                        )}
+                      >
+                        {s.percent}%
+                      </span>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
