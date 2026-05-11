@@ -141,9 +141,11 @@ export default function DashboardPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-xl">Log activity</CardTitle>
-          <CardDescription className="text-base">
-            Enter what you did, then tap Save on that row. The number resets
-            so you can log more later.
+          <CardDescription className="rounded-md border-l-4 border-primary bg-primary/5 px-3 py-2 text-base font-medium text-foreground">
+            Enter only what you just did — <strong>not your total</strong>.
+            Numbers add to your running count. Tap <strong>Save</strong> for
+            the amount you typed, or <strong>+1 (quick add)</strong> to add
+            one instantly.
           </CardDescription>
         </CardHeader>
         <CardContent>
