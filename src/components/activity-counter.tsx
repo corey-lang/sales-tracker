@@ -44,11 +44,11 @@ export function ActivityCounter({
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <Label htmlFor={id} className="text-base">
+        <Label htmlFor={id} className="text-lg">
           {label}
         </Label>
         {showProgress ? (
-          <span className="text-sm tabular-nums">
+          <span className="text-base tabular-nums">
             <span className="font-semibold">{current}</span>
             <span className="text-muted-foreground"> / {target}</span>
             <span className={cn("ml-2 font-semibold", percentColor)}>
@@ -56,7 +56,7 @@ export function ActivityCounter({
             </span>
           </span>
         ) : hasGoal ? (
-          <span className="text-sm tabular-nums text-muted-foreground">
+          <span className="text-base tabular-nums text-muted-foreground">
             {current}
           </span>
         ) : null}
@@ -85,7 +85,7 @@ export function ActivityCounter({
           }}
           onFocus={(e) => e.currentTarget.select()}
           disabled={inactive}
-          className="w-16 text-center tabular-nums"
+          className="w-20 text-center text-base font-medium tabular-nums"
         />
         <Button
           type="button"

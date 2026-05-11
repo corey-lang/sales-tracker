@@ -120,9 +120,9 @@ export function DailyEntryForm({
 
   return (
     <div>
-      <div className="divide-y divide-border">
+      <div className="divide-y divide-border border-t border-border">
         {ACTIVITIES.map((a) => (
-          <div key={a.key} className="py-4 first:pt-0 last:pb-0">
+          <div key={a.key} className="py-4 last:pb-0">
             <ActivityCounter
               id={`activity-${a.key}`}
               label={a.label}
