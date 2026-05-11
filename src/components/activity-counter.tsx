@@ -104,6 +104,11 @@ export function ActivityCounter({
             onClick={onSave}
             disabled={inactive || value <= 0}
             aria-label={`Save ${label}`}
+            className={cn(
+              value > 0 &&
+                !saving &&
+                "bg-green-600 text-white shadow-md hover:bg-green-700 motion-safe:animate-pulse",
+            )}
           >
             {saving ? "…" : "Save"}
           </Button>
