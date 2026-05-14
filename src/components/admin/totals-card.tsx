@@ -98,7 +98,11 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
     if (people.length === 0) return;
     let cancelled = false;
 
-    const cols = ["salesperson_id", ...ADMIN_ACTIVITY_KEYS.map((a) => a.key)];
+    const cols = [
+      "salesperson_id",
+      "entry_date",
+      ...ADMIN_ACTIVITY_KEYS.map((a) => a.key),
+    ];
     let totalsQuery = supabase
       .from("activity_entries")
       .select(cols.join(","))
@@ -122,8 +126,9 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
       const next = new Map<string, AdminValues>();
       for (const p of people) next.set(p.id, { ...ZERO_ADMIN });
       for (const row of (totalsRes.data ?? []) as unknown as Array<
-        Partial<AdminValues> & { salesperson_id: string }
+        Partial<AdminValues> & { salesperson_id: string; entry_date: string }
       >) {
+        if (isWeekend(parseISO(row.entry_date))) continue;
         const bucket = next.get(row.salesperson_id);
         if (!bucket) continue;
         for (const a of ADMIN_ACTIVITY_KEYS) {
@@ -184,7 +189,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
         ? ADMIN_ACTIVITY_KEYS.reduce(
             (s, a) => s + Number(goal[a.key] ?? 0),
             0,
-          ) * workdays
+          )
         : 0;
       out.set(p.id, {
         count,
@@ -193,7 +198,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
       });
     }
     return out;
-  }, [baseFilteredPeople, totals, goalsByPerson, workdays]);
+  }, [baseFilteredPeople, totals, goalsByPerson]);
 
   // Sort filtered people by total-percent desc; null percent goes to the
   // bottom; name as tiebreaker.
@@ -222,7 +227,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
       const goal = goalsByPerson.get(p.id);
       for (const a of ADMIN_ACTIVITY_KEYS) {
         const c = t[a.key];
-        const e = goal ? Number(goal[a.key] ?? 0) * workdays : 0;
+        const e = goal ? Number(goal[a.key] ?? 0) : 0;
         counts[a.key] += c;
         expecteds[a.key] += e;
         allCount += c;
@@ -230,7 +235,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
       }
     }
     return { counts, expecteds, allCount, allExpected };
-  }, [baseFilteredPeople, totals, goalsByPerson, workdays]);
+  }, [baseFilteredPeople, totals, goalsByPerson]);
 
   return (
     <Card>
@@ -239,7 +244,8 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
         <CardDescription>
           {formatDateMDY(from)} → {formatDateMDY(to)},{" "}
           {salespersonFilter === "all" ? "all reps" : "1 rep"} ·{" "}
-          {workdays} workday{workdays === 1 ? "" : "s"} in range
+          {workdays} business day{workdays === 1 ? "" : "s"} in range ·
+          compared with weekly goals
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -278,8 +284,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
                       </td>
                       {ADMIN_ACTIVITY_KEYS.map((a) => {
                         const count = t[a.key];
-                        const daily = goal ? Number(goal[a.key] ?? 0) : 0;
-                        const expected = daily * workdays;
+                        const expected = goal ? Number(goal[a.key] ?? 0) : 0;
                         const percent = computePercent(count, expected);
                         return (
                           <td

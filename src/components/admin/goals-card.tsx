@@ -277,11 +277,11 @@ export function GoalsCard({ people }: Props) {
       <CardHeader>
         <CardTitle>Goals</CardTitle>
         <CardDescription>
-          Set how many of each activity a person should do every day. Each save
-          adds a new row below — old goals stay so you can see what changed.
-          The app uses the newest goal that has already started. A person&apos;s
-          own goal is used if they have one; otherwise the team default is
-          used.
+          Set Monday-Friday weekly goals for each activity. Daily entries feed
+          weekly progress. Each save adds a new row below — old goals stay so
+          you can see what changed. The app uses the newest goal that has
+          already started. A person&apos;s own goal is used if they have one;
+          otherwise the team default is used.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">

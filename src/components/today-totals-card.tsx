@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { format } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import {
@@ -9,7 +8,11 @@ import {
   ZERO_ACTIVITY,
   type ActivityValues,
 } from "@/lib/activities";
-import { dailyTargetsFrom, fetchActiveGoalFor } from "@/lib/goals";
+import {
+  businessWeekToDateRange,
+  fetchActiveGoalFor,
+  weeklyTargetsFrom,
+} from "@/lib/goals";
 
 import { ActivityProgressRow } from "@/components/activity-progress-row";
 import {
@@ -34,14 +37,14 @@ export function TodayTotalsCard({ salespersonId, refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const today = format(new Date(), "yyyy-MM-dd");
+    const { since, through } = businessWeekToDateRange();
 
     const totalsPromise = supabase
       .from("activity_entries")
       .select(ACTIVITIES.map((a) => a.key).join(","))
       .eq("salesperson_id", salespersonId)
-      .eq("entry_date", today)
-      .maybeSingle();
+      .gte("entry_date", since)
+      .lte("entry_date", through);
 
     Promise.all([totalsPromise, fetchActiveGoalFor(salespersonId)]).then(
       ([totalsResult, goalResult]) => {
@@ -55,17 +58,17 @@ export function TodayTotalsCard({ salespersonId, refreshKey }: Props) {
         }
 
         const nextTotals = { ...ZERO_ACTIVITY };
-        if (totalsResult.data) {
-          const row = totalsResult.data as unknown as Partial<ActivityValues>;
+        for (const row of (totalsResult.data ??
+          []) as unknown as Partial<ActivityValues>[]) {
           for (const a of ACTIVITIES) {
-            nextTotals[a.key] = Number(row[a.key] ?? 0);
+            nextTotals[a.key] += Number(row[a.key] ?? 0);
           }
         }
         setTotals(nextTotals);
 
         const goal = goalResult.data;
         setHasGoals(!!goal);
-        setTargets(dailyTargetsFrom(goal));
+        setTargets(weeklyTargetsFrom(goal));
 
         setError(null);
         setLoading(false);
@@ -80,7 +83,7 @@ export function TodayTotalsCard({ salespersonId, refreshKey }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Today&apos;s totals</CardTitle>
+        <CardTitle>Weekly totals</CardTitle>
         {!hasGoals && (
           <CardDescription>
             Add a row to <code>weekly_goals</code> to see progress vs targets.

@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { endOfWeek, format, startOfWeek } from "date-fns";
+import { addDays, format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
@@ -41,11 +41,13 @@ export default function AdminPage() {
   }, [loaded, salesperson, router]);
 
   useScrollToTop();
+  const currentBusinessWeekStart = () =>
+    startOfWeek(new Date(), { weekStartsOn: 1 });
   const [from, setFrom] = useState(() =>
-    format(startOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),
+    format(currentBusinessWeekStart(), "yyyy-MM-dd"),
   );
   const [to, setTo] = useState(() =>
-    format(endOfWeek(new Date(), { weekStartsOn: 0 }), "yyyy-MM-dd"),
+    format(addDays(currentBusinessWeekStart(), 4), "yyyy-MM-dd"),
   );
   const [salespersonFilter, setSalespersonFilter] = useState<string>("all");
 

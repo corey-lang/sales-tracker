@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { format, startOfWeek } from "date-fns";
+import { format } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
@@ -15,7 +15,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { progressColor } from "@/lib/goals";
+import { businessWeekToDateRange, progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -43,15 +43,9 @@ type Standing = {
   first_name: string;
   total: number;
   totals: ActivityValues;
-  paceTarget: number;
+  weeklyTarget: number;
   percent: number | null;
 };
-
-function workdaysElapsed(today: Date): number {
-  const dow = today.getDay();
-  if (dow === 0 || dow === 6) return 5;
-  return dow;
-}
 
 function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
   const eff = b.effective_from.localeCompare(a.effective_from);
@@ -96,11 +90,7 @@ export default function LeaderboardPage() {
     let cancelled = false;
     const now = new Date();
     const todayStr = format(now, "yyyy-MM-dd");
-    const since = format(
-      startOfWeek(now, { weekStartsOn: 0 }),
-      "yyyy-MM-dd",
-    );
-    const days = workdaysElapsed(now);
+    const { since, through } = businessWeekToDateRange(now);
 
     Promise.all([
       // Admins (is_admin=true) and test accounts (is_test=true) don't compete.
@@ -112,7 +102,8 @@ export default function LeaderboardPage() {
       supabase
         .from("activity_entries")
         .select(["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","))
-        .gte("entry_date", since),
+        .gte("entry_date", since)
+        .lte("entry_date", through),
       supabase.from("weekly_goals").select("*"),
     ]).then(([peopleRes, entriesRes, goalsRes]) => {
       if (cancelled) return;
@@ -145,21 +136,20 @@ export default function LeaderboardPage() {
           0,
         );
         const goal = activeGoalFor(p.id, allGoals, todayStr);
-        let dailySum = 0;
+        let weeklyTarget = 0;
         if (goal) {
           for (const a of ACTIVITIES) {
-            dailySum += Number(goal[a.key as ActivityKey] ?? 0);
+            weeklyTarget += Number(goal[a.key as ActivityKey] ?? 0);
           }
         }
-        const paceTarget = dailySum * days;
         const percent =
-          paceTarget > 0 ? Math.round((total / paceTarget) * 100) : null;
+          weeklyTarget > 0 ? Math.round((total / weeklyTarget) * 100) : null;
         return {
           id: p.id,
           first_name: p.first_name,
           total,
           totals,
-          paceTarget,
+          weeklyTarget,
           percent,
         };
       });
@@ -197,7 +187,9 @@ export default function LeaderboardPage() {
     <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm text-muted-foreground">This week (Sun–Sat)</p>
+          <p className="text-sm text-muted-foreground">
+            This week (Mon-Fri)
+          </p>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             Leaderboard
           </h1>
@@ -222,7 +214,7 @@ export default function LeaderboardPage() {
         <CardHeader>
           <CardTitle>Team standings</CardTitle>
           <CardDescription>
-            Ranked by % of pace this week (Sun–Sat).
+            Ranked by % of weekly goal completed Monday-Friday.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -10,7 +10,11 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { dailyTargetsFrom, fetchActiveGoalFor } from "@/lib/goals";
+import {
+  businessWeekToDateRange,
+  fetchActiveGoalFor,
+  weeklyTargetsFrom,
+} from "@/lib/goals";
 
 import { ActivityCounter } from "@/components/activity-counter";
 
@@ -26,7 +30,7 @@ export function DailyEntryForm({
   onSaved,
 }: Props) {
   const [inputs, setInputs] = useState<ActivityValues>(ZERO_ACTIVITY);
-  const [todaysTotals, setTodaysTotals] =
+  const [weeklyTotals, setWeeklyTotals] =
     useState<ActivityValues>(ZERO_ACTIVITY);
   const [targets, setTargets] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [hasGoals, setHasGoals] = useState(false);
@@ -35,15 +39,15 @@ export function DailyEntryForm({
 
   useEffect(() => {
     let cancelled = false;
-    const today = format(new Date(), "yyyy-MM-dd");
+    const { since, through } = businessWeekToDateRange();
 
     Promise.all([
       supabase
         .from("activity_entries")
         .select(ACTIVITIES.map((a) => a.key).join(","))
         .eq("salesperson_id", salespersonId)
-        .eq("entry_date", today)
-        .maybeSingle(),
+        .gte("entry_date", since)
+        .lte("entry_date", through),
       fetchActiveGoalFor(salespersonId),
     ]).then(([totalsRes, goalRes]) => {
       if (cancelled) return;
@@ -53,17 +57,17 @@ export function DailyEntryForm({
         return;
       }
       const nextTotals = { ...ZERO_ACTIVITY };
-      if (totalsRes.data) {
-        const row = totalsRes.data as unknown as Partial<ActivityValues>;
+      for (const row of (totalsRes.data ??
+        []) as unknown as Partial<ActivityValues>[]) {
         for (const a of ACTIVITIES) {
-          nextTotals[a.key] = Number(row[a.key] ?? 0);
+          nextTotals[a.key] += Number(row[a.key] ?? 0);
         }
       }
-      setTodaysTotals(nextTotals);
+      setWeeklyTotals(nextTotals);
 
       const goal = goalRes.data;
       setHasGoals(!!goal);
-      setTargets(dailyTargetsFrom(goal));
+      setTargets(weeklyTargetsFrom(goal));
       setError(null);
     });
 
@@ -82,8 +86,21 @@ export function DailyEntryForm({
     setSavingKey(key);
     setError(null);
 
-    const current = todaysTotals[key];
-    const next = current + delta;
+    const currentToday = await supabase
+      .from("activity_entries")
+      .select(key)
+      .eq("salesperson_id", salespersonId)
+      .eq("entry_date", today)
+      .maybeSingle();
+
+    if (currentToday.error) {
+      setSavingKey(null);
+      setError(currentToday.error.message);
+      return false;
+    }
+
+    const row = currentToday.data as Partial<ActivityValues> | null;
+    const next = Number(row?.[key] ?? 0) + delta;
 
     const { error: upsertErr } = await supabase.from("activity_entries").upsert(
       {
@@ -102,7 +119,10 @@ export function DailyEntryForm({
     }
     // Optimistic update to local cache; entryVersion refetch will reconcile
     // with any concurrent writes from EditEntryCard etc.
-    setTodaysTotals((v) => ({ ...v, [key]: next }));
+    const { isBusinessDay } = businessWeekToDateRange();
+    if (isBusinessDay) {
+      setWeeklyTotals((v) => ({ ...v, [key]: v[key] + delta }));
+    }
     onSaved?.();
     return true;
   };
@@ -125,7 +145,7 @@ export function DailyEntryForm({
               id={`activity-${a.key}`}
               label={a.label}
               value={inputs[a.key]}
-              current={todaysTotals[a.key]}
+              current={weeklyTotals[a.key]}
               target={targets[a.key]}
               hasGoal={hasGoals}
               onChange={(n) => setKey(a.key, n)}

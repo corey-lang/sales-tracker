@@ -128,7 +128,8 @@ export default function DashboardPage() {
             Enter only what you just did — <strong>not your total</strong>.
             Numbers add to your running count. Tap <strong>Save</strong> for
             the amount you typed, or <strong>+1 (quick add)</strong> to add
-            one instantly.
+            one instantly. Daily entries feed your Monday-Friday weekly
+            progress.
           </CardDescription>
         </CardHeader>
         <CardContent>

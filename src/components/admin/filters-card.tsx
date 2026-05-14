@@ -1,8 +1,8 @@
 "use client";
 
 import {
+  addDays,
   endOfMonth,
-  endOfWeek,
   format,
   startOfMonth,
   startOfWeek,
@@ -62,17 +62,13 @@ export function FiltersCard({
   };
   const applyThisWeek = () => {
     const n = new Date();
-    apply(
-      startOfWeek(n, { weekStartsOn: 0 }),
-      endOfWeek(n, { weekStartsOn: 0 }),
-    );
+    const start = startOfWeek(n, { weekStartsOn: 1 });
+    apply(start, addDays(start, 4));
   };
   const applyLastWeek = () => {
     const n = subWeeks(new Date(), 1);
-    apply(
-      startOfWeek(n, { weekStartsOn: 0 }),
-      endOfWeek(n, { weekStartsOn: 0 }),
-    );
+    const start = startOfWeek(n, { weekStartsOn: 1 });
+    apply(start, addDays(start, 4));
   };
   const applyMTD = () => {
     const n = new Date();

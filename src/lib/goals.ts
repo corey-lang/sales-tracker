@@ -1,9 +1,10 @@
+import { addDays, format, isWeekend, startOfWeek } from "date-fns";
+
 import { supabase } from "@/lib/supabase/client";
 import type { ActivityKey, ActivityValues } from "@/lib/activities";
 import { ZERO_ACTIVITY } from "@/lib/activities";
 
-// The `weekly_goals` table stores DAILY targets despite the legacy table name.
-// Weekly targets = daily * WORK_DAYS_PER_WEEK.
+// The `weekly_goals` table stores Monday-Friday weekly targets.
 // `salesperson_id IS NULL` = global default; a UUID = per-person override.
 // gold_list_touches is in the schema but not yet in the daily entry form
 // (ACTIVITIES) — admin views (which iterate ADMIN_ACTIVITY_KEYS) do read it.
@@ -17,13 +18,29 @@ export type WeeklyGoal = ActivityValues & {
 
 export const WORK_DAYS_PER_WEEK = 5;
 
-export function dailyTargetsFrom(goal: WeeklyGoal | null): ActivityValues {
+export function weeklyTargetsFrom(goal: WeeklyGoal | null): ActivityValues {
   if (!goal) return ZERO_ACTIVITY;
   const out = { ...ZERO_ACTIVITY };
   for (const key of Object.keys(ZERO_ACTIVITY) as ActivityKey[]) {
     out[key] = Number(goal[key] ?? 0);
   }
   return out;
+}
+
+export function businessWeekToDateRange(today = new Date()): {
+  since: string;
+  through: string;
+  isBusinessDay: boolean;
+} {
+  const monday = startOfWeek(today, { weekStartsOn: 1 });
+  const friday = addDays(monday, WORK_DAYS_PER_WEEK - 1);
+  const through = today > friday ? friday : today;
+
+  return {
+    since: format(monday, "yyyy-MM-dd"),
+    through: format(through, "yyyy-MM-dd"),
+    isBusinessDay: !isWeekend(today),
+  };
 }
 
 export function progressColor(percent: number): {

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import {
@@ -10,7 +9,11 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { dailyTargetsFrom, fetchActiveGoalFor } from "@/lib/goals";
+import {
+  businessWeekToDateRange,
+  fetchActiveGoalFor,
+  weeklyTargetsFrom,
+} from "@/lib/goals";
 
 import { ActivityProgressRow } from "@/components/activity-progress-row";
 import {
@@ -26,32 +29,23 @@ type Props = {
   refreshKey: number;
 };
 
-function workdaysElapsedThisWeek(today: Date): number {
-  const dow = today.getDay(); // 0 Sun, 1 Mon, ..., 6 Sat
-  if (dow === 0 || dow === 6) return 5; // weekend → full work week done
-  return dow; // Mon=1, ..., Fri=5
-}
-
 export function MyWeekCard({ salespersonId, refreshKey }: Props) {
   const [totals, setTotals] = useState<ActivityValues>(ZERO_ACTIVITY);
-  const [paceTargets, setPaceTargets] = useState<ActivityValues>(ZERO_ACTIVITY);
+  const [targets, setTargets] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [hasGoals, setHasGoals] = useState(false);
-  const [workdays, setWorkdays] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const now = new Date();
-    const weekStart = startOfWeek(now, { weekStartsOn: 1 });
-    const since = format(weekStart, "yyyy-MM-dd");
-    const elapsed = workdaysElapsedThisWeek(now);
+    const { since, through } = businessWeekToDateRange();
 
     const totalsPromise = supabase
       .from("activity_entries")
       .select(ACTIVITIES.map((a) => a.key).join(","))
       .eq("salesperson_id", salespersonId)
-      .gte("entry_date", since);
+      .gte("entry_date", since)
+      .lte("entry_date", through);
 
     Promise.all([totalsPromise, fetchActiveGoalFor(salespersonId)]).then(
       ([totalsResult, goalResult]) => {
@@ -73,14 +67,8 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
         setTotals(nextTotals);
 
         const goal = goalResult.data;
-        const dailies = dailyTargetsFrom(goal);
-        const pace = { ...ZERO_ACTIVITY };
-        for (const a of ACTIVITIES) {
-          pace[a.key] = dailies[a.key] * elapsed;
-        }
         setHasGoals(!!goal);
-        setPaceTargets(pace);
-        setWorkdays(elapsed);
+        setTargets(weeklyTargetsFrom(goal));
 
         setError(null);
         setLoading(false);
@@ -95,11 +83,11 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>This week</CardTitle>
+        <CardTitle>Weekly tracker</CardTitle>
         <CardDescription>
           {hasGoals
-            ? `Workday ${workdays}/5 — targets scale with the week.`
-            : "Totals since Monday."}
+            ? "Monday-Friday progress toward your weekly goals."
+            : "Monday-Friday totals since Monday."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -114,7 +102,7 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
                 key={a.key}
                 label={a.label}
                 value={totals[a.key]}
-                target={paceTargets[a.key]}
+                target={targets[a.key]}
                 showBar={hasGoals}
               />
             ))}

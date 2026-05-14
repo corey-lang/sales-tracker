@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { format, startOfWeek } from "date-fns";
+import { format } from "date-fns";
 import { Trophy } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
@@ -11,7 +11,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { progressColor } from "@/lib/goals";
+import { businessWeekToDateRange, progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -29,7 +29,7 @@ type Standing = {
   id: string;
   first_name: string;
   actual: number;
-  paceTarget: number;
+  weeklyTarget: number;
   percent: number;
 };
 
@@ -37,12 +37,6 @@ type Props = {
   currentSalespersonId: string;
   refreshKey: number;
 };
-
-function workdaysElapsed(today: Date): number {
-  const dow = today.getDay();
-  if (dow === 0 || dow === 6) return 5;
-  return dow;
-}
 
 function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
   const eff = b.effective_from.localeCompare(a.effective_from);
@@ -82,11 +76,7 @@ export function MiniLeaderboardCard({
     let cancelled = false;
     const now = new Date();
     const todayStr = format(now, "yyyy-MM-dd");
-    const weekStart = format(
-      startOfWeek(now, { weekStartsOn: 0 }),
-      "yyyy-MM-dd",
-    );
-    const days = workdaysElapsed(now);
+    const { since, through } = businessWeekToDateRange(now);
 
     Promise.all([
       supabase
@@ -99,7 +89,8 @@ export function MiniLeaderboardCard({
         .select(
           ["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","),
         )
-        .gte("entry_date", weekStart),
+        .gte("entry_date", since)
+        .lte("entry_date", through),
       supabase.from("weekly_goals").select("*"),
     ]).then(([peopleRes, entriesRes, goalsRes]) => {
       if (cancelled) return;
@@ -127,21 +118,20 @@ export function MiniLeaderboardCard({
 
       const result: Standing[] = people.map((p) => {
         const goal = activeGoalFor(p.id, allGoals, todayStr);
-        let dailySum = 0;
+        let weeklyTarget = 0;
         if (goal) {
           for (const a of ACTIVITIES) {
-            dailySum += Number(goal[a.key as ActivityKey] ?? 0);
+            weeklyTarget += Number(goal[a.key as ActivityKey] ?? 0);
           }
         }
-        const paceTarget = dailySum * days;
         const actual = actualByPerson.get(p.id) ?? 0;
         const percent =
-          paceTarget > 0 ? Math.round((actual / paceTarget) * 100) : 0;
+          weeklyTarget > 0 ? Math.round((actual / weeklyTarget) * 100) : 0;
         return {
           id: p.id,
           first_name: p.first_name,
           actual,
-          paceTarget,
+          weeklyTarget,
           percent,
         };
       });
