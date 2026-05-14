@@ -25,6 +25,9 @@ type Status =
   | "sim-done"
   | "uploading"
   | "saved"
+  | "extracting"
+  | "extraction-complete"
+  | "extraction-failed"
   | "error";
 
 type Props = {
@@ -123,21 +126,52 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       .from(BUCKET)
       .getPublicUrl(upload.data.path);
 
-    const insert = await supabase.from("business_card_scans").insert({
-      salesperson_id: salesperson.id,
-      salesperson_name: salesperson.first_name,
-      image_url: publicUrl.publicUrl,
-      status: "processing",
-      is_test_data: true,
-    });
+    const insert = await supabase
+      .from("business_card_scans")
+      .insert({
+        salesperson_id: salesperson.id,
+        salesperson_name: salesperson.first_name,
+        image_url: publicUrl.publicUrl,
+        status: "processing",
+        is_test_data: true,
+      })
+      .select("id")
+      .single();
 
-    if (insert.error) {
-      setErrorMessage(`Save failed: ${insert.error.message}`);
+    if (insert.error || !insert.data) {
+      setErrorMessage(
+        `Save failed: ${insert.error?.message ?? "no row returned"}`,
+      );
       setStatus("error");
       return;
     }
 
     setStatus("saved");
+
+    // Phase 5D: kick off server-side AI extraction. Test-account-only — the
+    // /api/business-card/process handler additionally enforces is_test_data.
+    // Extraction failures must NOT undo the saved scan; the row stays for
+    // manual verification either way.
+    const scanId = insert.data.id as string;
+    // Brief pause so testers can read "Saved for verification" before the UI
+    // transitions to "Extracting contact details…".
+    await new Promise((r) => setTimeout(r, 600));
+    setStatus("extracting");
+
+    try {
+      const res = await fetch("/api/business-card/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scanId }),
+      });
+      if (!res.ok) {
+        setStatus("extraction-failed");
+        return;
+      }
+      setStatus("extraction-complete");
+    } catch {
+      setStatus("extraction-failed");
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -178,33 +212,50 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     status === "sim-step2" ||
     status === "sim-done";
 
-  const showProgress = isSim || status === "uploading" || status === "saved";
+  const showProgress =
+    isSim ||
+    status === "uploading" ||
+    status === "saved" ||
+    status === "extracting" ||
+    status === "extraction-complete" ||
+    status === "extraction-failed";
 
   const progressLabel =
     status === "uploading"
-      ? "Uploading…"
+      ? "Uploading image…"
       : status === "saved"
         ? "Saved for verification"
-        : status === "sim-step1"
-          ? "Simulation: step 1 of 3"
-          : status === "sim-step2"
-            ? "Simulation: step 2 of 3"
-            : status === "sim-done"
-              ? "Simulation complete — no file was uploaded or stored"
-              : "";
+        : status === "extracting"
+          ? "Extracting contact details…"
+          : status === "extraction-complete"
+            ? "AI extraction complete"
+            : status === "extraction-failed"
+              ? "Saved, but AI extraction failed."
+              : status === "sim-step1"
+                ? "Simulation: step 1 of 3"
+                : status === "sim-step2"
+                  ? "Simulation: step 2 of 3"
+                  : status === "sim-done"
+                    ? "Simulation complete — no file was uploaded or stored"
+                    : "";
 
   const progressPercent =
     status === "uploading"
-      ? "66%"
+      ? "25%"
       : status === "saved"
-        ? "100%"
-        : status === "sim-step1"
-          ? "33%"
-          : status === "sim-step2"
-            ? "66%"
-            : status === "sim-done"
-              ? "100%"
-              : "0%";
+        ? "50%"
+        : status === "extracting"
+          ? "75%"
+          : status === "extraction-complete" ||
+              status === "extraction-failed"
+            ? "100%"
+            : status === "sim-step1"
+              ? "33%"
+              : status === "sim-step2"
+                ? "66%"
+                : status === "sim-done"
+                  ? "100%"
+                  : "0%";
 
   return (
     <Card>
@@ -271,6 +322,16 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
                 A reviewer will confirm the details.
               </p>
             )}
+            {status === "extraction-complete" && (
+              <p className="text-sm text-muted-foreground">
+                A reviewer will confirm the extracted details.
+              </p>
+            )}
+            {status === "extraction-failed" && (
+              <p className="text-sm text-muted-foreground">
+                The image is saved for manual verification.
+              </p>
+            )}
           </div>
         )}
 
@@ -284,7 +345,8 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
         )}
 
         <div className="flex flex-wrap gap-2">
-          {(status === "saved" ||
+          {(status === "extraction-complete" ||
+            status === "extraction-failed" ||
             status === "sim-done" ||
             status === "error") && (
             <Button type="button" variant="outline" onClick={reset}>
@@ -292,7 +354,11 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
             </Button>
           )}
           <Button type="button" variant="ghost" onClick={close}>
-            {status === "saved" || status === "sim-done" ? "Close" : "Cancel"}
+            {status === "extraction-complete" ||
+            status === "extraction-failed" ||
+            status === "sim-done"
+              ? "Close"
+              : "Cancel"}
           </Button>
         </div>
       </CardContent>
