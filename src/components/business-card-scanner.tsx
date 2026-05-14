@@ -217,29 +217,43 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {status === "idle" && (
-          <div className="space-y-2">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="space-y-3">
+            <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-6 text-center transition-colors hover:border-primary hover:bg-primary/10 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40">
+              <Camera aria-hidden="true" className="size-6 text-primary" />
+              <span className="text-base font-semibold text-primary">
+                Upload or Take Photo
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Choose a photo from your library or take a new photo on your
+                phone.
+              </span>
               <input
                 type="file"
                 accept="image/*"
                 capture="environment"
                 onChange={handleFileChange}
-                className="block text-sm"
+                className="sr-only"
               />
+            </label>
+
+            <div className="flex flex-col items-start gap-1">
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
+                size="sm"
                 onClick={runSimulatedCapture}
-                aria-label="Capture photo — demo (simulated, not saved)"
+                aria-label="Capture photo — demo only, nothing is uploaded or stored"
+                className="text-muted-foreground"
               >
-                Capture photo — demo
+                Capture photo
+                <span className="ml-2 rounded-full border border-muted-foreground/30 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
+                  Demo only
+                </span>
               </Button>
+              <p className="text-xs text-muted-foreground">
+                Demo only — simulation, nothing is uploaded or stored.
+              </p>
             </div>
-            <p className="text-xs text-muted-foreground">
-              The file input opens your camera or photo library and saves the
-              chosen image. <strong>Capture photo — demo</strong> is a
-              simulation only — nothing is uploaded or stored.
-            </p>
           </div>
         )}
 
