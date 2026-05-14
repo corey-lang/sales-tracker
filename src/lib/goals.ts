@@ -49,6 +49,15 @@ export function businessWeekToDateRange(today = new Date()): {
 // positive target. This intentionally treats each activity equally rather
 // than summing raw counts, so high-volume activities (e.g. impressions)
 // don't dominate lower-volume ones (e.g. office visits).
+//
+// Overachievement gets diminishing returns: anything past 100% only counts
+// at 20% of its excess (150% → 110%, 200% → 120%). This keeps blowout days
+// on one activity from masking misses on others.
+function diminishOverachievement(percent: number): number {
+  if (percent <= 100) return percent;
+  return 100 + (percent - 100) * 0.2;
+}
+
 export function averagePercent<K extends string>(
   actuals: Partial<Record<K, number>>,
   targets: Partial<Record<K, number>>,
@@ -60,7 +69,7 @@ export function averagePercent<K extends string>(
     const target = Number(targets[k] ?? 0);
     if (target <= 0) continue;
     const actual = Number(actuals[k] ?? 0);
-    sum += (actual / target) * 100;
+    sum += diminishOverachievement((actual / target) * 100);
     count += 1;
   }
   if (count === 0) return null;
