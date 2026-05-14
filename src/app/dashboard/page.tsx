@@ -19,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { BusinessCardScanner } from "@/components/business-card-scanner";
 import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { MiniLeaderboardCard } from "@/components/mini-leaderboard-card";
@@ -96,11 +97,6 @@ export default function DashboardPage() {
               <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
                 Hi, {salesperson.first_name}
               </h1>
-              {/* TODO(temp): remove once role detection is confirmed. */}
-              <p className="text-xs text-muted-foreground">
-                debug · name={salesperson.first_name} · role={salesperson.role} ·
-                id={salesperson.id}
-              </p>
             </div>
             <Image
               src="/logo.png"
@@ -143,6 +139,10 @@ export default function DashboardPage() {
           Leaderboard
         </Link>
       </header>
+
+      {salesperson.role === "ae" && (
+        <BusinessCardScanner salesperson={salesperson} />
+      )}
 
       <MessagesCard salespersonId={salesperson.id} />
 

@@ -83,8 +83,6 @@ export default function Home() {
       .eq("first_name", name)
       .maybeSingle();
     setLoading(false);
-    // TODO(temp): remove once role resolution is confirmed.
-    console.log("[login-debug] typed=%o matched=%o error=%o", name, data, lookupErr);
     if (lookupErr) {
       setError(lookupErr.message);
       return;
