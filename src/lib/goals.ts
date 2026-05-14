@@ -43,6 +43,30 @@ export function businessWeekToDateRange(today = new Date()): {
   };
 }
 
+// Score = unweighted average of per-activity completion percents
+// (actual / target × 100). Activities with target ≤ 0 are skipped so they
+// don't drag the average toward 0. Returns null when no activity has a
+// positive target. This intentionally treats each activity equally rather
+// than summing raw counts, so high-volume activities (e.g. impressions)
+// don't dominate lower-volume ones (e.g. office visits).
+export function averagePercent<K extends string>(
+  actuals: Partial<Record<K, number>>,
+  targets: Partial<Record<K, number>>,
+  keys: readonly K[],
+): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const k of keys) {
+    const target = Number(targets[k] ?? 0);
+    if (target <= 0) continue;
+    const actual = Number(actuals[k] ?? 0);
+    sum += (actual / target) * 100;
+    count += 1;
+  }
+  if (count === 0) return null;
+  return Math.round(sum / count);
+}
+
 export function progressColor(percent: number): {
   bar: string;
   text: string;

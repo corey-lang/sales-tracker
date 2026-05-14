@@ -6,7 +6,7 @@ import { eachDayOfInterval, isWeekend, parseISO } from "date-fns";
 import { supabase } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { formatDateMDY } from "@/lib/dates";
-import { progressColor } from "@/lib/goals";
+import { averagePercent, progressColor } from "@/lib/goals";
 
 import {
   Card,
@@ -26,6 +26,8 @@ export const ADMIN_ACTIVITY_KEYS = [
   { key: "team_meetings", label: "Mtgs" },
   { key: "gold_list_touches", label: "Gold" },
 ] as const;
+
+const ADMIN_KEY_NAMES = ADMIN_ACTIVITY_KEYS.map((a) => a.key);
 
 export type AdminKey = (typeof ADMIN_ACTIVITY_KEYS)[number]["key"];
 export type AdminValues = Record<AdminKey, number>;
@@ -175,26 +177,27 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
     return Math.round((count / expected) * 100);
   };
 
-  // Per-person totals across all activities (for the Total column)
+  // Per-person totals across all activities (for the Total column).
+  // The score is the average of per-activity completion percents so each
+  // activity contributes equally regardless of its raw goal size.
   const perPersonTotals = useMemo(() => {
     const out = new Map<
       string,
-      { count: number; expected: number; percent: number | null }
+      { count: number; percent: number | null }
     >();
     for (const p of baseFilteredPeople) {
       const t = totals.get(p.id) ?? ZERO_ADMIN;
       const goal = goalsByPerson.get(p.id);
       const count = ADMIN_ACTIVITY_KEYS.reduce((s, a) => s + t[a.key], 0);
-      const expected = goal
-        ? ADMIN_ACTIVITY_KEYS.reduce(
-            (s, a) => s + Number(goal[a.key] ?? 0),
-            0,
-          )
-        : 0;
+      const expecteds: AdminValues = { ...ZERO_ADMIN };
+      if (goal) {
+        for (const a of ADMIN_ACTIVITY_KEYS) {
+          expecteds[a.key] = Number(goal[a.key] ?? 0);
+        }
+      }
       out.set(p.id, {
         count,
-        expected,
-        percent: computePercent(count, expected),
+        percent: averagePercent(t, expecteds, ADMIN_KEY_NAMES),
       });
     }
     return out;
@@ -216,12 +219,14 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
     return sorted;
   }, [baseFilteredPeople, perPersonTotals]);
 
-  // Grand totals across filtered AEs (Grand total row)
+  // Grand totals across filtered AEs (Grand total row). `allPercent` is the
+  // average of the per-activity grand-total percents — same logic as the
+  // per-person Total column, so the bottom-right cell stays consistent with
+  // the rest of the row.
   const grand = useMemo(() => {
     const counts: AdminValues = { ...ZERO_ADMIN };
     const expecteds: AdminValues = { ...ZERO_ADMIN };
     let allCount = 0;
-    let allExpected = 0;
     for (const p of baseFilteredPeople) {
       const t = totals.get(p.id) ?? ZERO_ADMIN;
       const goal = goalsByPerson.get(p.id);
@@ -231,10 +236,10 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
         counts[a.key] += c;
         expecteds[a.key] += e;
         allCount += c;
-        allExpected += e;
       }
     }
-    return { counts, expecteds, allCount, allExpected };
+    const allPercent = averagePercent(counts, expecteds, ADMIN_KEY_NAMES);
+    return { counts, expecteds, allCount, allPercent };
   }, [baseFilteredPeople, totals, goalsByPerson]);
 
   return (
@@ -330,12 +335,7 @@ export function TotalsCard({ from, to, salespersonFilter, people }: Props) {
                       <div className="font-semibold tabular-nums">
                         {grand.allCount}
                       </div>
-                      <PercentBelow
-                        percent={computePercent(
-                          grand.allCount,
-                          grand.allExpected,
-                        )}
-                      />
+                      <PercentBelow percent={grand.allPercent} />
                     </td>
                   </tr>
                 )}

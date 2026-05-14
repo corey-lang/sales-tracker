@@ -15,7 +15,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { businessWeekToDateRange, progressColor } from "@/lib/goals";
+import { averagePercent, businessWeekToDateRange, progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -43,9 +43,10 @@ type Standing = {
   first_name: string;
   total: number;
   totals: ActivityValues;
-  weeklyTarget: number;
   percent: number | null;
 };
+
+const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
 
 function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
   const eff = b.effective_from.localeCompare(a.effective_from);
@@ -136,20 +137,18 @@ export default function LeaderboardPage() {
           0,
         );
         const goal = activeGoalFor(p.id, allGoals, todayStr);
-        let weeklyTarget = 0;
+        const weeklyTargets = { ...ZERO_ACTIVITY };
         if (goal) {
           for (const a of ACTIVITIES) {
-            weeklyTarget += Number(goal[a.key as ActivityKey] ?? 0);
+            weeklyTargets[a.key] = Number(goal[a.key as ActivityKey] ?? 0);
           }
         }
-        const percent =
-          weeklyTarget > 0 ? Math.round((total / weeklyTarget) * 100) : null;
+        const percent = averagePercent(totals, weeklyTargets, ACTIVITY_KEYS);
         return {
           id: p.id,
           first_name: p.first_name,
           total,
           totals,
-          weeklyTarget,
           percent,
         };
       });

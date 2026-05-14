@@ -8,10 +8,11 @@ import { Trophy } from "lucide-react";
 import { supabase } from "@/lib/supabase/client";
 import {
   ACTIVITIES,
+  ZERO_ACTIVITY,
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { businessWeekToDateRange, progressColor } from "@/lib/goals";
+import { averagePercent, businessWeekToDateRange, progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -28,10 +29,10 @@ type GoalRow = ActivityValues & {
 type Standing = {
   id: string;
   first_name: string;
-  actual: number;
-  weeklyTarget: number;
   percent: number;
 };
+
+const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
 
 type Props = {
   currentSalespersonId: string;
@@ -106,34 +107,28 @@ export function MiniLeaderboardCard({
       >;
       const allGoals = (goalsRes.data ?? []) as GoalRow[];
 
-      const actualByPerson = new Map<string, number>();
-      for (const p of people) actualByPerson.set(p.id, 0);
+      const totalsByPerson = new Map<string, ActivityValues>();
+      for (const p of people) totalsByPerson.set(p.id, { ...ZERO_ACTIVITY });
       for (const e of entries) {
-        let sum = actualByPerson.get(e.salesperson_id) ?? 0;
+        const bucket = totalsByPerson.get(e.salesperson_id);
+        if (!bucket) continue;
         for (const a of ACTIVITIES) {
-          sum += Number(e[a.key as ActivityKey] ?? 0);
+          bucket[a.key] += Number(e[a.key as ActivityKey] ?? 0);
         }
-        actualByPerson.set(e.salesperson_id, sum);
       }
 
       const result: Standing[] = people.map((p) => {
+        const totals = totalsByPerson.get(p.id) ?? { ...ZERO_ACTIVITY };
         const goal = activeGoalFor(p.id, allGoals, todayStr);
-        let weeklyTarget = 0;
+        const weeklyTargets = { ...ZERO_ACTIVITY };
         if (goal) {
           for (const a of ACTIVITIES) {
-            weeklyTarget += Number(goal[a.key as ActivityKey] ?? 0);
+            weeklyTargets[a.key] = Number(goal[a.key as ActivityKey] ?? 0);
           }
         }
-        const actual = actualByPerson.get(p.id) ?? 0;
         const percent =
-          weeklyTarget > 0 ? Math.round((actual / weeklyTarget) * 100) : 0;
-        return {
-          id: p.id,
-          first_name: p.first_name,
-          actual,
-          weeklyTarget,
-          percent,
-        };
+          averagePercent(totals, weeklyTargets, ACTIVITY_KEYS) ?? 0;
+        return { id: p.id, first_name: p.first_name, percent };
       });
 
       result.sort(
