@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { format, parseISO } from "date-fns";
-import { RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw, X } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
 
@@ -51,11 +51,14 @@ function formatConfidence(value: number | null): string | null {
   return `${Math.round(pct)}%`;
 }
 
+type Preview = { url: string; name: string };
+
 export function VerificationCenter() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -92,6 +95,7 @@ export function VerificationCenter() {
   };
 
   return (
+    <>
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -137,19 +141,37 @@ export function VerificationCenter() {
             {scans.map((scan) => (
               <li
                 key={scan.id}
-                className="flex flex-col gap-3 rounded-lg border bg-card p-3 sm:flex-row sm:items-start"
+                className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start"
               >
                 <a
                   href={scan.image_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="block shrink-0 self-start"
+                  onClick={(event) => {
+                    if (
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey ||
+                      event.button !== 0
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    setPreview({
+                      url: scan.image_url,
+                      name: scan.salesperson_name ?? "unknown",
+                    });
+                  }}
+                  className="group block w-full shrink-0 self-start overflow-hidden rounded-md border bg-muted transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-72 md:w-96"
+                  aria-label="Expand business card image"
+                  title="Click to expand · ⌘/Ctrl-click to open in new tab"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={scan.image_url}
                     alt={`Business card scanned by ${scan.salesperson_name ?? "unknown"}`}
-                    className="h-32 w-32 rounded-md border object-cover sm:h-28 sm:w-40"
+                    className="block h-auto w-full"
                     loading="lazy"
                   />
                 </a>
@@ -173,6 +195,73 @@ export function VerificationCenter() {
         )}
       </CardContent>
     </Card>
+    {preview && (
+      <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
+    )}
+    </>
+  );
+}
+
+function ImageLightbox({
+  preview,
+  onClose,
+}: {
+  preview: Preview;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Business card scanned by ${preview.name}`}
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+    >
+      <div
+        className="relative max-h-full"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={preview.url}
+          alt={`Business card scanned by ${preview.name}`}
+          className="block max-h-[85vh] max-w-[95vw] rounded-md object-contain shadow-2xl"
+        />
+        <div className="absolute right-2 top-2 flex items-center gap-2">
+          <a
+            href={preview.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            className="inline-flex items-center gap-1 rounded-md bg-black/70 px-3 py-1.5 text-xs font-medium text-white hover:bg-black/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+            Open in new tab
+          </a>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close preview"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-black/70 text-white hover:bg-black/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <X aria-hidden="true" className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
