@@ -59,6 +59,8 @@ export function VerificationCenter() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setError(null);
@@ -93,6 +95,44 @@ export function VerificationCenter() {
     await load();
     setRefreshing(false);
   };
+
+  const handleRetry = useCallback(
+    async (scanId: string) => {
+      setRetryingId(scanId);
+      setRetryErrors((prev) => {
+        if (!(scanId in prev)) return prev;
+        const next = { ...prev };
+        delete next[scanId];
+        return next;
+      });
+      try {
+        const res = await fetch("/api/business-card/process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId }),
+        });
+        if (!res.ok) {
+          let message = `Retry failed (${res.status})`;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (typeof data.error === "string" && data.error.length > 0) {
+              message = data.error;
+            }
+          } catch {
+            // ignore parse error; keep status-based message
+          }
+          throw new Error(message);
+        }
+        await load();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setRetryErrors((prev) => ({ ...prev, [scanId]: message }));
+      } finally {
+        setRetryingId((current) => (current === scanId ? null : current));
+      }
+    },
+    [load],
+  );
 
   return (
     <>
@@ -187,6 +227,13 @@ export function VerificationCenter() {
                   <p className="text-sm text-muted-foreground">
                     Uploaded {formatTimestamp(scan.created_at)}
                   </p>
+                  <RetryAIControl
+                    extractionStatus={scan.extraction_status}
+                    retrying={retryingId === scan.id}
+                    disabled={retryingId !== null && retryingId !== scan.id}
+                    error={retryErrors[scan.id] ?? null}
+                    onRetry={() => void handleRetry(scan.id)}
+                  />
                   <ExtractedFields scan={scan} />
                 </div>
               </li>
@@ -261,6 +308,52 @@ function ImageLightbox({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RetryAIControl({
+  extractionStatus,
+  retrying,
+  disabled,
+  error,
+  onRetry,
+}: {
+  extractionStatus: string | null;
+  retrying: boolean;
+  disabled: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  const normalized = (extractionStatus ?? "pending").toLowerCase();
+  if (normalized !== "failed" && normalized !== "pending") {
+    return null;
+  }
+
+  return (
+    <div className="space-y-1">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={onRetry}
+        disabled={retrying || disabled}
+        aria-label="Retry AI extraction for this scan"
+      >
+        <RefreshCw
+          aria-hidden="true"
+          className={retrying ? "animate-spin" : ""}
+        />
+        {retrying ? "Retrying…" : "Retry AI"}
+      </Button>
+      {error && (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+        >
+          {error}
+        </p>
+      )}
     </div>
   );
 }
