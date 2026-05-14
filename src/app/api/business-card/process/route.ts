@@ -112,8 +112,15 @@ async function callOpenAI(
     }),
   });
 
+  // TEMP DIAGNOSTIC: log status (and body on failure) so Vercel shows the
+  // real reason OpenAI rejected the call. Remove with the other [bc/process]
+  // logs.
+  console.log(`[bc/process] OpenAI response status=${res.status} model=${model}`);
   if (!res.ok) {
     const body = await res.text();
+    console.error(
+      `[bc/process] OpenAI error body (truncated): ${body.slice(0, 500)}`,
+    );
     throw new Error(
       `OpenAI request failed (${res.status}): ${body.slice(0, 500)}`,
     );
@@ -137,6 +144,10 @@ async function callOpenAI(
 }
 
 export async function POST(req: Request) {
+  // TEMP DIAGNOSTIC LOGS — remove once production extraction is debugged.
+  // Logs only presence/absence and metadata, never secret values.
+  const LOG = "[bc/process]";
+
   let scanId: string | undefined;
   try {
     const body = (await req.json()) as { scanId?: unknown };
@@ -144,10 +155,12 @@ export async function POST(req: Request) {
       scanId = body.scanId;
     }
   } catch {
+    console.error(`${LOG} invalid JSON body`);
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
   if (!scanId) {
+    console.error(`${LOG} missing scanId in request body`);
     return Response.json(
       { error: "Missing scanId in request body" },
       { status: 400 },
@@ -155,7 +168,15 @@ export async function POST(req: Request) {
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
+  const hasOpenAIKey = Boolean(apiKey);
+  const hasServiceRoleKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const hasAnonKey = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  const hasSupabaseUrl = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  console.log(
+    `${LOG} env scanId=${scanId} hasOpenAIKey=${hasOpenAIKey} hasServiceRoleKey=${hasServiceRoleKey} hasAnonKey=${hasAnonKey} hasSupabaseUrl=${hasSupabaseUrl}`,
+  );
   if (!apiKey) {
+    console.error(`${LOG} OPENAI_API_KEY missing`);
     return Response.json(
       { error: "OPENAI_API_KEY is not configured on the server" },
       { status: 500 },
@@ -171,6 +192,9 @@ export async function POST(req: Request) {
     .single();
 
   if (scanRes.error || !scanRes.data) {
+    console.error(
+      `${LOG} scan lookup failed scanId=${scanId} error=${scanRes.error?.message ?? "no data"}`,
+    );
     return Response.json(
       { error: scanRes.error?.message ?? "Scan not found" },
       { status: 404 },
@@ -178,13 +202,18 @@ export async function POST(req: Request) {
   }
 
   const scan = scanRes.data;
+  console.log(
+    `${LOG} scan found scanId=${scanId} hasImageUrl=${Boolean(scan.image_url)} isTestData=${scan.is_test_data}`,
+  );
   if (!scan.is_test_data) {
+    console.error(`${LOG} scan rejected — is_test_data=false scanId=${scanId}`);
     return Response.json(
       { error: "AI extraction is restricted to test data" },
       { status: 403 },
     );
   }
   if (!scan.image_url) {
+    console.error(`${LOG} scan rejected — missing image_url scanId=${scanId}`);
     return Response.json(
       { error: "Scan has no image_url" },
       { status: 422 },
@@ -197,6 +226,9 @@ export async function POST(req: Request) {
     .eq("id", scanId)
     .select("id");
   if (procUpd.error) {
+    console.error(
+      `${LOG} mark-processing update failed scanId=${scanId} error=${procUpd.error.message}`,
+    );
     return Response.json(
       {
         error: "Failed to mark scan as processing",
@@ -207,6 +239,9 @@ export async function POST(req: Request) {
     );
   }
   if (!procUpd.data || procUpd.data.length === 0) {
+    console.error(
+      `${LOG} mark-processing affected 0 rows scanId=${scanId} (likely RLS or missing row)`,
+    );
     return Response.json(
       {
         error:
@@ -218,7 +253,11 @@ export async function POST(req: Request) {
   }
 
   try {
+    console.log(`${LOG} calling OpenAI scanId=${scanId}`);
     const extraction = await callOpenAI(scan.image_url, apiKey);
+    console.log(
+      `${LOG} OpenAI extraction parsed scanId=${scanId} confidence=${extraction.ai_confidence ?? "null"}`,
+    );
 
     const upd = await supabase
       .from("business_card_scans")
@@ -252,6 +291,7 @@ export async function POST(req: Request) {
       );
     }
 
+    console.log(`${LOG} completed scanId=${scanId}`);
     return Response.json({
       status: "completed",
       scanId,
@@ -260,13 +300,26 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    await supabase
+    console.error(
+      `${LOG} extraction failed scanId=${scanId} error=${message}`,
+    );
+    const failUpd = await supabase
       .from("business_card_scans")
       .update({
         extraction_status: "failed",
         extraction_error: message,
       })
-      .eq("id", scanId);
+      .eq("id", scanId)
+      .select("id");
+    if (failUpd.error) {
+      console.error(
+        `${LOG} write-failed-status update errored scanId=${scanId} error=${failUpd.error.message}`,
+      );
+    } else if (!failUpd.data || failUpd.data.length === 0) {
+      console.error(
+        `${LOG} write-failed-status affected 0 rows scanId=${scanId} (likely RLS)`,
+      );
+    }
     return Response.json(
       { status: "failed", scanId, error: message },
       { status: 500 },
