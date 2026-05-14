@@ -5,6 +5,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 
 import { supabase } from "@/lib/supabase/client";
+import { isUserRole, type UserRole } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
@@ -78,10 +79,12 @@ export default function Home() {
     // CITEXT makes first_name lookup case-insensitive.
     const { data, error: lookupErr } = await supabase
       .from("salespeople")
-      .select("id, first_name, is_admin, admin_pin")
+      .select("id, first_name, is_admin, admin_pin, role")
       .eq("first_name", name)
       .maybeSingle();
     setLoading(false);
+    // TODO(temp): remove once role resolution is confirmed.
+    console.log("[login-debug] typed=%o matched=%o error=%o", name, data, lookupErr);
     if (lookupErr) {
       setError(lookupErr.message);
       return;
@@ -105,10 +108,16 @@ export default function Home() {
         return;
       }
     }
+    const role: UserRole = isUserRole(data.role)
+      ? data.role
+      : data.is_admin
+        ? "admin"
+        : "ae";
     setSalesperson({
       id: data.id,
       first_name: data.first_name,
       is_admin: !!data.is_admin,
+      role,
     });
     router.push(data.is_admin ? "/admin" : "/dashboard");
   };

@@ -4,6 +4,8 @@ CREATE TABLE salespeople (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   first_name CITEXT NOT NULL UNIQUE,
   location TEXT,
+  role TEXT NOT NULL DEFAULT 'ae'
+    CHECK (role IN ('admin', 'assistant', 'ae')),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

@@ -53,13 +53,38 @@ export default function DashboardPage() {
     );
   }
 
-  const now = new Date();
-  const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
-
   const handleSwitchUser = () => {
     clear();
     router.push("/");
   };
+
+  if (salesperson.role === "assistant") {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 p-4 text-center sm:p-6">
+        <Image
+          src="/logo.png"
+          alt="Elevate Homescriptions"
+          width={180}
+          height={55}
+          priority
+        />
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Hi, {salesperson.first_name}
+          </h1>
+          <p className="text-base text-muted-foreground">
+            Business Card Verification Center coming soon.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={handleSwitchUser}>
+          Log out
+        </Button>
+      </main>
+    );
+  }
+
+  const now = new Date();
+  const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
@@ -71,6 +96,11 @@ export default function DashboardPage() {
               <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
                 Hi, {salesperson.first_name}
               </h1>
+              {/* TODO(temp): remove once role detection is confirmed. */}
+              <p className="text-xs text-muted-foreground">
+                debug · name={salesperson.first_name} · role={salesperson.role} ·
+                id={salesperson.id}
+              </p>
             </div>
             <Image
               src="/logo.png"
