@@ -94,12 +94,14 @@ export default function LeaderboardPage() {
     const { since, through } = businessWeekToDateRange(now);
 
     Promise.all([
-      // Admins (is_admin=true) and test accounts (is_test=true) don't compete.
+      // Admins (is_admin=true), assistants (role='assistant'), and test
+      // accounts (is_test=true) don't compete.
       supabase
         .from("salespeople")
         .select("id, first_name")
         .eq("is_admin", false)
-        .eq("is_test", false),
+        .eq("is_test", false)
+        .neq("role", "assistant"),
       supabase
         .from("activity_entries")
         .select(["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","))

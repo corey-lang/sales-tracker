@@ -25,6 +25,7 @@ import { MyWeekCard } from "@/components/my-week-card";
 import { MiniLeaderboardCard } from "@/components/mini-leaderboard-card";
 import { EditEntryCard } from "@/components/edit-entry-card";
 import { MessagesCard } from "@/components/messages-card";
+import { VerificationCenter } from "@/components/verification-center";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -61,25 +62,28 @@ export default function DashboardPage() {
 
   if (salesperson.role === "assistant") {
     return (
-      <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 p-4 text-center sm:p-6">
-        <Image
-          src="/logo.png"
-          alt="Elevate Homescriptions"
-          width={180}
-          height={55}
-          priority
-        />
-        <div className="space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Hi, {salesperson.first_name}
-          </h1>
-          <p className="text-base text-muted-foreground">
-            Business Card Verification Center coming soon.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={handleSwitchUser}>
-          Log out
-        </Button>
+      <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Hi, {salesperson.first_name}
+              </h1>
+            </div>
+            <Image
+              src="/logo.png"
+              alt="Elevate Homescriptions"
+              width={180}
+              height={55}
+              priority
+              className="shrink-0"
+            />
+          </div>
+          <Button variant="outline" size="sm" onClick={handleSwitchUser}>
+            Log out
+          </Button>
+        </header>
+        <VerificationCenter />
       </main>
     );
   }

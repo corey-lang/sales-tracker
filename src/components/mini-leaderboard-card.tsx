@@ -84,7 +84,8 @@ export function MiniLeaderboardCard({
         .from("salespeople")
         .select("id, first_name")
         .eq("is_admin", false)
-        .eq("is_test", false),
+        .eq("is_test", false)
+        .neq("role", "assistant"),
       supabase
         .from("activity_entries")
         .select(

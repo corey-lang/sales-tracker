@@ -54,12 +54,14 @@ export default function AdminPage() {
   useEffect(() => {
     let cancelled = false;
     // Admins (Corey, Ryan) don't log activity, so they shouldn't appear in any
-    // admin selector — filters, totals rows, or goal scope.
+    // admin selector — filters, totals rows, or goal scope. Assistants (Tonja)
+    // are also excluded since the AE selector is meant for AEs only.
     // Test account is included but pushed to the bottom.
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("is_admin", false)
+      .neq("role", "assistant")
       .order("is_test", { ascending: true })
       .order("first_name", { ascending: true })
       .then(({ data }) => {
