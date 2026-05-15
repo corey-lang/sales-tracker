@@ -5,6 +5,12 @@ import { format, parseISO } from "date-fns";
 import { ExternalLink, RefreshCw, X } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
+import {
+  CONTACT_BUCKET_LABELS,
+  CONTACT_BUCKET_ORDER,
+  normalizeContactType,
+  type ContactBucket,
+} from "@/lib/contact-type";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +42,49 @@ type Scan = {
   ai_confidence: number | null;
   extraction_status: string | null;
 };
+
+/** A scan with its frontend-derived contact-type bucket attached. */
+type ScanWithBucket = Scan & { contactBucket: ContactBucket };
+
+/** One contact-type subsection within an AE section. */
+type BucketGroup = { bucket: ContactBucket; scans: ScanWithBucket[] };
+
+/** All scans for a single AE, split into contact-type subsections. */
+type AeGroup = { name: string; total: number; buckets: BucketGroup[] };
+
+/**
+ * Groups scans by AE (salesperson_name), then by normalized contact-type
+ * bucket. AEs are sorted alphabetically; scans keep their incoming order
+ * (newest first). Empty buckets are omitted.
+ */
+function groupScansByAe(scans: Scan[]): AeGroup[] {
+  const byAe = new Map<string, ScanWithBucket[]>();
+
+  for (const scan of scans) {
+    const withBucket: ScanWithBucket = {
+      ...scan,
+      contactBucket: normalizeContactType(scan.extracted_contact_type),
+    };
+    const name = scan.salesperson_name ?? "Unknown";
+    const existing = byAe.get(name);
+    if (existing) {
+      existing.push(withBucket);
+    } else {
+      byAe.set(name, [withBucket]);
+    }
+  }
+
+  return [...byAe.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, aeScans]) => {
+      const buckets: BucketGroup[] = CONTACT_BUCKET_ORDER.map((bucket) => ({
+        bucket,
+        scans: aeScans.filter((scan) => scan.contactBucket === bucket),
+      })).filter((group) => group.scans.length > 0);
+
+      return { name, total: aeScans.length, buckets };
+    });
+}
 
 function formatTimestamp(value: string): string {
   try {
@@ -177,68 +226,46 @@ export function VerificationCenter() {
         ) : scans.length === 0 ? (
           <p className="text-sm text-muted-foreground">No scans yet.</p>
         ) : (
-          <ul className="space-y-3">
-            {scans.map((scan) => (
-              <li
-                key={scan.id}
-                className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start"
+          <div className="space-y-6">
+            {groupScansByAe(scans).map((aeGroup) => (
+              <section
+                key={aeGroup.name}
+                className="rounded-lg border bg-muted/30 p-3 sm:p-4"
               >
-                <a
-                  href={scan.image_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(event) => {
-                    if (
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey ||
-                      event.button !== 0
-                    ) {
-                      return;
-                    }
-                    event.preventDefault();
-                    setPreview({
-                      url: scan.image_url,
-                      name: scan.salesperson_name ?? "unknown",
-                    });
-                  }}
-                  className="group block w-full shrink-0 self-start overflow-hidden rounded-md border bg-muted transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-72 md:w-96"
-                  aria-label="Expand business card image"
-                  title="Click to expand · ⌘/Ctrl-click to open in new tab"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={scan.image_url}
-                    alt={`Business card scanned by ${scan.salesperson_name ?? "unknown"}`}
-                    className="block h-auto w-full"
-                    loading="lazy"
-                  />
-                </a>
-                <div className="min-w-0 flex-1 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-base font-semibold">
-                      {scan.salesperson_name ?? "Unknown"}
-                    </span>
-                    <StatusBadge status={scan.status} />
-                    <ExtractionStatusBadge status={scan.extraction_status} />
-                    {scan.is_test_data && <TestDataBadge />}
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Uploaded {formatTimestamp(scan.created_at)}
-                  </p>
-                  <RetryAIControl
-                    extractionStatus={scan.extraction_status}
-                    retrying={retryingId === scan.id}
-                    disabled={retryingId !== null && retryingId !== scan.id}
-                    error={retryErrors[scan.id] ?? null}
-                    onRetry={() => void handleRetry(scan.id)}
-                  />
-                  <ExtractedFields scan={scan} />
+                <h3 className="text-lg font-semibold">
+                  {aeGroup.name}{" "}
+                  <span className="text-muted-foreground">
+                    ({aeGroup.total})
+                  </span>
+                </h3>
+                <div className="mt-3 space-y-5">
+                  {aeGroup.buckets.map((bucketGroup) => (
+                    <div key={bucketGroup.bucket}>
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {CONTACT_BUCKET_LABELS[bucketGroup.bucket]} (
+                        {bucketGroup.scans.length})
+                      </h4>
+                      <ul className="mt-2 space-y-3">
+                        {bucketGroup.scans.map((scan) => (
+                          <ScanCard
+                            key={scan.id}
+                            scan={scan}
+                            retrying={retryingId === scan.id}
+                            retryDisabled={
+                              retryingId !== null && retryingId !== scan.id
+                            }
+                            retryError={retryErrors[scan.id] ?? null}
+                            onRetry={() => void handleRetry(scan.id)}
+                            onPreview={setPreview}
+                          />
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
                 </div>
-              </li>
+              </section>
             ))}
-          </ul>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -246,6 +273,80 @@ export function VerificationCenter() {
       <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
     )}
     </>
+  );
+}
+
+function ScanCard({
+  scan,
+  retrying,
+  retryDisabled,
+  retryError,
+  onRetry,
+  onPreview,
+}: {
+  scan: Scan;
+  retrying: boolean;
+  retryDisabled: boolean;
+  retryError: string | null;
+  onRetry: () => void;
+  onPreview: (preview: Preview) => void;
+}) {
+  return (
+    <li className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start">
+      <a
+        href={scan.image_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(event) => {
+          if (
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey ||
+            event.button !== 0
+          ) {
+            return;
+          }
+          event.preventDefault();
+          onPreview({
+            url: scan.image_url,
+            name: scan.salesperson_name ?? "unknown",
+          });
+        }}
+        className="group block w-full shrink-0 self-start overflow-hidden rounded-md border bg-muted transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-72 md:w-96"
+        aria-label="Expand business card image"
+        title="Click to expand · ⌘/Ctrl-click to open in new tab"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={scan.image_url}
+          alt={`Business card scanned by ${scan.salesperson_name ?? "unknown"}`}
+          className="block h-auto w-full"
+          loading="lazy"
+        />
+      </a>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-base font-semibold">
+            {scan.salesperson_name ?? "Unknown"}
+          </span>
+          <StatusBadge status={scan.status} />
+          <ExtractionStatusBadge status={scan.extraction_status} />
+          {scan.is_test_data && <TestDataBadge />}
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Uploaded {formatTimestamp(scan.created_at)}
+        </p>
+        <RetryAIControl
+          extractionStatus={scan.extraction_status}
+          retrying={retrying}
+          disabled={retryDisabled}
+          error={retryError}
+          onRetry={onRetry}
+        />
+        <ExtractedFields scan={scan} />
+      </div>
+    </li>
   );
 }
 
