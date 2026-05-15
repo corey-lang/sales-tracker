@@ -28,9 +28,6 @@ type RecentUpload = {
   status: RecentStatus;
 };
 
-/** Progress states for the camera-capture simulation (demo only — never saves). */
-type SimStatus = "idle" | "sim-step1" | "sim-step2" | "sim-done";
-
 /** Badge label + styling for each background-AI state in the recent list. */
 const RECENT_STATUS_META: Record<
   RecentStatus,
@@ -96,7 +93,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
   const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [recent, setRecent] = useState<RecentUpload[]>([]);
-  const [simStatus, setSimStatus] = useState<SimStatus>("idle");
 
   /** Updates one recent upload's background-AI status by scan id. */
   const setRecentStatus = useCallback(
@@ -133,15 +129,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     },
     [setRecentStatus],
   );
-
-  const runSimulatedCapture = () => {
-    // Placeholder for the future camera-capture path. Intentionally does NOT
-    // persist anything — Phase 3 only saves when a real file is uploaded.
-    setErrorMessage(null);
-    setSimStatus("sim-step1");
-    setTimeout(() => setSimStatus("sim-step2"), 700);
-    setTimeout(() => setSimStatus("sim-done"), 1800);
-  };
 
   const handleFile = async (file: File) => {
     setErrorMessage(null);
@@ -218,7 +205,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     setUploading(false);
     setErrorMessage(null);
     setRecent([]);
-    setSimStatus("idle");
   };
 
   if (!open) {
@@ -258,45 +244,23 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       <CardContent className="space-y-4">
         {/* Upload control stays available at all times so the AE can scan
             card after card without waiting for AI extraction. */}
-        <div className="space-y-3">
-          <label className={labelClass}>
-            <Camera aria-hidden="true" className="size-6 text-primary" />
-            <span className="text-base font-semibold text-primary">
-              {uploading ? "Saving card…" : "Upload or Take Photo"}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              Choose a photo from your library or take a new photo on your
-              phone.
-            </span>
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handleFileChange}
-              disabled={uploading}
-              className="sr-only"
-            />
-          </label>
-
-          <div className="flex flex-col items-start gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={runSimulatedCapture}
-              aria-label="Capture photo — demo only, nothing is uploaded or stored"
-              className="text-muted-foreground"
-            >
-              Capture photo
-              <span className="ml-2 rounded-full border border-muted-foreground/30 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
-                Demo only
-              </span>
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Demo only — simulation, nothing is uploaded or stored.
-            </p>
-          </div>
-        </div>
+        <label className={labelClass}>
+          <Camera aria-hidden="true" className="size-6 text-primary" />
+          <span className="text-base font-semibold text-primary">
+            {uploading ? "Saving card…" : "Upload or Take Photo"}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            Choose a photo from your library or take a new photo on your phone.
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handleFileChange}
+            disabled={uploading}
+            className="sr-only"
+          />
+        </label>
 
         {recent.length > 0 && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
@@ -331,8 +295,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
           </div>
         )}
 
-        {simStatus !== "idle" && <SimulationProgress status={simStatus} />}
-
         {errorMessage && (
           <p
             role="alert"
@@ -349,33 +311,5 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-/** Small progress readout for the camera-capture simulation (demo only). */
-function SimulationProgress({
-  status,
-}: {
-  status: Exclude<SimStatus, "idle">;
-}) {
-  const label =
-    status === "sim-step1"
-      ? "Simulation: step 1 of 3"
-      : status === "sim-step2"
-        ? "Simulation: step 2 of 3"
-        : "Simulation complete — no file was uploaded or stored";
-  const percent =
-    status === "sim-step1" ? "33%" : status === "sim-step2" ? "66%" : "100%";
-
-  return (
-    <div className="space-y-2">
-      <p className="text-sm font-medium text-muted-foreground">{label}</p>
-      <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
-        <div
-          className="h-full bg-muted-foreground/40 transition-all duration-500"
-          style={{ width: percent }}
-        />
-      </div>
-    </div>
   );
 }
