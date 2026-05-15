@@ -23,7 +23,7 @@ import { BusinessCardScanner } from "@/components/business-card-scanner";
 import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { MiniLeaderboardCard } from "@/components/mini-leaderboard-card";
-import { EditEntryCard } from "@/components/edit-entry-card";
+import { EditWeekCard } from "@/components/edit-week-card";
 import { MessagesCard } from "@/components/messages-card";
 import { VerificationCenter } from "@/components/verification-center";
 
@@ -180,7 +180,7 @@ export default function DashboardPage() {
         refreshKey={entryVersion}
       />
 
-      <EditEntryCard
+      <EditWeekCard
         salespersonId={salesperson.id}
         refreshKey={entryVersion}
         onSaved={() => setEntryVersion((n) => n + 1)}

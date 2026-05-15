@@ -118,7 +118,7 @@ export function DailyEntryForm({
       return false;
     }
     // Optimistic update to local cache; entryVersion refetch will reconcile
-    // with any concurrent writes from EditEntryCard etc.
+    // with any concurrent writes from EditWeekCard etc.
     const { isBusinessDay } = businessWeekToDateRange();
     if (isBusinessDay) {
       setWeeklyTotals((v) => ({ ...v, [key]: v[key] + delta }));

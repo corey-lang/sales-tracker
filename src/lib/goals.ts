@@ -1,8 +1,9 @@
-import { addDays, format, isWeekend, startOfWeek } from "date-fns";
+import { addDays, format, isWeekend, startOfWeek, subWeeks } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import type { ActivityKey, ActivityValues } from "@/lib/activities";
 import { ZERO_ACTIVITY } from "@/lib/activities";
+import { formatDateMDY } from "@/lib/dates";
 
 // The `weekly_goals` table stores Monday-Friday weekly targets.
 // `salesperson_id IS NULL` = global default; a UUID = per-person override.
@@ -41,6 +42,39 @@ export function businessWeekToDateRange(today = new Date()): {
     through: format(through, "yyyy-MM-dd"),
     isBusinessDay: !isWeekend(today),
   };
+}
+
+// One Monday-Friday business week, identified by its Monday (`weekStart`).
+// Matches businessWeekToDateRange / weekStartsOn:1 used everywhere else, so
+// the week boundary is Monday 00:00 — a Sunday still belongs to the week that
+// began the prior Monday.
+export type WeekOption = {
+  weekStart: string; // Monday, yyyy-MM-dd
+  friday: string; // Friday, yyyy-MM-dd
+  label: string; // "MM-dd-yyyy – MM-dd-yyyy"
+  isCurrent: boolean;
+};
+
+// The current Mon-Fri week plus the prior `count - 1` weeks, newest first.
+// Powers the AE "Edit or backfill week" selector. No future weeks — this is
+// for editing/backfilling, and the rest of the app only reports up to today.
+export function recentBusinessWeeks(
+  count = 12,
+  today = new Date(),
+): WeekOption[] {
+  const currentMonday = startOfWeek(today, { weekStartsOn: 1 });
+  const out: WeekOption[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const monday = subWeeks(currentMonday, i);
+    const friday = addDays(monday, WORK_DAYS_PER_WEEK - 1);
+    out.push({
+      weekStart: format(monday, "yyyy-MM-dd"),
+      friday: format(friday, "yyyy-MM-dd"),
+      label: `${formatDateMDY(monday)} – ${formatDateMDY(friday)}`,
+      isCurrent: i === 0,
+    });
+  }
+  return out;
 }
 
 // Score = unweighted average of per-activity completion percents
