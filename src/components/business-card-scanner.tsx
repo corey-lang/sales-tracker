@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Camera } from "lucide-react";
 
 import { isTestAccount } from "@/lib/permissions";
@@ -18,17 +18,44 @@ import {
 
 const BUCKET = "business-card-scans";
 
-type Status =
-  | "idle"
-  | "sim-step1"
-  | "sim-step2"
-  | "sim-done"
-  | "uploading"
-  | "saved"
-  | "extracting"
-  | "extraction-complete"
-  | "extraction-failed"
-  | "error";
+/** Background AI state for a single card the AE just uploaded. */
+type RecentStatus = "saved" | "reading" | "complete" | "failed";
+
+/** A card uploaded this session, tracked while AI extraction runs in the background. */
+type RecentUpload = {
+  scanId: string;
+  fileName: string;
+  status: RecentStatus;
+};
+
+/** Progress states for the camera-capture simulation (demo only — never saves). */
+type SimStatus = "idle" | "sim-step1" | "sim-step2" | "sim-done";
+
+/** Badge label + styling for each background-AI state in the recent list. */
+const RECENT_STATUS_META: Record<
+  RecentStatus,
+  { label: string; className: string }
+> = {
+  saved: {
+    label: "Card saved",
+    className:
+      "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+  reading: {
+    label: "AI reading…",
+    className:
+      "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  },
+  complete: {
+    label: "AI complete",
+    className:
+      "border-emerald-600/50 bg-emerald-600/15 text-emerald-800 dark:text-emerald-300",
+  },
+  failed: {
+    label: "AI failed — Tonja can retry",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
+};
 
 type Props = {
   salesperson: StoredSalesperson;
@@ -87,24 +114,61 @@ function sanitizeFilename(name: string): string {
 
 function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<Status>("idle");
+  // `uploading` covers only the brief image-upload + scan-row insert. AI
+  // extraction is NEVER tracked here — it runs in the background per card.
+  const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [recent, setRecent] = useState<RecentUpload[]>([]);
+  const [simStatus, setSimStatus] = useState<SimStatus>("idle");
+
+  /** Updates one recent upload's background-AI status by scan id. */
+  const setRecentStatus = useCallback(
+    (scanId: string, status: RecentStatus) => {
+      setRecent((prev) =>
+        prev.map((item) =>
+          item.scanId === scanId ? { ...item, status } : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  /**
+   * Runs AI extraction for an already-saved scan. Deliberately NOT awaited by
+   * the upload flow: the scan row + image are already persisted, so a failure
+   * here only flips this card's status to "failed". The scan still stands and
+   * shows in the Verification Center (with a failed/pending extraction status)
+   * for Tonja to retry — nothing is rolled back or deleted.
+   */
+  const runExtraction = useCallback(
+    async (scanId: string) => {
+      setRecentStatus(scanId, "reading");
+      try {
+        const res = await fetch("/api/business-card/process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId }),
+        });
+        setRecentStatus(scanId, res.ok ? "complete" : "failed");
+      } catch {
+        setRecentStatus(scanId, "failed");
+      }
+    },
+    [setRecentStatus],
+  );
 
   const runSimulatedCapture = () => {
     // Placeholder for the future camera-capture path. Intentionally does NOT
     // persist anything — Phase 3 only saves when a real file is uploaded.
-    // Labels here must never claim "Image captured" or "Saved for
-    // verification": those phrases are reserved for the real upload flow so
-    // testers can't mistake a simulation for a real save.
     setErrorMessage(null);
-    setStatus("sim-step1");
-    setTimeout(() => setStatus("sim-step2"), 700);
-    setTimeout(() => setStatus("sim-done"), 1800);
+    setSimStatus("sim-step1");
+    setTimeout(() => setSimStatus("sim-step2"), 700);
+    setTimeout(() => setSimStatus("sim-done"), 1800);
   };
 
   const handleFile = async (file: File) => {
     setErrorMessage(null);
-    setStatus("uploading");
+    setUploading(true);
 
     const ext = sanitizeFilename(file.name);
     const path = `${salesperson.id}/${Date.now()}-${ext}`;
@@ -118,7 +182,7 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
 
     if (upload.error) {
       setErrorMessage(`Upload failed: ${upload.error.message}`);
-      setStatus("error");
+      setUploading(false);
       return;
     }
 
@@ -142,36 +206,23 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       setErrorMessage(
         `Save failed: ${insert.error?.message ?? "no row returned"}`,
       );
-      setStatus("error");
+      setUploading(false);
       return;
     }
 
-    setStatus("saved");
-
-    // Phase 5D: kick off server-side AI extraction. Test-account-only — the
-    // /api/business-card/process handler additionally enforces is_test_data.
-    // Extraction failures must NOT undo the saved scan; the row stays for
-    // manual verification either way.
+    // The image + scan row are now fully saved. From here the UI never blocks
+    // on AI: record the card as saved, return the scanner to its ready state,
+    // and fire extraction in the background so the AE can immediately scan the
+    // next card without waiting.
     const scanId = insert.data.id as string;
-    // Brief pause so testers can read "Saved for verification" before the UI
-    // transitions to "Extracting contact details…".
-    await new Promise((r) => setTimeout(r, 600));
-    setStatus("extracting");
-
-    try {
-      const res = await fetch("/api/business-card/process", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scanId }),
-      });
-      if (!res.ok) {
-        setStatus("extraction-failed");
-        return;
-      }
-      setStatus("extraction-complete");
-    } catch {
-      setStatus("extraction-failed");
-    }
+    setRecent((prev) =>
+      [
+        { scanId, fileName: file.name, status: "saved" as RecentStatus },
+        ...prev,
+      ].slice(0, 5),
+    );
+    setUploading(false);
+    void runExtraction(scanId);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -184,13 +235,10 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
 
   const close = () => {
     setOpen(false);
-    setStatus("idle");
+    setUploading(false);
     setErrorMessage(null);
-  };
-
-  const reset = () => {
-    setStatus("idle");
-    setErrorMessage(null);
+    setRecent([]);
+    setSimStatus("idle");
   };
 
   if (!open) {
@@ -207,135 +255,105 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     );
   }
 
-  const isSim =
-    status === "sim-step1" ||
-    status === "sim-step2" ||
-    status === "sim-done";
+  const labelClass = `flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-6 text-center transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40 ${
+    uploading
+      ? "cursor-not-allowed opacity-60"
+      : "cursor-pointer hover:border-primary hover:bg-primary/10"
+  }`;
 
-  const showProgress =
-    isSim ||
-    status === "uploading" ||
-    status === "saved" ||
-    status === "extracting" ||
-    status === "extraction-complete" ||
-    status === "extraction-failed";
-
-  const progressLabel =
-    status === "uploading"
-      ? "Uploading image…"
-      : status === "saved"
-        ? "Saved for verification"
-        : status === "extracting"
-          ? "Extracting contact details…"
-          : status === "extraction-complete"
-            ? "AI extraction complete"
-            : status === "extraction-failed"
-              ? "Saved, but AI extraction failed."
-              : status === "sim-step1"
-                ? "Simulation: step 1 of 3"
-                : status === "sim-step2"
-                  ? "Simulation: step 2 of 3"
-                  : status === "sim-done"
-                    ? "Simulation complete — no file was uploaded or stored"
-                    : "";
-
-  const progressPercent =
-    status === "uploading"
-      ? "25%"
-      : status === "saved"
-        ? "50%"
-        : status === "extracting"
-          ? "75%"
-          : status === "extraction-complete" ||
-              status === "extraction-failed"
-            ? "100%"
-            : status === "sim-step1"
-              ? "33%"
-              : status === "sim-step2"
-                ? "66%"
-                : status === "sim-done"
-                  ? "100%"
-                  : "0%";
+  // Banner reflects the newest activity: still reading vs. all done.
+  const anyReading = recent.some(
+    (item) => item.status === "saved" || item.status === "reading",
+  );
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-xl">Scan Business Card</CardTitle>
         <CardDescription>
-          Test account only. Uploaded images are saved for later verification —
-          no OCR, no leaderboard impact.
+          Test account only. Cards save instantly — AI reads each one in the
+          background, so you can keep scanning.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {status === "idle" && (
-          <div className="space-y-3">
-            <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-6 text-center transition-colors hover:border-primary hover:bg-primary/10 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40">
-              <Camera aria-hidden="true" className="size-6 text-primary" />
-              <span className="text-base font-semibold text-primary">
-                Upload or Take Photo
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Choose a photo from your library or take a new photo on your
-                phone.
-              </span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handleFileChange}
-                className="sr-only"
-              />
-            </label>
+        {/* Upload control stays available at all times so the AE can scan
+            card after card without waiting for AI extraction. */}
+        <div className="space-y-3">
+          <label className={labelClass}>
+            <Camera aria-hidden="true" className="size-6 text-primary" />
+            <span className="text-base font-semibold text-primary">
+              {uploading ? "Saving card…" : "Upload or Take Photo"}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Choose a photo from your library or take a new photo on your
+              phone.
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleFileChange}
+              disabled={uploading}
+              className="sr-only"
+            />
+          </label>
 
-            <div className="flex flex-col items-start gap-1">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={runSimulatedCapture}
-                aria-label="Capture photo — demo only, nothing is uploaded or stored"
-                className="text-muted-foreground"
-              >
-                Capture photo
-                <span className="ml-2 rounded-full border border-muted-foreground/30 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
-                  Demo only
-                </span>
-              </Button>
-              <p className="text-xs text-muted-foreground">
-                Demo only — simulation, nothing is uploaded or stored.
-              </p>
-            </div>
+          <div className="flex flex-col items-start gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={runSimulatedCapture}
+              aria-label="Capture photo — demo only, nothing is uploaded or stored"
+              className="text-muted-foreground"
+            >
+              Capture photo
+              <span className="ml-2 rounded-full border border-muted-foreground/30 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
+                Demo only
+              </span>
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Demo only — simulation, nothing is uploaded or stored.
+            </p>
+          </div>
+        </div>
+
+        {recent.length > 0 && (
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+            <p
+              role="status"
+              className="text-sm font-medium text-emerald-700 dark:text-emerald-400"
+            >
+              {anyReading
+                ? "Card saved. AI is reading it in the background."
+                : "Cards saved. AI finished — review them in the Verification Center."}
+            </p>
+            <ul className="space-y-1.5">
+              {recent.map((item) => {
+                const meta = RECENT_STATUS_META[item.status];
+                return (
+                  <li
+                    key={item.scanId}
+                    className="flex items-center justify-between gap-2"
+                  >
+                    <span className="min-w-0 truncate text-sm text-muted-foreground">
+                      {item.fileName}
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${meta.className}`}
+                    >
+                      {meta.label}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         )}
 
-        {showProgress && (
-          <div className="space-y-2">
-            <p className="text-base font-medium">{progressLabel}</p>
-            <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
-              <div
-                className="h-full bg-primary transition-all duration-500"
-                style={{ width: progressPercent }}
-              />
-            </div>
-            {status === "saved" && (
-              <p className="text-sm text-muted-foreground">
-                A reviewer will confirm the details.
-              </p>
-            )}
-            {status === "extraction-complete" && (
-              <p className="text-sm text-muted-foreground">
-                A reviewer will confirm the extracted details.
-              </p>
-            )}
-            {status === "extraction-failed" && (
-              <p className="text-sm text-muted-foreground">
-                The image is saved for manual verification.
-              </p>
-            )}
-          </div>
-        )}
+        {simStatus !== "idle" && <SimulationProgress status={simStatus} />}
 
-        {status === "error" && errorMessage && (
+        {errorMessage && (
           <p
             role="alert"
             className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
@@ -345,23 +363,39 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
         )}
 
         <div className="flex flex-wrap gap-2">
-          {(status === "extraction-complete" ||
-            status === "extraction-failed" ||
-            status === "sim-done" ||
-            status === "error") && (
-            <Button type="button" variant="outline" onClick={reset}>
-              Scan another
-            </Button>
-          )}
           <Button type="button" variant="ghost" onClick={close}>
-            {status === "extraction-complete" ||
-            status === "extraction-failed" ||
-            status === "sim-done"
-              ? "Close"
-              : "Cancel"}
+            Close
           </Button>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/** Small progress readout for the camera-capture simulation (demo only). */
+function SimulationProgress({
+  status,
+}: {
+  status: Exclude<SimStatus, "idle">;
+}) {
+  const label =
+    status === "sim-step1"
+      ? "Simulation: step 1 of 3"
+      : status === "sim-step2"
+        ? "Simulation: step 2 of 3"
+        : "Simulation complete — no file was uploaded or stored";
+  const percent =
+    status === "sim-step1" ? "33%" : status === "sim-step2" ? "66%" : "100%";
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+      <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
+        <div
+          className="h-full bg-muted-foreground/40 transition-all duration-500"
+          style={{ width: percent }}
+        />
+      </div>
+    </div>
   );
 }
