@@ -482,6 +482,10 @@ function ExtractedFields({ scan }: { scan: Scan }) {
     { label: "Website", value: scan.extracted_website },
     { label: "Address", value: scan.extracted_address },
     { label: "Contact Type", value: scan.extracted_contact_type },
+    {
+      label: "Bucket",
+      value: CONTACT_BUCKET_LABELS[normalizeScanContactType(scan)],
+    },
     { label: "AI Confidence", value: formatConfidence(scan.ai_confidence) },
     { label: "Extraction Status", value: scan.extraction_status },
   ];
