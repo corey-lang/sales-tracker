@@ -25,6 +25,9 @@ const TITLE_KEYWORDS = [
   "title company",
   "title rep",
   "title",
+  "escrow officer",
+  "escrow assistant",
+  "escrow manager",
   "escrow",
   "first american",
   "fidelity",
@@ -55,6 +58,82 @@ export function normalizeContactType(
   if (
     REAL_ESTATE_AGENT_KEYWORDS.some((keyword) => normalized.includes(keyword))
   ) {
+    return "real_estate_agent";
+  }
+
+  return "other";
+}
+
+/**
+ * Subset of a business card scan inspected for bucket classification.
+ * Every field is optional so callers can pass a full scan row or a partial.
+ * `raw_ocr_text` / `ai_notes` are checked only when present.
+ */
+export type ScanContactFields = {
+  extracted_contact_type?: string | null;
+  extracted_title?: string | null;
+  extracted_company?: string | null;
+  extracted_full_name?: string | null;
+  raw_ocr_text?: string | null;
+  ai_notes?: string | null;
+};
+
+/** Keywords that, in any inspected field, classify a scan as title. */
+const SCAN_TITLE_KEYWORDS = [
+  "title company",
+  "mh title",
+  "title",
+  "escrow officer",
+  "escrow assistant",
+  "escrow manager",
+  "escrow",
+  "first american",
+  "fidelity",
+  "stewart",
+  "old republic",
+];
+
+/** Keywords that, in any inspected field, classify a scan as real estate agent. */
+const SCAN_REAL_ESTATE_KEYWORDS = [
+  "realtor",
+  "real estate agent",
+  "real estate",
+  "brokerage",
+  "broker",
+];
+
+/**
+ * Classifies a scan into a bucket by inspecting multiple extracted fields,
+ * not just `extracted_contact_type`. This handles cases where the AI returns
+ * a vague contact type (e.g. "general") but the title / company / OCR text
+ * clearly indicates title or real estate.
+ *
+ * Priority: title wins over real estate agent if both appear; anything
+ * unrecognized falls through to "other".
+ */
+export function normalizeScanContactType(scan: ScanContactFields): ContactBucket {
+  const haystack = [
+    scan.extracted_contact_type,
+    scan.extracted_title,
+    scan.extracted_company,
+    scan.extracted_full_name,
+    scan.raw_ocr_text,
+    scan.ai_notes,
+  ]
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    )
+    .join(" \n ")
+    .toLowerCase();
+
+  if (haystack.length === 0) return "other";
+
+  if (SCAN_TITLE_KEYWORDS.some((keyword) => haystack.includes(keyword))) {
+    return "title";
+  }
+
+  if (SCAN_REAL_ESTATE_KEYWORDS.some((keyword) => haystack.includes(keyword))) {
     return "real_estate_agent";
   }
 

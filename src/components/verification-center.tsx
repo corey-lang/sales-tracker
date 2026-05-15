@@ -8,7 +8,7 @@ import { supabase } from "@/lib/supabase/client";
 import {
   CONTACT_BUCKET_LABELS,
   CONTACT_BUCKET_ORDER,
-  normalizeContactType,
+  normalizeScanContactType,
   type ContactBucket,
 } from "@/lib/contact-type";
 
@@ -41,6 +41,8 @@ type Scan = {
   extracted_contact_type: string | null;
   ai_confidence: number | null;
   extraction_status: string | null;
+  raw_ocr_text: string | null;
+  ai_notes: string | null;
 };
 
 /** A scan with its frontend-derived contact-type bucket attached. */
@@ -63,7 +65,7 @@ function groupScansByAe(scans: Scan[]): AeGroup[] {
   for (const scan of scans) {
     const withBucket: ScanWithBucket = {
       ...scan,
-      contactBucket: normalizeContactType(scan.extracted_contact_type),
+      contactBucket: normalizeScanContactType(scan),
     };
     const name = scan.salesperson_name ?? "Unknown";
     const existing = byAe.get(name);
@@ -116,7 +118,7 @@ export function VerificationCenter() {
     const result = await supabase
       .from("business_card_scans")
       .select(
-        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status",
+        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes",
       )
       .order("created_at", { ascending: false });
 
@@ -339,6 +341,7 @@ function ScanCard({
         </p>
         <RetryAIControl
           extractionStatus={scan.extraction_status}
+          extractedContactType={scan.extracted_contact_type}
           retrying={retrying}
           disabled={retryDisabled}
           error={retryError}
@@ -415,19 +418,29 @@ function ImageLightbox({
 
 function RetryAIControl({
   extractionStatus,
+  extractedContactType,
   retrying,
   disabled,
   error,
   onRetry,
 }: {
   extractionStatus: string | null;
+  extractedContactType: string | null;
   retrying: boolean;
   disabled: boolean;
   error: string | null;
   onRetry: () => void;
 }) {
-  const normalized = (extractionStatus ?? "pending").toLowerCase();
-  if (normalized !== "failed" && normalized !== "pending") {
+  // Show Retry AI whenever AI / contact-type processing looks incomplete:
+  // a failed / pending / missing extraction status, or a missing contact type
+  // (which renders as "Not processed yet" and buckets the scan as Other).
+  const status = (extractionStatus ?? "").toLowerCase().trim();
+  const statusNeedsRetry =
+    status === "failed" || status === "pending" || status === "";
+  const contactTypeMissing =
+    !extractedContactType || extractedContactType.trim().length === 0;
+
+  if (!statusNeedsRetry && !contactTypeMissing) {
     return null;
   }
 
