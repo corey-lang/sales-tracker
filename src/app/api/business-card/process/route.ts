@@ -1,4 +1,8 @@
 import { getServerSupabase } from "@/lib/supabase/server";
+import {
+  maybeAutoApproveScan,
+  type ContactScan,
+} from "@/lib/server/business-card-contacts";
 
 // Phase 5C: server-side AI extraction for a single business_card_scans row.
 // POST /api/business-card/process   body: { scanId: string }
@@ -292,11 +296,33 @@ export async function POST(req: Request) {
     }
 
     console.log(`${LOG} completed scanId=${scanId}`);
+
+    // Build 3: run the safe auto-approval rule now that extraction completed.
+    // A failure here must not fail the request — extraction itself succeeded,
+    // and the scan simply stays in needs_review for manual verification.
+    let autoApproval = null;
+    try {
+      autoApproval = await maybeAutoApproveScan(
+        supabase,
+        updatedScan as unknown as ContactScan,
+      );
+      console.log(
+        `${LOG} auto-approval scanId=${scanId} outcome=${autoApproval.outcome}`,
+      );
+    } catch (autoErr) {
+      const autoMsg =
+        autoErr instanceof Error ? autoErr.message : "Unknown error";
+      console.error(
+        `${LOG} auto-approval failed scanId=${scanId} error=${autoMsg}`,
+      );
+    }
+
     return Response.json({
       status: "completed",
       scanId,
       extraction,
       scan: updatedScan,
+      autoApproval,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
