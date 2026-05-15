@@ -158,6 +158,40 @@ const FILTER_LABELS: Record<FilterKey, string> = {
 /** Default queue: only items that need a human — keeps Tonja's view focused. */
 const DEFAULT_FILTERS: FilterKey[] = ["needs_review", "duplicate_review"];
 
+/** "Review Queue" preset — scans that still need a human decision. */
+const REVIEW_QUEUE_FILTERS: FilterKey[] = ["needs_review", "duplicate_review"];
+
+/** "Processed" preset — scans already resolved, automatically or manually. */
+const PROCESSED_FILTERS: FilterKey[] = [
+  "auto_approved",
+  "auto_duplicate",
+  "approved",
+  "rejected",
+];
+
+/** True when the active set contains exactly the given filter keys. */
+function sameFilterSet(active: Set<FilterKey>, keys: FilterKey[]): boolean {
+  return active.size === keys.length && keys.every((key) => active.has(key));
+}
+
+/** Chip styling for the individual multi-select status filters. */
+function chipClassName(active: boolean): string {
+  const base =
+    "rounded-full px-3 py-1 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  return active
+    ? `${base} border-2 border-primary bg-primary font-semibold text-primary-foreground shadow-sm`
+    : `${base} border border-input bg-background font-medium text-muted-foreground hover:bg-muted hover:text-foreground`;
+}
+
+/** Button styling for the quick-view preset toggles. */
+function presetClassName(active: boolean): string {
+  const base =
+    "rounded-md px-3 py-1 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  return active
+    ? `${base} border-2 border-primary bg-primary font-semibold text-primary-foreground shadow-sm`
+    : `${base} border border-input bg-background font-medium text-foreground hover:bg-muted`;
+}
+
 /** Maps a workflow status to the filter chip it belongs under. */
 function filterKeyForStatus(status: WorkflowStatus): FilterKey {
   if (status === "rejected" || status === "rejected_duplicate") {
@@ -373,6 +407,8 @@ export function VerificationCenter() {
   );
 
   const allFiltersActive = activeFilters.size === FILTER_KEYS.length;
+  const reviewQueueActive = sameFilterSet(activeFilters, REVIEW_QUEUE_FILTERS);
+  const processedActive = sameFilterSet(activeFilters, PROCESSED_FILTERS);
 
   const toggleFilter = (key: FilterKey) => {
     setActiveFilters((prev) => {
@@ -430,37 +466,61 @@ export function VerificationCenter() {
         </CardHeader>
         <CardContent>
           {!loading && !error && scans.length > 0 && (
-            <div className="mb-4 flex flex-wrap gap-2">
-              {FILTER_KEYS.map((key) => {
-                const active = activeFilters.has(key);
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => toggleFilter(key)}
-                    aria-pressed={active}
-                    className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                      active
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-input bg-background text-muted-foreground hover:bg-muted"
-                    }`}
-                  >
-                    {FILTER_LABELS[key]} ({counts[key]})
-                  </button>
-                );
-              })}
-              <button
-                type="button"
-                onClick={() => setActiveFilters(new Set(FILTER_KEYS))}
-                aria-pressed={allFiltersActive}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                  allFiltersActive
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-input bg-background text-muted-foreground hover:bg-muted"
-                }`}
-              >
-                All
-              </button>
+            <div className="mb-4 space-y-2">
+              {/* Quick-view presets — toggle a whole filter combination at once. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Quick views
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveFilters(new Set(REVIEW_QUEUE_FILTERS))}
+                  aria-pressed={reviewQueueActive}
+                  className={presetClassName(reviewQueueActive)}
+                >
+                  Review Queue
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveFilters(new Set(PROCESSED_FILTERS))}
+                  aria-pressed={processedActive}
+                  className={presetClassName(processedActive)}
+                >
+                  Processed
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveFilters(new Set(DEFAULT_FILTERS))}
+                  className="rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  Clear Filters
+                </button>
+              </div>
+              {/* Individual status filters — multi-select; toggle any combination. */}
+              <div className="flex flex-wrap gap-2">
+                {FILTER_KEYS.map((key) => {
+                  const active = activeFilters.has(key);
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => toggleFilter(key)}
+                      aria-pressed={active}
+                      className={chipClassName(active)}
+                    >
+                      {FILTER_LABELS[key]} ({counts[key]})
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => setActiveFilters(new Set(FILTER_KEYS))}
+                  aria-pressed={allFiltersActive}
+                  className={chipClassName(allFiltersActive)}
+                >
+                  All
+                </button>
+              </div>
             </div>
           )}
 
