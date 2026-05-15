@@ -4,15 +4,15 @@ import {
   type ContactScan,
 } from "@/lib/server/business-card-contacts";
 
-// Phase 5C: server-side AI extraction for a single business_card_scans row.
+// Server-side AI extraction for a single business_card_scans row.
 // POST /api/business-card/process   body: { scanId: string }
 //
-// Test-account only: rows only land in business_card_scans for the seeded
-// Test rep (Phase 3 intake gating), and this handler additionally rejects any
-// row where is_test_data is false. No duplicate checking, no CRM export — just
-// OCR + structured field extraction into the Phase 5 columns
-// (extracted_*, ai_confidence, ai_notes, extraction_status, extracted_at,
-// extraction_error).
+// Live AE rollout: this runs for every AE's scans, not just the Test account.
+// (Test scans are still flagged is_test_data = true at intake so they remain
+// separable, but extraction is no longer restricted to them.) Performs OCR +
+// structured field extraction into the Phase 5 columns (extracted_*,
+// ai_confidence, ai_notes, extraction_status, extracted_at, extraction_error),
+// then runs the safe auto-approval rule.
 
 export const runtime = "nodejs";
 // Vision calls can take 10–30s; default 10s is too tight.
@@ -209,13 +209,9 @@ export async function POST(req: Request) {
   console.log(
     `${LOG} scan found scanId=${scanId} hasImageUrl=${Boolean(scan.image_url)} isTestData=${scan.is_test_data}`,
   );
-  if (!scan.is_test_data) {
-    console.error(`${LOG} scan rejected — is_test_data=false scanId=${scanId}`);
-    return Response.json(
-      { error: "AI extraction is restricted to test data" },
-      { status: 403 },
-    );
-  }
+  // Live rollout: extraction runs for real AE scans and test scans alike — no
+  // is_test_data gate here. The is_test_data flag is kept only for separating
+  // test data during cleanup.
   if (!scan.image_url) {
     console.error(`${LOG} scan rejected — missing image_url scanId=${scanId}`);
     return Response.json(

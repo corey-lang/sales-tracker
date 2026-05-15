@@ -61,37 +61,14 @@ type Props = {
   salesperson: StoredSalesperson;
 };
 
-// Phase 3: real scan intake for the Test account only. Normal AEs still see
-// the "Coming Soon" card. Even for Test, this writes ONLY to
-// business_card_scans + the business-card-scans storage bucket — it must
-// never produce CRM, export, leaderboard, or metric data.
+// Live AE rollout: every AE sees the real scanner — there is no longer a
+// "Coming Soon" gate. The seeded Test account still gets the scanner too; the
+// only difference is `is_test_data`, set per scan from isTestAccount() so the
+// Test account's scans stay cleanly separable from real AE data. Either way
+// this writes ONLY to business_card_scans + the business-card-scans storage
+// bucket — it never produces leaderboard or metric data.
 export function BusinessCardScanner({ salesperson }: Props) {
-  const enabled = isTestAccount(salesperson);
-
-  if (!enabled) {
-    return <ComingSoonCard />;
-  }
-
   return <ActiveScanner salesperson={salesperson} />;
-}
-
-function ComingSoonCard() {
-  return (
-    <Card aria-label="Scan Business Card — coming soon">
-      <CardHeader>
-        <div className="flex flex-wrap items-center gap-2">
-          <Camera aria-hidden="true" className="size-5 text-primary" />
-          <CardTitle className="text-xl">Scan Business Card</CardTitle>
-          <span className="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-            Coming Soon
-          </span>
-        </div>
-        <CardDescription>
-          AI-powered contact capture for office visits and networking.
-        </CardDescription>
-      </CardHeader>
-    </Card>
-  );
 }
 
 function sanitizeFilename(name: string): string {
@@ -197,7 +174,10 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
         salesperson_name: salesperson.first_name,
         image_url: publicUrl.publicUrl,
         status: "processing",
-        is_test_data: true,
+        // Real AE scans are live data (is_test_data = false). Only the seeded
+        // Test account produces test rows — keeping them separable so the
+        // cleanup script can remove test data without touching live scans.
+        is_test_data: isTestAccount(salesperson),
       })
       .select("id")
       .single();
@@ -271,8 +251,8 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       <CardHeader>
         <CardTitle className="text-xl">Scan Business Card</CardTitle>
         <CardDescription>
-          Test account only. Cards save instantly — AI reads each one in the
-          background, so you can keep scanning.
+          Cards save instantly — AI reads each one in the background, so you
+          can keep scanning. A reviewer confirms the details afterward.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

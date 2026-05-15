@@ -16,6 +16,7 @@ import { TotalsCard } from "@/components/admin/totals-card";
 import { GoalsCard } from "@/components/admin/goals-card";
 import { MessagesCard } from "@/components/admin/messages-card";
 import { MaintenanceCard } from "@/components/admin/maintenance-card";
+import { VerificationCenter } from "@/components/verification-center";
 
 type Salesperson = { id: string; first_name: string };
 
@@ -136,6 +137,8 @@ export default function AdminPage() {
       <MessagesCard people={people} />
 
       <GoalsCard people={people} />
+
+      <VerificationCenter />
 
       <MaintenanceCard />
     </main>
