@@ -47,13 +47,20 @@ export async function POST(req: Request) {
   // A confirmed duplicate is removed from the active contact pipeline:
   // duplicate_status = confirmed_duplicate, verification_status =
   // rejected_duplicate. The scan and its image are preserved.
+  const updatePayload: Record<string, unknown> = {
+    duplicate_status: "confirmed_duplicate",
+    verification_status: "rejected_duplicate",
+    duplicate_notes: duplicateNotes,
+  };
+  // Only write the structured link when a contact id was supplied — omitting
+  // it preserves any duplicate_of_contact_id set earlier by auto-detection.
+  if (duplicateOfContactId) {
+    updatePayload.duplicate_of_contact_id = duplicateOfContactId;
+  }
+
   const upd = await supabase
     .from("business_card_scans")
-    .update({
-      duplicate_status: "confirmed_duplicate",
-      verification_status: "rejected_duplicate",
-      duplicate_notes: duplicateNotes,
-    })
+    .update(updatePayload)
     .eq("id", scanId)
     .select("id");
 

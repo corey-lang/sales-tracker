@@ -90,6 +90,12 @@ CREATE TRIGGER trg_business_card_contacts_updated_at
 -- these new columns simply track verification state. verified_contact_id is
 -- a backlink to the contact created from the scan (nullable until verified).
 -- rejection_reason stores why an admin rejected a scan.
+--
+-- duplicate_of_contact_id (Build 5) records WHICH existing contact a scan was
+-- detected to duplicate, so the Verification Center can load that contact and
+-- show a side-by-side comparison. duplicate_notes still holds the readable
+-- explanation; this column adds a structured, joinable link. Nullable: a scan
+-- only has it once duplicate detection finds a match.
 
 ALTER TABLE business_card_scans
   ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'needs_review',
@@ -97,9 +103,13 @@ ALTER TABLE business_card_scans
     REFERENCES business_card_contacts(id),
   ADD COLUMN IF NOT EXISTS duplicate_status TEXT DEFAULT 'unchecked',
   ADD COLUMN IF NOT EXISTS duplicate_notes TEXT,
+  ADD COLUMN IF NOT EXISTS duplicate_of_contact_id UUID
+    REFERENCES business_card_contacts(id),
   ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_business_card_scans_verification_status
   ON business_card_scans(verification_status);
 CREATE INDEX IF NOT EXISTS idx_business_card_scans_duplicate_status
   ON business_card_scans(duplicate_status);
+CREATE INDEX IF NOT EXISTS idx_business_card_scans_duplicate_of_contact_id
+  ON business_card_scans(duplicate_of_contact_id);

@@ -57,7 +57,27 @@ type Scan = {
   verified_contact_id: string | null;
   duplicate_status: string | null;
   duplicate_notes: string | null;
+  duplicate_of_contact_id: string | null;
   rejection_reason: string | null;
+};
+
+/**
+ * A verified contact loaded from `business_card_contacts` so a duplicate scan
+ * can be compared side-by-side against the contact it appears to duplicate.
+ */
+type DuplicateContact = {
+  id: string;
+  full_name: string | null;
+  company: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  address: string | null;
+  contact_bucket: string | null;
+  salesperson_name: string | null;
+  verification_status: string | null;
+  created_at: string | null;
 };
 
 /** A scan with its frontend-derived contact-type bucket attached. */
@@ -243,11 +263,63 @@ function formatConfidence(value: number | null): string | null {
   return `${Math.round(pct)}%`;
 }
 
+// ---------------------------------------------------------------------------
+// Duplicate comparison helpers
+// ---------------------------------------------------------------------------
+
+/** Renders a stored contact_bucket key as its human label when recognized. */
+function bucketLabel(value: string | null): string | null {
+  if (!value || value.trim().length === 0) return null;
+  return value in CONTACT_BUCKET_LABELS
+    ? CONTACT_BUCKET_LABELS[value as ContactBucket]
+    : value;
+}
+
+/** How a comparison field is normalized before checking match vs. different. */
+type CompareKind = "email" | "phone" | "text" | "none";
+
+/** Verdict for an important comparison field; null = not labelled. */
+type MatchVerdict = "match" | "different" | null;
+
+/**
+ * Simple, deliberately un-clever comparison: normalize both sides and check
+ * equality. Returns null (no label) for non-important fields or when either
+ * side is blank — we only label fields we can confidently compare.
+ */
+function compareValues(
+  kind: CompareKind,
+  scanValue: string | null,
+  contactValue: string | null,
+): MatchVerdict {
+  if (kind === "none") return null;
+  const a = (scanValue ?? "").trim();
+  const b = (contactValue ?? "").trim();
+  if (a.length === 0 || b.length === 0) return null;
+
+  let na: string;
+  let nb: string;
+  if (kind === "email") {
+    na = a.toLowerCase();
+    nb = b.toLowerCase();
+  } else if (kind === "phone") {
+    na = a.replace(/\D/g, "");
+    nb = b.replace(/\D/g, "");
+  } else {
+    na = a.toLowerCase().replace(/\s+/g, " ");
+    nb = b.toLowerCase().replace(/\s+/g, " ");
+  }
+  if (na.length === 0 || nb.length === 0) return null;
+  return na === nb ? "match" : "different";
+}
+
 type Preview = { url: string; name: string };
 type ActionMessage = { kind: "success" | "error"; text: string };
 
 export function VerificationCenter() {
   const [scans, setScans] = useState<Scan[]>([]);
+  const [duplicateContactById, setDuplicateContactById] = useState<
+    Map<string, DuplicateContact>
+  >(() => new Map());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -267,16 +339,52 @@ export function VerificationCenter() {
     const result = await supabase
       .from("business_card_scans")
       .select(
-        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, rejection_reason",
+        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, duplicate_of_contact_id, rejection_reason",
       )
       .order("created_at", { ascending: false });
 
     if (result.error) {
       setError(result.error.message);
       setScans([]);
-    } else {
-      setScans((result.data ?? []) as Scan[]);
+      setDuplicateContactById(new Map());
+      return;
     }
+
+    const loadedScans = (result.data ?? []) as Scan[];
+    setScans(loadedScans);
+
+    // Build the duplicate-contact lookup in ONE batched query: collect the
+    // unique matched-contact ids across all scans, fetch them with .in(), and
+    // map by id. Never query per-scan inside render.
+    const matchedIds = [
+      ...new Set(
+        loadedScans
+          .map((scan) => scan.duplicate_of_contact_id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    ];
+
+    if (matchedIds.length === 0) {
+      setDuplicateContactById(new Map());
+      return;
+    }
+
+    const contactsRes = await supabase
+      .from("business_card_contacts")
+      .select(
+        "id, full_name, company, title, email, phone, website, address, contact_bucket, salesperson_name, verification_status, created_at",
+      )
+      .in("id", matchedIds);
+
+    // A failure here is non-fatal: the scans still render, and the comparison
+    // panel falls back to "Matched contact could not be loaded."
+    const map = new Map<string, DuplicateContact>();
+    if (!contactsRes.error) {
+      for (const row of (contactsRes.data ?? []) as DuplicateContact[]) {
+        map.set(row.id, row);
+      }
+    }
+    setDuplicateContactById(map);
   }, []);
 
   useEffect(() => {
@@ -346,6 +454,15 @@ export function VerificationCenter() {
         if (reason.trim().length > 0) body = { ...body, reason: reason.trim() };
       }
 
+      if (action === "mark-duplicate") {
+        // Carry the detected match through so the confirmed duplicate keeps a
+        // structured link to the original contact.
+        const matchedId = scans.find(
+          (scan) => scan.id === scanId,
+        )?.duplicate_of_contact_id;
+        if (matchedId) body = { ...body, duplicateOfContactId: matchedId };
+      }
+
       setActioningId(scanId);
       setActionMessage(null);
       try {
@@ -380,7 +497,7 @@ export function VerificationCenter() {
         setActioningId((current) => (current === scanId ? null : current));
       }
     },
-    [load],
+    [load, scans],
   );
 
   const counts = useMemo(() => {
@@ -577,6 +694,13 @@ export function VerificationCenter() {
                             <ScanCard
                               key={scan.id}
                               scan={scan}
+                              duplicateContact={
+                                scan.duplicate_of_contact_id
+                                  ? duplicateContactById.get(
+                                      scan.duplicate_of_contact_id,
+                                    )
+                                  : undefined
+                              }
                               retrying={retryingId === scan.id}
                               retryDisabled={
                                 retryingId !== null && retryingId !== scan.id
@@ -610,6 +734,7 @@ export function VerificationCenter() {
 
 function ScanCard({
   scan,
+  duplicateContact,
   retrying,
   retryDisabled,
   retryError,
@@ -620,6 +745,7 @@ function ScanCard({
   onPreview,
 }: {
   scan: Scan;
+  duplicateContact: DuplicateContact | undefined;
   retrying: boolean;
   retryDisabled: boolean;
   retryError: string | null;
@@ -632,6 +758,16 @@ function ScanCard({
   const status = effectiveStatus(scan);
   const needsAction =
     status === "needs_review" || status === "duplicate_review";
+  const isDuplicateReview = status === "duplicate_review";
+
+  // Show the side-by-side comparison whenever this scan is tied to an existing
+  // contact: an active duplicate review, a flagged possible duplicate, or any
+  // scan that carries a duplicate_of_contact_id (covers auto_duplicate audits).
+  const showDuplicatePanel =
+    status === "duplicate_review" ||
+    (scan.duplicate_status ?? "").toLowerCase().trim() ===
+      "possible_duplicate" ||
+    Boolean(scan.duplicate_of_contact_id);
 
   return (
     <li className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start">
@@ -688,6 +824,9 @@ function ScanCard({
             {scan.duplicate_notes}
           </p>
         )}
+        {showDuplicatePanel && (
+          <DuplicateComparisonPanel scan={scan} contact={duplicateContact} />
+        )}
         {scan.rejection_reason && scan.rejection_reason.trim().length > 0 && (
           <p className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
             <span className="font-semibold uppercase tracking-wide">
@@ -708,6 +847,7 @@ function ScanCard({
           <ScanActions
             busy={actioning}
             disabled={actionsDisabled}
+            duplicateReview={isDuplicateReview}
             onAction={onAction}
           />
         )}
@@ -720,12 +860,25 @@ function ScanCard({
 function ScanActions({
   busy,
   disabled,
+  duplicateReview,
   onAction,
 }: {
   busy: boolean;
   disabled: boolean;
+  /** Duplicate-review cards get clearer, decision-specific button text. */
+  duplicateReview: boolean;
   onAction: (action: ActionKind) => void;
 }) {
+  // Same three routes (approve / mark-duplicate / reject) either way — only
+  // the labels change so a duplicate review reads as an explicit choice.
+  const approveLabel = duplicateReview
+    ? "Approve as New Contact"
+    : "Approve as Contact";
+  const duplicateLabel = duplicateReview
+    ? "Confirm Duplicate"
+    : "Mark Duplicate";
+  const rejectLabel = duplicateReview ? "Reject Scan" : "Reject";
+
   return (
     <div className="flex flex-wrap gap-2 border-t pt-2">
       <Button
@@ -734,16 +887,7 @@ function ScanActions({
         onClick={() => onAction("approve")}
         disabled={disabled || busy}
       >
-        {busy ? "Working…" : "Approve as Contact"}
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onAction("reject")}
-        disabled={disabled || busy}
-      >
-        Reject
+        {busy ? "Working…" : approveLabel}
       </Button>
       <Button
         type="button"
@@ -752,7 +896,16 @@ function ScanActions({
         onClick={() => onAction("mark-duplicate")}
         disabled={disabled || busy}
       >
-        Mark Duplicate
+        {duplicateLabel}
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onAction("reject")}
+        disabled={disabled || busy}
+      >
+        {rejectLabel}
       </Button>
     </div>
   );
@@ -914,6 +1067,178 @@ function ExtractedFields({ scan }: { scan: Scan }) {
         </div>
       ))}
     </dl>
+  );
+}
+
+/**
+ * Side-by-side comparison of a duplicate scan's new extraction against the
+ * existing contact it was matched to. Read-only: this panel never edits,
+ * merges, or deletes anything — it only helps Tonja decide.
+ */
+function DuplicateComparisonPanel({
+  scan,
+  contact,
+}: {
+  scan: Scan;
+  contact: DuplicateContact | undefined;
+}) {
+  const matchedIdShort = scan.duplicate_of_contact_id
+    ? scan.duplicate_of_contact_id.slice(0, 8)
+    : null;
+
+  const rows: Array<{
+    label: string;
+    scanValue: string | null;
+    contactValue: string | null;
+    compare: CompareKind;
+  }> = [
+    {
+      label: "Full Name",
+      scanValue: scan.extracted_full_name,
+      contactValue: contact?.full_name ?? null,
+      compare: "text",
+    },
+    {
+      label: "Company",
+      scanValue: scan.extracted_company,
+      contactValue: contact?.company ?? null,
+      compare: "text",
+    },
+    {
+      label: "Title",
+      scanValue: scan.extracted_title,
+      contactValue: contact?.title ?? null,
+      compare: "none",
+    },
+    {
+      label: "Email",
+      scanValue: scan.extracted_email,
+      contactValue: contact?.email ?? null,
+      compare: "email",
+    },
+    {
+      label: "Phone",
+      scanValue: scan.extracted_phone,
+      contactValue: contact?.phone ?? null,
+      compare: "phone",
+    },
+    {
+      label: "Website",
+      scanValue: scan.extracted_website,
+      contactValue: contact?.website ?? null,
+      compare: "none",
+    },
+    {
+      label: "Address",
+      scanValue: scan.extracted_address,
+      contactValue: contact?.address ?? null,
+      compare: "none",
+    },
+    {
+      label: "Contact Bucket",
+      scanValue: CONTACT_BUCKET_LABELS[normalizeScanContactType(scan)],
+      contactValue: bucketLabel(contact?.contact_bucket ?? null),
+      compare: "none",
+    },
+    {
+      label: "Salesperson",
+      scanValue: scan.salesperson_name,
+      contactValue: contact?.salesperson_name ?? null,
+      compare: "none",
+    },
+    {
+      label: "Verification Status",
+      scanValue: scan.verification_status,
+      contactValue: contact?.verification_status ?? null,
+      compare: "none",
+    },
+    {
+      label: "Created",
+      scanValue: formatTimestamp(scan.created_at),
+      contactValue: contact?.created_at
+        ? formatTimestamp(contact.created_at)
+        : null,
+      compare: "none",
+    },
+  ];
+
+  return (
+    <div className="rounded-md border border-orange-500/40 bg-orange-500/5 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h5 className="text-xs font-semibold uppercase tracking-wide text-orange-800 dark:text-orange-300">
+          Duplicate Comparison
+        </h5>
+        {matchedIdShort && (
+          <span className="text-[10px] text-muted-foreground">
+            Matched contact #{matchedIdShort}
+          </span>
+        )}
+      </div>
+
+      {!contact ? (
+        <p className="mt-2 text-sm italic text-muted-foreground">
+          Matched contact could not be loaded.
+        </p>
+      ) : (
+        <dl className="mt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <span>New Scanned Card</span>
+            <span>Existing Contact Match</span>
+          </div>
+          {rows.map((row) => {
+            const verdict = compareValues(
+              row.compare,
+              row.scanValue,
+              row.contactValue,
+            );
+            return (
+              <div
+                key={row.label}
+                className="border-t border-orange-500/20 pt-2"
+              >
+                <dt className="flex flex-wrap items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {row.label}
+                  {verdict && <MatchBadge verdict={verdict} />}
+                </dt>
+                <dd className="mt-0.5 grid grid-cols-2 gap-2">
+                  <ComparisonValue value={row.scanValue} />
+                  <ComparisonValue value={row.contactValue} />
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+/** Subtle "Match" / "Different" label for an important comparison field. */
+function MatchBadge({ verdict }: { verdict: "match" | "different" }) {
+  const className =
+    verdict === "match"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+      : "border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-400";
+  return (
+    <span
+      className={`rounded-full border px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal ${className}`}
+    >
+      {verdict === "match" ? "Match" : "Different"}
+    </span>
+  );
+}
+
+/** One value cell inside the duplicate comparison grid. */
+function ComparisonValue({ value }: { value: string | null }) {
+  const hasValue = value !== null && value.trim().length > 0;
+  return (
+    <span className="min-w-0 break-words text-sm">
+      {hasValue ? (
+        value
+      ) : (
+        <span className="italic text-muted-foreground">—</span>
+      )}
+    </span>
   );
 }
 

@@ -478,6 +478,10 @@ export async function maybeAutoApproveScan(
           verification_status: "auto_duplicate",
           duplicate_status: "confirmed_duplicate",
           duplicate_notes: notes,
+          // Structured link to the matched contact, alongside the readable
+          // duplicate_notes above — lets the Verification Center load the
+          // contact for a side-by-side comparison (Build 5).
+          duplicate_of_contact_id: duplicate.contactId,
         })
         .eq("id", scan.id);
       return {
@@ -496,6 +500,8 @@ export async function maybeAutoApproveScan(
         verification_status: "duplicate_review",
         duplicate_status: "possible_duplicate",
         duplicate_notes: notes,
+        // Structured link to the matched contact (see auto_duplicate branch).
+        duplicate_of_contact_id: duplicate.contactId,
       })
       .eq("id", scan.id);
     return {
