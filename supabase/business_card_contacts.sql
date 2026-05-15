@@ -113,3 +113,46 @@ CREATE INDEX IF NOT EXISTS idx_business_card_scans_duplicate_status
   ON business_card_scans(duplicate_status);
 CREATE INDEX IF NOT EXISTS idx_business_card_scans_duplicate_of_contact_id
   ON business_card_scans(duplicate_of_contact_id);
+
+-- ---------------------------------------------------------------------------
+-- 3. business_card_contacts — CRM export tracking columns (Build 6)
+-- ---------------------------------------------------------------------------
+-- Additive only. These columns record WHEN a contact was exported to CRM CSV,
+-- WHICH export batch it belonged to, and WHO ran the export. They let the
+-- export route skip already-exported contacts by default. Exporting only ever
+-- stamps these columns — it never deletes a contact. A NULL exported_at means
+-- "not yet exported".
+
+ALTER TABLE business_card_contacts
+  ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS export_batch_id UUID,
+  ADD COLUMN IF NOT EXISTS exported_by TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_bcc_exported_at
+  ON business_card_contacts(exported_at);
+CREATE INDEX IF NOT EXISTS idx_bcc_export_batch_id
+  ON business_card_contacts(export_batch_id);
+
+-- ---------------------------------------------------------------------------
+-- 4. business_card_export_batches — CRM export history (Build 6)
+-- ---------------------------------------------------------------------------
+-- One row per CSV export run. Records which AE was exported (null = all AEs),
+-- how many contacts the batch contained, and who ran it. Contacts point back
+-- via business_card_contacts.export_batch_id. This is an append-only history
+-- table — nothing here is ever deleted.
+
+CREATE TABLE IF NOT EXISTS business_card_export_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  salesperson_id UUID,
+  salesperson_name TEXT,
+  contact_count INTEGER NOT NULL DEFAULT 0,
+  exported_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bceb_salesperson_id
+  ON business_card_export_batches(salesperson_id);
+CREATE INDEX IF NOT EXISTS idx_bceb_salesperson_name
+  ON business_card_export_batches(salesperson_name);
+CREATE INDEX IF NOT EXISTS idx_bceb_created_at
+  ON business_card_export_batches(created_at);

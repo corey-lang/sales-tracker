@@ -12,7 +12,7 @@ import {
   type ContactBucket,
 } from "@/lib/contact-type";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -312,6 +312,65 @@ function compareValues(
   return na === nb ? "match" : "different";
 }
 
+// ---------------------------------------------------------------------------
+// CRM export summary
+// ---------------------------------------------------------------------------
+
+/** A business_card_contacts row, trimmed to what the export summary needs. */
+type ExportContactRow = {
+  salesperson_id: string | null;
+  salesperson_name: string | null;
+  verification_status: string | null;
+  exported_at: string | null;
+};
+
+/** Per-AE CRM export counts shown in the export section. */
+type ExportSummaryEntry = {
+  /** Stable React key + identity for the in-flight export tracking. */
+  key: string;
+  salespersonId: string | null;
+  salespersonName: string;
+  /** Approved / auto-approved contacts not yet exported. */
+  newCount: number;
+  /** Approved / auto-approved contacts already exported at least once. */
+  exportedCount: number;
+};
+
+/** Sentinel key for the "Export All New Contacts" action. */
+const EXPORT_ALL_KEY = "__all__";
+
+/**
+ * Rolls per-contact rows up into per-AE export counts. Only CRM-ready
+ * contacts (auto_approved / approved) reach here; a row counts as "new" when
+ * exported_at is null, otherwise "already exported".
+ */
+function summarizeExports(rows: ExportContactRow[]): ExportSummaryEntry[] {
+  const byAe = new Map<string, ExportSummaryEntry>();
+  for (const row of rows) {
+    const name = row.salesperson_name ?? "Unknown";
+    const key = row.salesperson_id ?? `name:${name}`;
+    let entry = byAe.get(key);
+    if (!entry) {
+      entry = {
+        key,
+        salespersonId: row.salesperson_id,
+        salespersonName: name,
+        newCount: 0,
+        exportedCount: 0,
+      };
+      byAe.set(key, entry);
+    }
+    if (row.exported_at) {
+      entry.exportedCount += 1;
+    } else {
+      entry.newCount += 1;
+    }
+  }
+  return [...byAe.values()].sort((a, b) =>
+    a.salespersonName.localeCompare(b.salespersonName),
+  );
+}
+
 type Preview = { url: string; name: string };
 type ActionMessage = { kind: "success" | "error"; text: string };
 
@@ -333,6 +392,8 @@ export function VerificationCenter() {
   const [actionMessage, setActionMessage] = useState<ActionMessage | null>(
     null,
   );
+  const [exportSummary, setExportSummary] = useState<ExportSummaryEntry[]>([]);
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -347,11 +408,26 @@ export function VerificationCenter() {
       setError(result.error.message);
       setScans([]);
       setDuplicateContactById(new Map());
+      setExportSummary([]);
       return;
     }
 
     const loadedScans = (result.data ?? []) as Scan[];
     setScans(loadedScans);
+
+    // CRM export summary: one query for per-AE approved-contact counts. A
+    // failure here is non-fatal — the rest of the center still renders.
+    const exportRes = await supabase
+      .from("business_card_contacts")
+      .select("salesperson_id, salesperson_name, verification_status, exported_at")
+      .in("verification_status", ["auto_approved", "approved"]);
+    if (exportRes.error) {
+      setExportSummary([]);
+    } else {
+      setExportSummary(
+        summarizeExports((exportRes.data ?? []) as ExportContactRow[]),
+      );
+    }
 
     // Build the duplicate-contact lookup in ONE batched query: collect the
     // unique matched-contact ids across all scans, fetch them with .in(), and
@@ -500,6 +576,72 @@ export function VerificationCenter() {
     [load, scans],
   );
 
+  const handleExport = useCallback(
+    async (target: {
+      key: string;
+      salespersonId: string | null;
+      salespersonName: string | null;
+    }) => {
+      setExportingKey(target.key);
+      setActionMessage(null);
+      try {
+        const params = new URLSearchParams();
+        // Prefer the stable id; fall back to name when the AE has no id.
+        if (target.salespersonId) {
+          params.set("salespersonId", target.salespersonId);
+        } else if (target.salespersonName) {
+          params.set("salespersonName", target.salespersonName);
+        }
+        const qs = params.toString();
+        const res = await fetch(
+          `/api/business-card/contacts/export${qs ? `?${qs}` : ""}`,
+        );
+        if (!res.ok) {
+          let message = `Export failed (${res.status})`;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (typeof data.error === "string" && data.error.length > 0) {
+              message = data.error;
+            }
+          } catch {
+            // ignore parse error; keep status-based message
+          }
+          throw new Error(message);
+        }
+
+        // Stream the CSV to a download without leaving the page, so counts can
+        // be refreshed straight afterwards.
+        const blob = await res.blob();
+        const disposition = res.headers.get("Content-Disposition") ?? "";
+        const match = /filename="([^"]+)"/.exec(disposition);
+        const filename = match?.[1] ?? "business-card-contacts.csv";
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+
+        setActionMessage({
+          kind: "success",
+          text: "CSV exported. Those contacts are now marked as exported.",
+        });
+        // Refresh so exported contacts drop out of the "new" counts.
+        await load();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setActionMessage({ kind: "error", text: message });
+      } finally {
+        setExportingKey((current) =>
+          current === target.key ? null : current,
+        );
+      }
+    },
+    [load],
+  );
+
   const counts = useMemo(() => {
     const tally: Record<FilterKey, number> = {
       needs_review: 0,
@@ -556,14 +698,6 @@ export function VerificationCenter() {
               </CardDescription>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <a
-                href="/api/business-card/contacts/export"
-                className={buttonVariants({ variant: "outline", size: "sm" })}
-                aria-label="Export verified contacts as CRM CSV"
-              >
-                <Download aria-hidden="true" />
-                Export CRM CSV
-              </a>
               <Button
                 type="button"
                 variant="outline"
@@ -654,6 +788,14 @@ export function VerificationCenter() {
             </p>
           )}
 
+          {!loading && !error && exportSummary.length > 0 && (
+            <ExportSection
+              summary={exportSummary}
+              exportingKey={exportingKey}
+              onExport={handleExport}
+            />
+          )}
+
           {loading ? (
             <p className="text-sm text-muted-foreground">Loading scans…</p>
           ) : error ? (
@@ -729,6 +871,104 @@ export function VerificationCenter() {
         <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
       )}
     </>
+  );
+}
+
+/**
+ * CRM Export panel: per-AE counts of approved contacts available to export,
+ * plus per-AE and "all new" CSV export buttons. Exporting marks contacts as
+ * exported (it never deletes them); after a run the counts are refreshed so
+ * already-exported contacts drop out of the "new" total.
+ */
+function ExportSection({
+  summary,
+  exportingKey,
+  onExport,
+}: {
+  summary: ExportSummaryEntry[];
+  exportingKey: string | null;
+  onExport: (target: {
+    key: string;
+    salespersonId: string | null;
+    salespersonName: string | null;
+  }) => void;
+}) {
+  const totalNew = summary.reduce((sum, ae) => sum + ae.newCount, 0);
+  const anyExporting = exportingKey !== null;
+
+  return (
+    <section className="mb-4 rounded-lg border bg-muted/30 p-3 sm:p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold">CRM Export</h3>
+          <p className="text-xs text-muted-foreground">
+            Export approved contacts to CSV per AE. Exported contacts are
+            marked and skipped next time — nothing is ever deleted.
+          </p>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() =>
+            onExport({
+              key: EXPORT_ALL_KEY,
+              salespersonId: null,
+              salespersonName: null,
+            })
+          }
+          disabled={totalNew === 0 || anyExporting}
+        >
+          <Download aria-hidden="true" />
+          {exportingKey === EXPORT_ALL_KEY
+            ? "Exporting…"
+            : `Export All New Contacts (${totalNew})`}
+        </Button>
+      </div>
+
+      <ul className="mt-3 space-y-2">
+        {summary.map((ae) => {
+          const busy = exportingKey === ae.key;
+          return (
+            <li
+              key={ae.key}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card p-3"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">
+                  {ae.salespersonName}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  New approved contacts:{" "}
+                  <span className="font-medium text-foreground">
+                    {ae.newCount}
+                  </span>{" "}
+                  · Already exported:{" "}
+                  <span className="font-medium text-foreground">
+                    {ae.exportedCount}
+                  </span>
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  onExport({
+                    key: ae.key,
+                    salespersonId: ae.salespersonId,
+                    salespersonName: ae.salespersonName,
+                  })
+                }
+                disabled={ae.newCount === 0 || anyExporting}
+              >
+                <Download aria-hidden="true" />
+                {busy ? "Exporting…" : "Export New CSV"}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
