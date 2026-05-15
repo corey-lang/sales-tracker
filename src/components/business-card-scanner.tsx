@@ -3,7 +3,6 @@
 import { useCallback, useState } from "react";
 import { Camera } from "lucide-react";
 
-import { isTestAccount } from "@/lib/permissions";
 import { supabase } from "@/lib/supabase/client";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
 
@@ -60,10 +59,11 @@ type Props = {
 
 // Live AE rollout: every AE sees the real scanner — there is no longer a
 // "Coming Soon" gate. The seeded Test account still gets the scanner too; the
-// only difference is `is_test_data`, set per scan from isTestAccount() so the
-// Test account's scans stay cleanly separable from real AE data. Either way
-// this writes ONLY to business_card_scans + the business-card-scans storage
-// bucket — it never produces leaderboard or metric data.
+// only difference is `is_test_data`, which the /api/business-card/scan route
+// derives server-side so the Test account's scans stay cleanly separable from
+// real AE data. Either way this writes ONLY to business_card_scans + the
+// business-card-scans storage bucket — it never produces leaderboard or
+// metric data.
 export function BusinessCardScanner({ salesperson }: Props) {
   return <ActiveScanner salesperson={salesperson} />;
 }
@@ -154,24 +154,36 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
       .from(BUCKET)
       .getPublicUrl(upload.data.path);
 
-    const insert = await supabase
-      .from("business_card_scans")
-      .insert({
-        salesperson_id: salesperson.id,
-        salesperson_name: salesperson.first_name,
-        image_url: publicUrl.publicUrl,
-        status: "processing",
-        // Real AE scans are live data (is_test_data = false). Only the seeded
-        // Test account produces test rows — keeping them separable so the
-        // cleanup script can remove test data without touching live scans.
-        is_test_data: isTestAccount(salesperson),
-      })
-      .select("id")
-      .single();
+    // business_card_scans has RLS enabled and the app has no Supabase Auth, so
+    // the browser's anon key cannot insert the scan row directly. The row is
+    // created by a server route (service-role key, bypasses RLS) that
+    // re-validates salesperson.id against the salespeople table before writing
+    // — see src/app/api/business-card/scan/route.ts.
+    let scanId: string;
+    try {
+      const res = await fetch("/api/business-card/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salespersonId: salesperson.id,
+          imageUrl: publicUrl.publicUrl,
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as
+        | { scanId?: string; error?: string }
+        | null;
 
-    if (insert.error || !insert.data) {
+      if (!res.ok || !payload?.scanId) {
+        setErrorMessage(
+          `Save failed: ${payload?.error ?? `server returned ${res.status}`}`,
+        );
+        setUploading(false);
+        return;
+      }
+      scanId = payload.scanId;
+    } catch (err) {
       setErrorMessage(
-        `Save failed: ${insert.error?.message ?? "no row returned"}`,
+        `Save failed: ${err instanceof Error ? err.message : "network error"}`,
       );
       setUploading(false);
       return;
@@ -181,7 +193,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     // on AI: record the card as saved, return the scanner to its ready state,
     // and fire extraction in the background so the AE can immediately scan the
     // next card without waiting.
-    const scanId = insert.data.id as string;
     setRecent((prev) =>
       [
         { scanId, fileName: file.name, status: "saved" as RecentStatus },
