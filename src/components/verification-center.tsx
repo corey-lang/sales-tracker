@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
-import { ExternalLink, RefreshCw, X } from "lucide-react";
+import { Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
 import { supabase } from "@/lib/supabase/client";
 import {
@@ -12,7 +12,7 @@ import {
   type ContactBucket,
 } from "@/lib/contact-type";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -22,6 +22,16 @@ import {
 } from "@/components/ui/card";
 
 type ExtractionStatus = "pending" | "completed" | "failed";
+
+/** Verification workflow states a scan can be in (verification_status). */
+type WorkflowStatus =
+  | "needs_review"
+  | "duplicate_review"
+  | "auto_approved"
+  | "approved"
+  | "auto_duplicate"
+  | "rejected"
+  | "rejected_duplicate";
 
 type Scan = {
   id: string;
@@ -43,6 +53,11 @@ type Scan = {
   extraction_status: string | null;
   raw_ocr_text: string | null;
   ai_notes: string | null;
+  verification_status: string | null;
+  verified_contact_id: string | null;
+  duplicate_status: string | null;
+  duplicate_notes: string | null;
+  rejection_reason: string | null;
 };
 
 /** A scan with its frontend-derived contact-type bucket attached. */
@@ -54,11 +69,103 @@ type BucketGroup = { bucket: ContactBucket; scans: ScanWithBucket[] };
 /** All scans for a single AE, split into contact-type subsections. */
 type AeGroup = { name: string; total: number; buckets: BucketGroup[] };
 
-/**
- * Groups scans by AE (salesperson_name), then by normalized contact-type
- * bucket. AEs are sorted alphabetically; scans keep their incoming order
- * (newest first). Empty buckets are omitted.
- */
+/** Manual Tonja/admin actions, matching the /api/business-card route names. */
+type ActionKind = "approve" | "reject" | "mark-duplicate";
+
+// ---------------------------------------------------------------------------
+// Workflow status metadata
+// ---------------------------------------------------------------------------
+
+const WORKFLOW_STATUS_META: Record<
+  WorkflowStatus,
+  { label: string; className: string }
+> = {
+  needs_review: {
+    label: "Needs Review",
+    className:
+      "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  },
+  duplicate_review: {
+    label: "Duplicate Review",
+    className:
+      "border-orange-500/40 bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  },
+  auto_approved: {
+    label: "Auto Approved",
+    className:
+      "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+  approved: {
+    label: "Approved",
+    className:
+      "border-emerald-600/50 bg-emerald-600/15 text-emerald-800 dark:text-emerald-300",
+  },
+  auto_duplicate: {
+    label: "Auto Duplicate",
+    className:
+      "border-slate-400/40 bg-slate-400/10 text-slate-700 dark:text-slate-300",
+  },
+  rejected: {
+    label: "Rejected",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
+  rejected_duplicate: {
+    label: "Rejected Duplicate",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
+};
+
+/** Normalizes a raw verification_status; null/empty is treated as needs_review. */
+function effectiveStatus(scan: Scan): WorkflowStatus {
+  const raw = (scan.verification_status ?? "").toLowerCase().trim();
+  if (raw.length === 0) return "needs_review";
+  return raw in WORKFLOW_STATUS_META
+    ? (raw as WorkflowStatus)
+    : "needs_review";
+}
+
+// ---------------------------------------------------------------------------
+// Status filters
+// ---------------------------------------------------------------------------
+
+/** The status filter chips shown at the top of the Verification Center. */
+type FilterKey =
+  | "needs_review"
+  | "duplicate_review"
+  | "auto_approved"
+  | "auto_duplicate"
+  | "approved"
+  | "rejected";
+
+const FILTER_KEYS: FilterKey[] = [
+  "needs_review",
+  "duplicate_review",
+  "auto_approved",
+  "auto_duplicate",
+  "approved",
+  "rejected",
+];
+
+const FILTER_LABELS: Record<FilterKey, string> = {
+  needs_review: "Needs Review",
+  duplicate_review: "Duplicate Review",
+  auto_approved: "Auto Approved",
+  auto_duplicate: "Auto Duplicates",
+  approved: "Approved",
+  rejected: "Rejected",
+};
+
+/** Default queue: only items that need a human — keeps Tonja's view focused. */
+const DEFAULT_FILTERS: FilterKey[] = ["needs_review", "duplicate_review"];
+
+/** Maps a workflow status to the filter chip it belongs under. */
+function filterKeyForStatus(status: WorkflowStatus): FilterKey {
+  if (status === "rejected" || status === "rejected_duplicate") {
+    return "rejected";
+  }
+  return status;
+}
+
 function groupScansByAe(scans: Scan[]): AeGroup[] {
   const byAe = new Map<string, ScanWithBucket[]>();
 
@@ -103,6 +210,7 @@ function formatConfidence(value: number | null): string | null {
 }
 
 type Preview = { url: string; name: string };
+type ActionMessage = { kind: "success" | "error"; text: string };
 
 export function VerificationCenter() {
   const [scans, setScans] = useState<Scan[]>([]);
@@ -112,13 +220,20 @@ export function VerificationCenter() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
+  const [activeFilters, setActiveFilters] = useState<Set<FilterKey>>(
+    () => new Set(DEFAULT_FILTERS),
+  );
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<ActionMessage | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setError(null);
     const result = await supabase
       .from("business_card_scans")
       .select(
-        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes",
+        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, rejection_reason",
       )
       .order("created_at", { ascending: false });
 
@@ -185,95 +300,250 @@ export function VerificationCenter() {
     [load],
   );
 
+  const handleAction = useCallback(
+    async (scanId: string, action: ActionKind) => {
+      let body: Record<string, unknown> = { scanId };
+
+      if (action === "reject") {
+        const reason = window.prompt(
+          "Reason for rejecting this scan? (optional — leave blank to skip)",
+        );
+        if (reason === null) return; // cancelled
+        if (reason.trim().length > 0) body = { ...body, reason: reason.trim() };
+      }
+
+      setActioningId(scanId);
+      setActionMessage(null);
+      try {
+        const res = await fetch(`/api/business-card/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          let message = `Action failed (${res.status})`;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (typeof data.error === "string" && data.error.length > 0) {
+              message = data.error;
+            }
+          } catch {
+            // ignore parse error; keep status-based message
+          }
+          throw new Error(message);
+        }
+        const verb: Record<ActionKind, string> = {
+          approve: "approved as a contact",
+          reject: "rejected",
+          "mark-duplicate": "marked as a duplicate",
+        };
+        setActionMessage({ kind: "success", text: `Scan ${verb[action]}.` });
+        await load();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setActionMessage({ kind: "error", text: message });
+      } finally {
+        setActioningId((current) => (current === scanId ? null : current));
+      }
+    },
+    [load],
+  );
+
+  const counts = useMemo(() => {
+    const tally: Record<FilterKey, number> = {
+      needs_review: 0,
+      duplicate_review: 0,
+      auto_approved: 0,
+      auto_duplicate: 0,
+      approved: 0,
+      rejected: 0,
+    };
+    for (const scan of scans) {
+      tally[filterKeyForStatus(effectiveStatus(scan))] += 1;
+    }
+    return tally;
+  }, [scans]);
+
+  const filteredScans = useMemo(
+    () =>
+      scans.filter((scan) =>
+        activeFilters.has(filterKeyForStatus(effectiveStatus(scan))),
+      ),
+    [scans, activeFilters],
+  );
+
+  const allFiltersActive = activeFilters.size === FILTER_KEYS.length;
+
+  const toggleFilter = (key: FilterKey) => {
+    setActiveFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const aeGroups = groupScansByAe(filteredScans);
+
   return (
     <>
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <CardTitle className="text-xl">
-              Business Card Verification Center
-            </CardTitle>
-            <CardDescription>
-              Uploaded business card scans, newest first. Display only — no
-              edits, OCR, or approvals yet.
-            </CardDescription>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleRefresh}
-            disabled={refreshing || loading}
-            aria-label="Refresh scans"
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={refreshing ? "animate-spin" : ""}
-            />
-            Refresh
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {loading ? (
-          <p className="text-sm text-muted-foreground">Loading scans…</p>
-        ) : error ? (
-          <p
-            role="alert"
-            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            Failed to load scans: {error}
-          </p>
-        ) : scans.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No scans yet.</p>
-        ) : (
-          <div className="space-y-6">
-            {groupScansByAe(scans).map((aeGroup) => (
-              <section
-                key={aeGroup.name}
-                className="rounded-lg border bg-muted/30 p-3 sm:p-4"
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle className="text-xl">
+                Business Card Verification Center
+              </CardTitle>
+              <CardDescription>
+                Review scans, approve them into CRM contacts, and export
+                verified contacts as CSV. Scans and images are kept forever.
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="/api/business-card/contacts/export"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+                aria-label="Export verified contacts as CRM CSV"
               >
-                <h3 className="text-lg font-semibold">
-                  {aeGroup.name}{" "}
-                  <span className="text-muted-foreground">
-                    ({aeGroup.total})
-                  </span>
-                </h3>
-                <div className="mt-3 space-y-5">
-                  {aeGroup.buckets.map((bucketGroup) => (
-                    <div key={bucketGroup.bucket}>
-                      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {CONTACT_BUCKET_LABELS[bucketGroup.bucket]} (
-                        {bucketGroup.scans.length})
-                      </h4>
-                      <ul className="mt-2 space-y-3">
-                        {bucketGroup.scans.map((scan) => (
-                          <ScanCard
-                            key={scan.id}
-                            scan={scan}
-                            retrying={retryingId === scan.id}
-                            retryDisabled={
-                              retryingId !== null && retryingId !== scan.id
-                            }
-                            retryError={retryErrors[scan.id] ?? null}
-                            onRetry={() => void handleRetry(scan.id)}
-                            onPreview={setPreview}
-                          />
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+                <Download aria-hidden="true" />
+                Export CRM CSV
+              </a>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={refreshing || loading}
+                aria-label="Refresh scans"
+              >
+                <RefreshCw
+                  aria-hidden="true"
+                  className={refreshing ? "animate-spin" : ""}
+                />
+                Refresh
+              </Button>
+            </div>
           </div>
-        )}
-      </CardContent>
-    </Card>
-    {preview && (
-      <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
-    )}
+        </CardHeader>
+        <CardContent>
+          {!loading && !error && scans.length > 0 && (
+            <div className="mb-4 flex flex-wrap gap-2">
+              {FILTER_KEYS.map((key) => {
+                const active = activeFilters.has(key);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => toggleFilter(key)}
+                    aria-pressed={active}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                      active
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-input bg-background text-muted-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {FILTER_LABELS[key]} ({counts[key]})
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setActiveFilters(new Set(FILTER_KEYS))}
+                aria-pressed={allFiltersActive}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  allFiltersActive
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input bg-background text-muted-foreground hover:bg-muted"
+                }`}
+              >
+                All
+              </button>
+            </div>
+          )}
+
+          {actionMessage && (
+            <p
+              role={actionMessage.kind === "error" ? "alert" : "status"}
+              className={`mb-4 rounded-md border px-3 py-2 text-sm ${
+                actionMessage.kind === "error"
+                  ? "border-destructive/40 bg-destructive/10 text-destructive"
+                  : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+              }`}
+            >
+              {actionMessage.text}
+            </p>
+          )}
+
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Loading scans…</p>
+          ) : error ? (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              Failed to load scans: {error}
+            </p>
+          ) : scans.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No scans yet.</p>
+          ) : filteredScans.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No scans match the selected filters.
+            </p>
+          ) : (
+            <div className="space-y-6">
+              {aeGroups.map((aeGroup) => (
+                <section
+                  key={aeGroup.name}
+                  className="rounded-lg border bg-muted/30 p-3 sm:p-4"
+                >
+                  <h3 className="text-lg font-semibold">
+                    {aeGroup.name}{" "}
+                    <span className="text-muted-foreground">
+                      ({aeGroup.total})
+                    </span>
+                  </h3>
+                  <div className="mt-3 space-y-5">
+                    {aeGroup.buckets.map((bucketGroup) => (
+                      <div key={bucketGroup.bucket}>
+                        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          {CONTACT_BUCKET_LABELS[bucketGroup.bucket]} (
+                          {bucketGroup.scans.length})
+                        </h4>
+                        <ul className="mt-2 space-y-3">
+                          {bucketGroup.scans.map((scan) => (
+                            <ScanCard
+                              key={scan.id}
+                              scan={scan}
+                              retrying={retryingId === scan.id}
+                              retryDisabled={
+                                retryingId !== null && retryingId !== scan.id
+                              }
+                              retryError={retryErrors[scan.id] ?? null}
+                              onRetry={() => void handleRetry(scan.id)}
+                              actioning={actioningId === scan.id}
+                              actionsDisabled={actioningId !== null}
+                              onAction={(action) =>
+                                void handleAction(scan.id, action)
+                              }
+                              onPreview={setPreview}
+                            />
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      {preview && (
+        <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
+      )}
     </>
   );
 }
@@ -284,6 +554,9 @@ function ScanCard({
   retryDisabled,
   retryError,
   onRetry,
+  actioning,
+  actionsDisabled,
+  onAction,
   onPreview,
 }: {
   scan: Scan;
@@ -291,8 +564,15 @@ function ScanCard({
   retryDisabled: boolean;
   retryError: string | null;
   onRetry: () => void;
+  actioning: boolean;
+  actionsDisabled: boolean;
+  onAction: (action: ActionKind) => void;
   onPreview: (preview: Preview) => void;
 }) {
+  const status = effectiveStatus(scan);
+  const needsAction =
+    status === "needs_review" || status === "duplicate_review";
+
   return (
     <li className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start">
       <a
@@ -332,6 +612,7 @@ function ScanCard({
           <span className="text-base font-semibold">
             {scan.salesperson_name ?? "Unknown"}
           </span>
+          <WorkflowStatusBadge status={status} />
           <StatusBadge status={scan.status} />
           <ExtractionStatusBadge status={scan.extraction_status} />
           {scan.is_test_data && <TestDataBadge />}
@@ -339,6 +620,22 @@ function ScanCard({
         <p className="text-sm text-muted-foreground">
           Uploaded {formatTimestamp(scan.created_at)}
         </p>
+        {scan.duplicate_notes && scan.duplicate_notes.trim().length > 0 && (
+          <p className="rounded-md border border-orange-500/40 bg-orange-500/10 px-2 py-1 text-xs text-orange-800 dark:text-orange-300">
+            <span className="font-semibold uppercase tracking-wide">
+              Duplicate:
+            </span>{" "}
+            {scan.duplicate_notes}
+          </p>
+        )}
+        {scan.rejection_reason && scan.rejection_reason.trim().length > 0 && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            <span className="font-semibold uppercase tracking-wide">
+              Rejected:
+            </span>{" "}
+            {scan.rejection_reason}
+          </p>
+        )}
         <RetryAIControl
           extractionStatus={scan.extraction_status}
           extractedContactType={scan.extracted_contact_type}
@@ -347,9 +644,57 @@ function ScanCard({
           error={retryError}
           onRetry={onRetry}
         />
+        {needsAction && (
+          <ScanActions
+            busy={actioning}
+            disabled={actionsDisabled}
+            onAction={onAction}
+          />
+        )}
         <ExtractedFields scan={scan} />
       </div>
     </li>
+  );
+}
+
+function ScanActions({
+  busy,
+  disabled,
+  onAction,
+}: {
+  busy: boolean;
+  disabled: boolean;
+  onAction: (action: ActionKind) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2 border-t pt-2">
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => onAction("approve")}
+        disabled={disabled || busy}
+      >
+        {busy ? "Working…" : "Approve as Contact"}
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onAction("reject")}
+        disabled={disabled || busy}
+      >
+        Reject
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onAction("mark-duplicate")}
+        disabled={disabled || busy}
+      >
+        Mark Duplicate
+      </Button>
+    </div>
   );
 }
 
@@ -512,6 +857,17 @@ function ExtractedFields({ scan }: { scan: Scan }) {
   );
 }
 
+function WorkflowStatusBadge({ status }: { status: WorkflowStatus }) {
+  const meta = WORKFLOW_STATUS_META[status];
+  return (
+    <span
+      className={`rounded-full border px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${meta.className}`}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   return (
     <span className="rounded-full border bg-muted px-2 py-0.5 text-xs font-medium capitalize text-muted-foreground">
@@ -528,8 +884,7 @@ function ExtractionStatusBadge({ status }: { status: string | null }) {
       "border-slate-400/40 bg-slate-400/10 text-slate-700 dark:text-slate-300",
     completed:
       "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-    failed:
-      "border-destructive/40 bg-destructive/10 text-destructive",
+    failed: "border-destructive/40 bg-destructive/10 text-destructive",
   };
 
   const className =

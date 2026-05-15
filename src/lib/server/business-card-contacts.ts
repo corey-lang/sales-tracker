@@ -299,6 +299,11 @@ type ContactDupRow = {
 export type DuplicateMatch = {
   /** The existing contact this scan appears to duplicate. */
   contactId: string;
+  /**
+   * Which signal matched. "email" / "phone" are strong (used for auto-marking
+   * duplicates); "name_company" is weaker and is left for manual review.
+   */
+  matchType: "email" | "phone" | "name_company";
   /** Human-readable explanation of what matched. */
   reason: string;
 };
@@ -306,9 +311,10 @@ export type DuplicateMatch = {
 /**
  * Foundation duplicate check. A scan is a potential duplicate of an existing
  * contact when any of these match:
- *  - normalized email
- *  - normalized phone (digits only)
- *  - normalized full_name AND normalized company together
+ *  - normalized email          → strong  (matchType "email")
+ *  - normalized phone (digits) → strong  (matchType "phone")
+ *  - normalized full_name AND normalized company together → weak
+ *    (matchType "name_company")
  *
  * Returns the first match found, or null. Does not merge, delete, or modify
  * anything — detection only.
@@ -344,12 +350,14 @@ export async function findDuplicateContact(
     if (email && normalizeEmail(row.email) === email) {
       return {
         contactId: row.id,
+        matchType: "email",
         reason: `matching email (${scan.extracted_email})`,
       };
     }
     if (phone && normalizePhone(row.phone) === phone) {
       return {
         contactId: row.id,
+        matchType: "phone",
         reason: `matching phone (${scan.extracted_phone})`,
       };
     }
@@ -361,6 +369,7 @@ export async function findDuplicateContact(
     ) {
       return {
         contactId: row.id,
+        matchType: "name_company",
         reason: `matching name + company (${scan.extracted_full_name} @ ${scan.extracted_company})`,
       };
     }
@@ -390,6 +399,11 @@ export type AutoApprovalResult =
   | { outcome: "auto_approved"; contactId: string }
   | { outcome: "needs_review"; reason: string }
   | {
+      outcome: "auto_duplicate";
+      reason: string;
+      duplicateOfContactId: string;
+    }
+  | {
       outcome: "duplicate_review";
       reason: string;
       duplicateOfContactId: string;
@@ -405,9 +419,13 @@ export type AutoApprovalResult =
  *  - the scan has at least one usable identity field (email / phone /
  *    full_name / company)
  *
- * If a duplicate risk is found, the scan is flagged for manual duplicate
- * review (duplicate_status = possible_duplicate, verification_status =
- * duplicate_review) and NO contact is created.
+ * Duplicate handling (a contact is never created in either case):
+ *  - A strong match (email OR phone) at >= 90 confidence is auto-marked:
+ *    duplicate_status = confirmed_duplicate, verification_status =
+ *    auto_duplicate. Tonja does NOT need to review it.
+ *  - A weak match (full_name + company only) is left for manual review:
+ *    duplicate_status = possible_duplicate, verification_status =
+ *    duplicate_review.
  *
  * In every other case the scan is left as needs_review. The scan row and its
  * image are never deleted.
@@ -447,9 +465,31 @@ export async function maybeAutoApproveScan(
 
   const duplicate = await findDuplicateContact(supabase, scan);
   if (duplicate) {
+    const strong =
+      duplicate.matchType === "email" || duplicate.matchType === "phone";
+
+    if (strong) {
+      // Email/phone match at >= 90 confidence is decisive — auto-mark the scan
+      // as a confirmed duplicate. No contact is created, no review needed.
+      const notes = `Auto-marked duplicate of contact ${duplicate.contactId} — ${duplicate.reason}`;
+      await supabase
+        .from("business_card_scans")
+        .update({
+          verification_status: "auto_duplicate",
+          duplicate_status: "confirmed_duplicate",
+          duplicate_notes: notes,
+        })
+        .eq("id", scan.id);
+      return {
+        outcome: "auto_duplicate",
+        reason: notes,
+        duplicateOfContactId: duplicate.contactId,
+      };
+    }
+
+    // Name + company only — weaker signal. Flag for manual duplicate review;
+    // do NOT auto-approve, do NOT create a contact, do NOT touch the original.
     const notes = `Possible duplicate of contact ${duplicate.contactId} — ${duplicate.reason}`;
-    // Flag for manual duplicate review; do NOT auto-approve, do NOT create a
-    // contact, do NOT touch the existing contact.
     await supabase
       .from("business_card_scans")
       .update({
