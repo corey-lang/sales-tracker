@@ -4,18 +4,11 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { format } from "date-fns";
 
-import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
-import {
-  ACTIVITIES,
-  ZERO_ACTIVITY,
-  type ActivityKey,
-  type ActivityValues,
-} from "@/lib/activities";
-import { averagePercent, businessWeekToDateRange, progressColor } from "@/lib/goals";
+import { ACTIVITIES, type ActivityKey, type ActivityValues } from "@/lib/activities";
+import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -27,17 +20,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-type Salesperson = { id: string; first_name: string };
-
-type EntryRow = ActivityValues & { salesperson_id: string };
-
-type GoalRow = ActivityValues & {
-  id: string;
-  salesperson_id: string | null;
-  effective_from: string;
-  created_at?: string;
-};
-
+// Shape returned by GET /api/leaderboard. Percentages are computed
+// server-side; raw weekly_goals targets never reach the browser.
 type Standing = {
   id: string;
   first_name: string;
@@ -45,34 +29,6 @@ type Standing = {
   totals: ActivityValues;
   percent: number | null;
 };
-
-const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
-
-function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
-  const eff = b.effective_from.localeCompare(a.effective_from);
-  if (eff !== 0) return eff;
-  return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-}
-
-function activeGoalFor(
-  personId: string,
-  allGoals: GoalRow[],
-  todayStr: string,
-): GoalRow | null {
-  const personal = allGoals
-    .filter(
-      (g) =>
-        g.salesperson_id === personId && g.effective_from <= todayStr,
-    )
-    .sort(sortGoalsByRecency);
-  if (personal[0]) return personal[0];
-  const global = allGoals
-    .filter(
-      (g) => g.salesperson_id === null && g.effective_from <= todayStr,
-    )
-    .sort(sortGoalsByRecency);
-  return global[0] ?? null;
-}
 
 export default function LeaderboardPage() {
   const router = useRouter();
@@ -89,87 +45,47 @@ export default function LeaderboardPage() {
   useEffect(() => {
     if (!loaded || !salesperson) return;
     let cancelled = false;
-    const now = new Date();
-    const todayStr = format(now, "yyyy-MM-dd");
-    const { since, through } = businessWeekToDateRange(now);
 
-    Promise.all([
-      // Admins (is_admin=true), assistants (role='assistant'), and test
-      // accounts (is_test=true) don't compete.
-      supabase
-        .from("salespeople")
-        .select("id, first_name")
-        .eq("is_admin", false)
-        .eq("is_test", false)
-        .neq("role", "assistant"),
-      supabase
-        .from("activity_entries")
-        .select(["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","))
-        .gte("entry_date", since)
-        .lte("entry_date", through),
-      supabase.from("weekly_goals").select("*"),
-    ]).then(([peopleRes, entriesRes, goalsRes]) => {
-      if (cancelled) return;
-      const firstErr =
-        peopleRes.error ?? entriesRes.error ?? goalsRes.error;
-      if (firstErr) {
-        setError(firstErr.message);
-        return;
-      }
-      const people = (peopleRes.data ?? []) as Salesperson[];
-      const entries = (entriesRes.data ?? []) as unknown as EntryRow[];
-      const allGoals = (goalsRes.data ?? []) as GoalRow[];
-
-      const byPerson = new Map<string, ActivityValues>();
-      for (const p of people) {
-        byPerson.set(p.id, { ...ZERO_ACTIVITY });
-      }
-      for (const e of entries) {
-        const bucket = byPerson.get(e.salesperson_id);
-        if (!bucket) continue;
-        for (const a of ACTIVITIES) {
-          bucket[a.key] += Number(e[a.key] ?? 0);
-        }
-      }
-
-      const result: Standing[] = people.map((p) => {
-        const totals = byPerson.get(p.id) ?? { ...ZERO_ACTIVITY };
-        const total = (Object.keys(totals) as ActivityKey[]).reduce(
-          (sum, k) => sum + totals[k],
-          0,
-        );
-        const goal = activeGoalFor(p.id, allGoals, todayStr);
-        const weeklyTargets = { ...ZERO_ACTIVITY };
-        if (goal) {
-          for (const a of ACTIVITIES) {
-            weeklyTargets[a.key] = Number(goal[a.key as ActivityKey] ?? 0);
-          }
-        }
-        const percent = averagePercent(totals, weeklyTargets, ACTIVITY_KEYS);
-        return {
-          id: p.id,
-          first_name: p.first_name,
-          total,
-          totals,
-          percent,
+    // Percentages are computed server-side by /api/leaderboard so raw
+    // weekly_goals targets never reach the browser. Sorting stays here to
+    // preserve this view's existing ranking behavior.
+    fetch("/api/leaderboard")
+      .then(async (res) => {
+        const body = (await res.json()) as {
+          standings?: Standing[];
+          error?: string;
         };
-      });
-
-      // Sort by percent desc (null goes last); name as tiebreaker.
-      result.sort((a, b) => {
-        if (a.percent === null && b.percent === null) {
-          return b.total - a.total || a.first_name.localeCompare(b.first_name);
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(body.error ?? "Couldn't load leaderboard.");
+          return;
         }
-        if (a.percent === null) return 1;
-        if (b.percent === null) return -1;
-        return (
-          b.percent - a.percent ||
-          b.total - a.total ||
-          a.first_name.localeCompare(b.first_name)
+        const result = body.standings ?? [];
+
+        // Sort by percent desc (null goes last); name as tiebreaker.
+        result.sort((a, b) => {
+          if (a.percent === null && b.percent === null) {
+            return (
+              b.total - a.total || a.first_name.localeCompare(b.first_name)
+            );
+          }
+          if (a.percent === null) return 1;
+          if (b.percent === null) return -1;
+          return (
+            b.percent - a.percent ||
+            b.total - a.total ||
+            a.first_name.localeCompare(b.first_name)
+          );
+        });
+        setStandings(result);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Couldn't load leaderboard.",
         );
       });
-      setStandings(result);
-    });
 
     return () => {
       cancelled = true;

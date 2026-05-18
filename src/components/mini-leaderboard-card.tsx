@@ -2,68 +2,27 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { format } from "date-fns";
 import { Trophy } from "lucide-react";
 
-import { supabase } from "@/lib/supabase/client";
-import {
-  ACTIVITIES,
-  ZERO_ACTIVITY,
-  type ActivityKey,
-  type ActivityValues,
-} from "@/lib/activities";
-import { averagePercent, businessWeekToDateRange, progressColor } from "@/lib/goals";
+import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
-type Person = { id: string; first_name: string };
-type GoalRow = ActivityValues & {
-  id: string;
-  salesperson_id: string | null;
-  effective_from: string;
-  created_at?: string;
-};
-
+// Percent score per rep, as returned by GET /api/leaderboard. The endpoint
+// returns `percent` as number | null; this card treats "no goal" as 0%,
+// unchanged from the prior client-side behavior.
 type Standing = {
   id: string;
   first_name: string;
   percent: number;
 };
 
-const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
-
 type Props = {
   currentSalespersonId: string;
   refreshKey: number;
 };
-
-function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
-  const eff = b.effective_from.localeCompare(a.effective_from);
-  if (eff !== 0) return eff;
-  return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-}
-
-function activeGoalFor(
-  personId: string,
-  allGoals: GoalRow[],
-  todayStr: string,
-): GoalRow | null {
-  const personal = allGoals
-    .filter(
-      (g) =>
-        g.salesperson_id === personId && g.effective_from <= todayStr,
-    )
-    .sort(sortGoalsByRecency);
-  if (personal[0]) return personal[0];
-  const global = allGoals
-    .filter(
-      (g) => g.salesperson_id === null && g.effective_from <= todayStr,
-    )
-    .sort(sortGoalsByRecency);
-  return global[0] ?? null;
-}
 
 export function MiniLeaderboardCard({
   currentSalespersonId,
@@ -75,71 +34,44 @@ export function MiniLeaderboardCard({
 
   useEffect(() => {
     let cancelled = false;
-    const now = new Date();
-    const todayStr = format(now, "yyyy-MM-dd");
-    const { since, through } = businessWeekToDateRange(now);
 
-    Promise.all([
-      supabase
-        .from("salespeople")
-        .select("id, first_name")
-        .eq("is_admin", false)
-        .eq("is_test", false)
-        .neq("role", "assistant"),
-      supabase
-        .from("activity_entries")
-        .select(
-          ["salesperson_id", ...ACTIVITIES.map((a) => a.key)].join(","),
-        )
-        .gte("entry_date", since)
-        .lte("entry_date", through),
-      supabase.from("weekly_goals").select("*"),
-    ]).then(([peopleRes, entriesRes, goalsRes]) => {
-      if (cancelled) return;
-      const firstErr =
-        peopleRes.error ?? entriesRes.error ?? goalsRes.error;
-      if (firstErr) {
-        setError(firstErr.message);
-        return;
-      }
-      const people = (peopleRes.data ?? []) as Person[];
-      const entries = (entriesRes.data ?? []) as unknown as Array<
-        Partial<ActivityValues> & { salesperson_id: string }
-      >;
-      const allGoals = (goalsRes.data ?? []) as GoalRow[];
-
-      const totalsByPerson = new Map<string, ActivityValues>();
-      for (const p of people) totalsByPerson.set(p.id, { ...ZERO_ACTIVITY });
-      for (const e of entries) {
-        const bucket = totalsByPerson.get(e.salesperson_id);
-        if (!bucket) continue;
-        for (const a of ACTIVITIES) {
-          bucket[a.key] += Number(e[a.key as ActivityKey] ?? 0);
+    // Percentages come from /api/leaderboard so raw weekly_goals targets
+    // never reach the browser. Sorting stays here to preserve this card's
+    // existing ranking behavior.
+    fetch("/api/leaderboard")
+      .then(async (res) => {
+        const body = (await res.json()) as {
+          standings?: Array<{
+            id: string;
+            first_name: string;
+            percent: number | null;
+          }>;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(body.error ?? "Couldn't load leaderboard.");
+          return;
         }
-      }
-
-      const result: Standing[] = people.map((p) => {
-        const totals = totalsByPerson.get(p.id) ?? { ...ZERO_ACTIVITY };
-        const goal = activeGoalFor(p.id, allGoals, todayStr);
-        const weeklyTargets = { ...ZERO_ACTIVITY };
-        if (goal) {
-          for (const a of ACTIVITIES) {
-            weeklyTargets[a.key] = Number(goal[a.key as ActivityKey] ?? 0);
-          }
-        }
-        const percent =
-          averagePercent(totals, weeklyTargets, ACTIVITY_KEYS) ?? 0;
-        return { id: p.id, first_name: p.first_name, percent };
+        const result: Standing[] = (body.standings ?? []).map((s) => ({
+          id: s.id,
+          first_name: s.first_name,
+          percent: s.percent ?? 0,
+        }));
+        result.sort(
+          (a, b) =>
+            b.percent - a.percent ||
+            a.first_name.localeCompare(b.first_name),
+        );
+        setStandings(result);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Couldn't load leaderboard.",
+        );
       });
-
-      result.sort(
-        (a, b) =>
-          b.percent - a.percent ||
-          a.first_name.localeCompare(b.first_name),
-      );
-      setStandings(result);
-      setError(null);
-    });
 
     return () => {
       cancelled = true;

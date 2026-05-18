@@ -1,0 +1,88 @@
+-- ===========================================================================
+-- weekly_goals — Row Level Security lockdown (STAGED — see PREREQUISITE).
+-- ===========================================================================
+-- WHY THIS EXISTS
+--   AE-facing leaderboards only ever render percentages, but the browser used
+--   to fetch `weekly_goals.select("*")` directly to compute them. That shipped
+--   every rep's raw goal targets — including per-person overrides — to every
+--   AE's browser. The leaderboard privacy fix moved that computation into a
+--   server route (GET /api/leaderboard, service-role key), so the leaderboard
+--   no longer leaks goals.
+--
+--   This migration is the defense-in-depth half: with RLS enabled and no anon
+--   policy, the browser anon key can no longer read `weekly_goals` AT ALL —
+--   so even hand-crafted console queries against the table return nothing.
+--   All goal access then goes through server routes using the service-role
+--   key, which bypasses RLS.
+--
+-- AUTH MODEL — READ THIS BEFORE CHANGING ANYTHING
+--   The Sales Tracker has NO Supabase Auth. Reps "log in" by picking a name
+--   from a dropdown cached in localStorage. Every browser request uses the
+--   shared `anon` key and auth.uid() is always NULL — RLS cannot tell which
+--   AE is acting. An "AEs may read only their own goal" policy therefore
+--   cannot be expressed in SQL. The choice is binary: anon can read the whole
+--   table, or anon cannot read it at all. This migration takes the latter.
+--   (Same tradeoff and rationale as supabase/business_card_rls.sql.)
+--
+-- ===========================================================================
+-- !!! PREREQUISITE — DO NOT RUN THIS MIGRATION YET !!!
+-- ===========================================================================
+--   Running this NOW will break working AE and admin features, because these
+--   call sites still read/write `weekly_goals` with the browser anon key:
+--
+--     READS (lib/goals.ts -> fetchActiveGoalFor / fetchActiveGoalForScope):
+--       * src/components/my-week-card.tsx      (AE's own weekly progress)
+--       * src/components/today-totals-card.tsx (AE's own weekly totals)
+--       * src/components/daily-entry-form.tsx  (AE's own progress vs targets)
+--     READS + WRITES:
+--       * src/components/admin/goals-card.tsx  (admin reads history + INSERTs
+--                                               new goal rows + DELETEs rows)
+--
+--   With RLS enabled and no anon policy, every one of those queries returns
+--   zero rows (reads) or fails the RLS check (writes). AEs would lose their
+--   own goal display; admins could not view or edit goals.
+--
+--   APPLY THIS ONLY AFTER a follow-up change has moved those call sites onto
+--   server routes (service-role key), e.g.:
+--     * GET  /api/goals/active?salespersonId=...  -> own-goal reads
+--     * GET  /api/goals  (admin)                  -> goal history
+--     * POST /api/goals  (admin)                  -> insert goal row
+--     * DELETE /api/goals/:id (admin)             -> delete goal row
+--   Identity/authorization for the admin routes must be validated server-side
+--   against the `salespeople` table (is_admin = true), exactly as the business
+--   card routes validate identity today.
+--
+--   GET /api/leaderboard already uses the service-role key, so it keeps
+--   working the moment this migration is applied — it is unaffected.
+--
+--   SUPABASE_SERVICE_ROLE_KEY must be set in Vercel and local .env.local
+--   before this is applied (it already is — the business card routes use it).
+--
+-- Idempotent: re-runnable. ENABLE ROW LEVEL SECURITY is harmless to repeat.
+-- ===========================================================================
+
+-- Enable RLS. With NO policy defined, the anon role has no access at all;
+-- the service-role key continues to bypass RLS for the server routes.
+ALTER TABLE weekly_goals ENABLE ROW LEVEL SECURITY;
+
+-- Intentionally NO anon policy of any kind — no SELECT, no INSERT/UPDATE/
+-- DELETE. `weekly_goals` becomes server-only. Goal targets never reach the
+-- browser except as already-computed percentages from GET /api/leaderboard
+-- or (post-follow-up) from the AE's own-goal / admin goal routes.
+
+-- ===========================================================================
+-- VERIFICATION (run after applying; the SQL editor / service role bypasses
+-- RLS, so use these to confirm policy shape, not to test anon access)
+-- ===========================================================================
+-- SELECT tablename, rowsecurity
+-- FROM pg_tables
+-- WHERE tablename = 'weekly_goals';
+--   -- expect rowsecurity = true
+--
+-- SELECT tablename, policyname, cmd, roles
+-- FROM pg_policies
+-- WHERE tablename = 'weekly_goals';
+--   -- expect ZERO rows — no policies, so anon has no access
+--
+-- ROLLBACK (if a prerequisite call site was missed and a feature breaks):
+-- ALTER TABLE weekly_goals DISABLE ROW LEVEL SECURITY;
