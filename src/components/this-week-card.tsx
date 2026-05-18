@@ -30,17 +30,31 @@ function businessDaysLeft(today = new Date()): number {
 
 type Tone = "good" | "warn" | "bad" | "neutral";
 
-/** Short, encouraging pace read for the compact status pill. */
+/**
+ * A human, context-aware status for the weekly momentum pill. Reads percent
+ * progress against where the Mon-Fri week expects the rep to be, and leans
+ * encouraging — never discouraging. "On pace" is never shown at 0%.
+ */
 function paceStatus(
   percent: number,
   daysLeft: number,
 ): { label: string; tone: Tone } {
+  // Over target — celebrate first, regardless of the day.
   if (percent >= 100) return { label: "Goal smashed", tone: "good" };
+  // The business week is over.
   if (daysLeft === 0) return { label: "Week wrapped", tone: "neutral" };
+  // Nothing logged yet — a fresh, neutral starting point, not "on pace".
+  if (percent <= 0) return { label: "Ready to start", tone: "neutral" };
+
+  // `expected` = the share of the week's workdays already completed before
+  // today, i.e. where a perfectly even week would have the rep right now.
   const expected = ((5 - daysLeft) / 5) * 100;
-  if (percent >= expected) return { label: "On pace", tone: "good" };
-  if (percent >= expected - 15) return { label: "Almost on pace", tone: "warn" };
-  return { label: "Behind pace", tone: "bad" };
+  // Clearly ahead of the week's pace.
+  if (percent >= expected + 15) return { label: "Strong week", tone: "good" };
+  // At pace, with a small grace band so a near-miss still reads as healthy.
+  if (percent >= expected - 10) return { label: "On pace", tone: "good" };
+  // Some progress, but behind pace — keep it gentle and motivating.
+  return { label: "Getting started", tone: "warn" };
 }
 
 const TONE_CLASS: Record<Tone, string> = {
