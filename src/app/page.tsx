@@ -5,7 +5,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 
 import { supabase } from "@/lib/supabase/client";
-import { isUserRole, type UserRole } from "@/lib/permissions";
+import { isUserRole } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,18 @@ type LoginPerson = {
   id: string;
   first_name: string;
   is_admin: boolean;
+};
+
+/** Shape of a /api/auth/login response (success or error). */
+type LoginResponse = {
+  salesperson?: {
+    id: string;
+    first_name: string;
+    is_admin: boolean;
+    role: string;
+  };
+  token?: string;
+  error?: string;
 };
 
 export default function Home() {
@@ -76,48 +88,44 @@ export default function Home() {
     }
     setLoading(true);
     setError(null);
-    // CITEXT makes first_name lookup case-insensitive.
-    const { data, error: lookupErr } = await supabase
-      .from("salespeople")
-      .select("id, first_name, is_admin, admin_pin, role")
-      .eq("first_name", name)
-      .maybeSingle();
+
+    // Credentials are validated server-side: the admin PIN is compared in
+    // /api/auth/login and never sent back to the browser. On success the
+    // server returns a signed session token used to authorize API calls.
+    let payload: LoginResponse | null = null;
+    let status = 0;
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, pin }),
+      });
+      status = res.status;
+      payload = (await res.json().catch(() => null)) as LoginResponse | null;
+    } catch (err) {
+      setLoading(false);
+      setError(
+        `Sign in failed: ${err instanceof Error ? err.message : "network error"}`,
+      );
+      return;
+    }
     setLoading(false);
-    if (lookupErr) {
-      setError(lookupErr.message);
+
+    const signedIn = payload?.salesperson;
+    const token = payload?.token;
+    if (!signedIn || !token) {
+      setError(payload?.error ?? `Sign in failed (${status}).`);
       return;
     }
-    if (!data) {
-      setError(`No salesperson found named "${name}".`);
-      return;
-    }
-    if (data.is_admin) {
-      if (!data.admin_pin) {
-        setError(
-          "Admin account has no PIN set. Ask another admin to set one in the database.",
-        );
-        return;
-      }
-      if (pin.trim() !== String(data.admin_pin).trim()) {
-        // Show enough detail in the error to diagnose without DevTools.
-        setError(
-          `Incorrect PIN. (DB has ${String(data.admin_pin).length} chars; you entered ${pin.length}.)`,
-        );
-        return;
-      }
-    }
-    const role: UserRole = isUserRole(data.role)
-      ? data.role
-      : data.is_admin
-        ? "admin"
-        : "ae";
+
     setSalesperson({
-      id: data.id,
-      first_name: data.first_name,
-      is_admin: !!data.is_admin,
-      role,
+      id: signedIn.id,
+      first_name: signedIn.first_name,
+      is_admin: signedIn.is_admin,
+      role: isUserRole(signedIn.role) ? signedIn.role : "ae",
+      token,
     });
-    router.push(data.is_admin ? "/admin" : "/dashboard");
+    router.push(signedIn.is_admin ? "/admin" : "/dashboard");
   };
 
   return (

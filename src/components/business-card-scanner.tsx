@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { Camera } from "lucide-react";
 
+import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
 
@@ -117,7 +118,7 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     async (scanId: string) => {
       setRecentStatus(scanId, "reading");
       try {
-        const res = await fetch("/api/business-card/process", {
+        const res = await apiFetch("/api/business-card/process", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scanId }),
@@ -161,13 +162,12 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
     // — see src/app/api/business-card/scan/route.ts.
     let scanId: string;
     try {
-      const res = await fetch("/api/business-card/scan", {
+      const res = await apiFetch("/api/business-card/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          salespersonId: salesperson.id,
-          imageUrl: publicUrl.publicUrl,
-        }),
+        // The scan is attributed to the authenticated salesperson server-side
+        // (from the session token), so no id is sent in the body.
+        body: JSON.stringify({ imageUrl: publicUrl.publicUrl }),
       });
       const payload = (await res.json().catch(() => null)) as
         | { scanId?: string; error?: string }

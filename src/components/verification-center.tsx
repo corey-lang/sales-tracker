@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 import { Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
-import { supabase } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api-client";
 import {
   CONTACT_BUCKET_LABELS,
   CONTACT_BUCKET_ORDER,
@@ -324,6 +324,14 @@ type ExportContactRow = {
   exported_at: string | null;
 };
 
+/** Shape of a GET /api/business-card/verification response. */
+type VerificationPayload = {
+  scans?: unknown;
+  exportContacts?: unknown;
+  duplicateContacts?: unknown;
+  error?: string;
+};
+
 /** Per-AE CRM export counts shown in the export section. */
 type ExportSummaryEntry = {
   /** Stable React key + identity for the in-flight export tracking. */
@@ -397,68 +405,50 @@ export function VerificationCenter() {
 
   const load = useCallback(async () => {
     setError(null);
-    const result = await supabase
-      .from("business_card_scans")
-      .select(
-        "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, duplicate_of_contact_id, rejection_reason",
-      )
-      .order("created_at", { ascending: false });
 
-    if (result.error) {
-      setError(result.error.message);
+    // Verification data is read through a reviewer-guarded server route — the
+    // browser no longer queries business_card_scans / business_card_contacts
+    // directly. The route returns scans, export-summary contacts, and the
+    // matched duplicate contacts in one response.
+    let payload: VerificationPayload | null = null;
+    try {
+      const res = await apiFetch("/api/business-card/verification");
+      payload = (await res.json().catch(() => null)) as VerificationPayload | null;
+      if (!res.ok) {
+        throw new Error(payload?.error ?? `Request failed (${res.status})`);
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load verification data",
+      );
       setScans([]);
       setDuplicateContactById(new Map());
       setExportSummary([]);
       return;
     }
 
-    const loadedScans = (result.data ?? []) as Scan[];
+    const data: VerificationPayload = payload ?? {};
+
+    const loadedScans = (
+      Array.isArray(data.scans) ? data.scans : []
+    ) as Scan[];
     setScans(loadedScans);
 
-    // CRM export summary: one query for per-AE approved-contact counts. A
-    // failure here is non-fatal — the rest of the center still renders.
-    const exportRes = await supabase
-      .from("business_card_contacts")
-      .select("salesperson_id, salesperson_name, verification_status, exported_at")
-      .in("verification_status", ["auto_approved", "approved"]);
-    if (exportRes.error) {
-      setExportSummary([]);
-    } else {
-      setExportSummary(
-        summarizeExports((exportRes.data ?? []) as ExportContactRow[]),
-      );
-    }
+    // CRM export summary: per-AE approved-contact counts.
+    const exportContacts = (
+      Array.isArray(data.exportContacts) ? data.exportContacts : []
+    ) as ExportContactRow[];
+    setExportSummary(summarizeExports(exportContacts));
 
-    // Build the duplicate-contact lookup in ONE batched query: collect the
-    // unique matched-contact ids across all scans, fetch them with .in(), and
-    // map by id. Never query per-scan inside render.
-    const matchedIds = [
-      ...new Set(
-        loadedScans
-          .map((scan) => scan.duplicate_of_contact_id)
-          .filter((id): id is string => typeof id === "string" && id.length > 0),
-      ),
-    ];
-
-    if (matchedIds.length === 0) {
-      setDuplicateContactById(new Map());
-      return;
-    }
-
-    const contactsRes = await supabase
-      .from("business_card_contacts")
-      .select(
-        "id, full_name, company, title, email, phone, website, address, contact_bucket, salesperson_name, verification_status, created_at",
-      )
-      .in("id", matchedIds);
-
-    // A failure here is non-fatal: the scans still render, and the comparison
-    // panel falls back to "Matched contact could not be loaded."
+    // Duplicate-contact lookup, keyed by id, for side-by-side comparison.
+    const duplicateContacts = (
+      Array.isArray(data.duplicateContacts) ? data.duplicateContacts : []
+    ) as DuplicateContact[];
     const map = new Map<string, DuplicateContact>();
-    if (!contactsRes.error) {
-      for (const row of (contactsRes.data ?? []) as DuplicateContact[]) {
-        map.set(row.id, row);
-      }
+    for (const row of duplicateContacts) {
+      map.set(row.id, row);
     }
     setDuplicateContactById(map);
   }, []);
@@ -490,7 +480,7 @@ export function VerificationCenter() {
         return next;
       });
       try {
-        const res = await fetch("/api/business-card/process", {
+        const res = await apiFetch("/api/business-card/process", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scanId }),
@@ -542,7 +532,7 @@ export function VerificationCenter() {
       setActioningId(scanId);
       setActionMessage(null);
       try {
-        const res = await fetch(`/api/business-card/${action}`, {
+        const res = await apiFetch(`/api/business-card/${action}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -593,7 +583,7 @@ export function VerificationCenter() {
           params.set("salespersonName", target.salespersonName);
         }
         const qs = params.toString();
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/business-card/contacts/export${qs ? `?${qs}` : ""}`,
         );
         if (!res.ok) {

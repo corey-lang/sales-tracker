@@ -1,4 +1,5 @@
 import { getServerSupabase } from "@/lib/supabase/server";
+import { handleApiError, requireReviewer } from "@/lib/server/auth";
 
 // Build 4 + Build 6: CRM CSV export of verified business card contacts.
 // GET /api/business-card/contacts/export
@@ -69,6 +70,16 @@ function fileSlug(value: string): string {
 }
 
 export async function GET(req: Request) {
+  // AUTHORIZATION (Phase 0): contact export is restricted to reviewers
+  // (admin or assistant). The export-batch audit records the authenticated
+  // reviewer — `exportedBy` is no longer accepted from a query param.
+  let reviewer;
+  try {
+    reviewer = await requireReviewer(req);
+  } catch (err) {
+    return handleApiError(err);
+  }
+
   const supabase = getServerSupabase();
   const url = new URL(req.url);
 
@@ -78,8 +89,7 @@ export async function GET(req: Request) {
     url.searchParams.get("salespersonName")?.trim() || null;
   const includeExported =
     url.searchParams.get("includeExported")?.trim() === "true";
-  const exportedBy =
-    url.searchParams.get("exportedBy")?.trim() || "Tonja/Admin";
+  const exportedBy = reviewer.first_name;
 
   // `id` is selected for the post-export marking step; it is not a CSV column.
   let query = supabase

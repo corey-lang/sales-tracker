@@ -1,0 +1,66 @@
+-- ===========================================================================
+-- weekly_goals — RLS ROLLBACK (TEMPORARY).
+-- ===========================================================================
+-- WHY THIS EXISTS
+--   supabase/weekly_goals_rls.sql was applied BEFORE the app was migrated off
+--   client-side `weekly_goals` access. That migration did one thing —
+--   `ALTER TABLE weekly_goals ENABLE ROW LEVEL SECURITY` with NO policy — so
+--   the browser anon key now gets ZERO access to the table. That breaks
+--   working features that still read/write `weekly_goals` from the browser:
+--
+--     READS  (lib/goals.ts):  my-week-card, today-totals-card,
+--                             daily-entry-form, admin totals-card,
+--                             admin maintenance-card
+--     READS + WRITES:         admin goals-card (SELECT history, INSERT new
+--                             goal rows, DELETE rows)
+--
+--   This migration restores the PRIOR working access posture so the current
+--   app keeps functioning. It does NOT change the table or any data.
+--
+-- !!! TEMPORARY !!!
+--   This is a stopgap. The intended end state is still server-only access to
+--   `weekly_goals` (see supabase/weekly_goals_rls.sql). The correct sequence:
+--     1. (this file)  roll RLS back so the app works again.
+--     2. Move the call sites above onto service-role server routes, e.g.
+--          GET    /api/goals/active   -> AE own-goal reads
+--          GET    /api/goals          -> admin goal history
+--          POST   /api/goals          -> admin insert
+--          DELETE /api/goals/:id      -> admin delete
+--     3. ONLY THEN re-apply weekly_goals_rls.sql and retire this rollback.
+--   Until step 3, `weekly_goals` is anon-readable/writable again — the
+--   pre-lockdown state. Accepted, temporarily, for the closed 11-person team.
+--
+-- SCOPE
+--   Touches `weekly_goals` ONLY. It does NOT touch the business-card RLS
+--   policies (business_card_rls.sql / business_card_rls_lockdown.sql) or any
+--   other table. The table and all rows are preserved.
+--
+-- Idempotent: DISABLE ROW LEVEL SECURITY and GRANT are safe to re-run.
+-- ===========================================================================
+
+-- 1. Disable RLS. This is the actual fix: weekly_goals_rls.sql only enabled
+--    RLS (it created no policies), so disabling it fully reverses that change
+--    and the anon role can read/write the table again via its standing grants.
+ALTER TABLE weekly_goals DISABLE ROW LEVEL SECURITY;
+
+-- 2. Belt-and-suspenders: re-assert the standard Supabase table grants the app
+--    relies on. weekly_goals_rls.sql never revoked these — only RLS blocked
+--    access — so these statements are normally no-ops. They are included so
+--    the intended posture is explicit and the rollback is self-contained even
+--    if grants drifted elsewhere.
+GRANT SELECT, INSERT, UPDATE, DELETE ON weekly_goals TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON weekly_goals TO authenticated;
+
+-- ===========================================================================
+-- VERIFICATION (run after applying)
+-- ===========================================================================
+-- SELECT tablename, rowsecurity
+-- FROM pg_tables
+-- WHERE tablename = 'weekly_goals';
+--   -- expect rowsecurity = false
+--
+-- SELECT grantee, privilege_type
+-- FROM information_schema.role_table_grants
+-- WHERE table_name = 'weekly_goals' AND grantee = 'anon'
+-- ORDER BY privilege_type;
+--   -- expect SELECT / INSERT / UPDATE / DELETE rows for anon

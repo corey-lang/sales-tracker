@@ -1,4 +1,11 @@
+import { z } from "zod";
+
 import { getServerSupabase } from "@/lib/supabase/server";
+import {
+  handleApiError,
+  parseBody,
+  requireScanAccess,
+} from "@/lib/server/auth";
 import {
   maybeAutoApproveScan,
   type ContactScan,
@@ -7,18 +14,25 @@ import {
 // Server-side AI extraction for a single business_card_scans row.
 // POST /api/business-card/process   body: { scanId: string }
 //
-// Live AE rollout: this runs for every AE's scans, not just the Test account.
-// (Test scans are still flagged is_test_data = true at intake so they remain
-// separable, but extraction is no longer restricted to them.) Performs OCR +
-// structured field extraction into the Phase 5 columns (extracted_*,
-// ai_confidence, ai_notes, extraction_status, extracted_at, extraction_error),
-// then runs the safe auto-approval rule.
+// AUTHORIZATION (Phase 0)
+//   requireScanAccess() resolves the caller from the signed session token and
+//   confirms they may act on this scan: the AE who owns the scan, or any
+//   reviewer (admin / assistant) retrying it from the Verification Center.
+//   An AE cannot trigger extraction on another AE's scan.
+//
+// Performs OCR + structured field extraction into the Phase 5 columns
+// (extracted_*, ai_confidence, ai_notes, extraction_status, extracted_at,
+// extraction_error), then runs the safe auto-approval rule.
 
 export const runtime = "nodejs";
 // Vision calls can take 10–30s; default 10s is too tight.
 export const maxDuration = 60;
 
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+
+const ProcessSchema = z.object({
+  scanId: z.string().min(1, "scanId is required."),
+});
 
 type ExtractionPayload = {
   raw_ocr_text: string | null;
@@ -116,15 +130,8 @@ async function callOpenAI(
     }),
   });
 
-  // TEMP DIAGNOSTIC: log status (and body on failure) so Vercel shows the
-  // real reason OpenAI rejected the call. Remove with the other [bc/process]
-  // logs.
-  console.log(`[bc/process] OpenAI response status=${res.status} model=${model}`);
   if (!res.ok) {
     const body = await res.text();
-    console.error(
-      `[bc/process] OpenAI error body (truncated): ${body.slice(0, 500)}`,
-    );
     throw new Error(
       `OpenAI request failed (${res.status}): ${body.slice(0, 500)}`,
     );
@@ -148,39 +155,17 @@ async function callOpenAI(
 }
 
 export async function POST(req: Request) {
-  // TEMP DIAGNOSTIC LOGS — remove once production extraction is debugged.
-  // Logs only presence/absence and metadata, never secret values.
-  const LOG = "[bc/process]";
-
-  let scanId: string | undefined;
+  let scanId: string;
   try {
-    const body = (await req.json()) as { scanId?: unknown };
-    if (typeof body.scanId === "string" && body.scanId.length > 0) {
-      scanId = body.scanId;
-    }
-  } catch {
-    console.error(`${LOG} invalid JSON body`);
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  if (!scanId) {
-    console.error(`${LOG} missing scanId in request body`);
-    return Response.json(
-      { error: "Missing scanId in request body" },
-      { status: 400 },
-    );
+    ({ scanId } = await parseBody(req, ProcessSchema));
+    // Owner-or-reviewer authorization. Identity comes from the session token.
+    await requireScanAccess(req, scanId);
+  } catch (err) {
+    return handleApiError(err);
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
-  const hasOpenAIKey = Boolean(apiKey);
-  const hasServiceRoleKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
-  const hasAnonKey = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-  const hasSupabaseUrl = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL);
-  console.log(
-    `${LOG} env scanId=${scanId} hasOpenAIKey=${hasOpenAIKey} hasServiceRoleKey=${hasServiceRoleKey} hasAnonKey=${hasAnonKey} hasSupabaseUrl=${hasSupabaseUrl}`,
-  );
   if (!apiKey) {
-    console.error(`${LOG} OPENAI_API_KEY missing`);
     return Response.json(
       { error: "OPENAI_API_KEY is not configured on the server" },
       { status: 500 },
@@ -196,9 +181,6 @@ export async function POST(req: Request) {
     .single();
 
   if (scanRes.error || !scanRes.data) {
-    console.error(
-      `${LOG} scan lookup failed scanId=${scanId} error=${scanRes.error?.message ?? "no data"}`,
-    );
     return Response.json(
       { error: scanRes.error?.message ?? "Scan not found" },
       { status: 404 },
@@ -206,18 +188,9 @@ export async function POST(req: Request) {
   }
 
   const scan = scanRes.data;
-  console.log(
-    `${LOG} scan found scanId=${scanId} hasImageUrl=${Boolean(scan.image_url)} isTestData=${scan.is_test_data}`,
-  );
-  // Live rollout: extraction runs for real AE scans and test scans alike — no
-  // is_test_data gate here. The is_test_data flag is kept only for separating
-  // test data during cleanup.
+  // Live rollout: extraction runs for real AE scans and test scans alike.
   if (!scan.image_url) {
-    console.error(`${LOG} scan rejected — missing image_url scanId=${scanId}`);
-    return Response.json(
-      { error: "Scan has no image_url" },
-      { status: 422 },
-    );
+    return Response.json({ error: "Scan has no image_url" }, { status: 422 });
   }
 
   const procUpd = await supabase
@@ -226,9 +199,6 @@ export async function POST(req: Request) {
     .eq("id", scanId)
     .select("id");
   if (procUpd.error) {
-    console.error(
-      `${LOG} mark-processing update failed scanId=${scanId} error=${procUpd.error.message}`,
-    );
     return Response.json(
       {
         error: "Failed to mark scan as processing",
@@ -239,9 +209,6 @@ export async function POST(req: Request) {
     );
   }
   if (!procUpd.data || procUpd.data.length === 0) {
-    console.error(
-      `${LOG} mark-processing affected 0 rows scanId=${scanId} (likely RLS or missing row)`,
-    );
     return Response.json(
       {
         error:
@@ -253,11 +220,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    console.log(`${LOG} calling OpenAI scanId=${scanId}`);
     const extraction = await callOpenAI(scan.image_url, apiKey);
-    console.log(
-      `${LOG} OpenAI extraction parsed scanId=${scanId} confidence=${extraction.ai_confidence ?? "null"}`,
-    );
 
     const upd = await supabase
       .from("business_card_scans")
@@ -291,8 +254,6 @@ export async function POST(req: Request) {
       );
     }
 
-    console.log(`${LOG} completed scanId=${scanId}`);
-
     // Build 3: run the safe auto-approval rule now that extraction completed.
     // A failure here must not fail the request — extraction itself succeeded,
     // and the scan simply stays in needs_review for manual verification.
@@ -302,15 +263,8 @@ export async function POST(req: Request) {
         supabase,
         updatedScan as unknown as ContactScan,
       );
-      console.log(
-        `${LOG} auto-approval scanId=${scanId} outcome=${autoApproval.outcome}`,
-      );
-    } catch (autoErr) {
-      const autoMsg =
-        autoErr instanceof Error ? autoErr.message : "Unknown error";
-      console.error(
-        `${LOG} auto-approval failed scanId=${scanId} error=${autoMsg}`,
-      );
+    } catch {
+      // Non-fatal: the scan stays in needs_review for manual verification.
     }
 
     return Response.json({
@@ -322,26 +276,13 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(
-      `${LOG} extraction failed scanId=${scanId} error=${message}`,
-    );
-    const failUpd = await supabase
+    await supabase
       .from("business_card_scans")
       .update({
         extraction_status: "failed",
         extraction_error: message,
       })
-      .eq("id", scanId)
-      .select("id");
-    if (failUpd.error) {
-      console.error(
-        `${LOG} write-failed-status update errored scanId=${scanId} error=${failUpd.error.message}`,
-      );
-    } else if (!failUpd.data || failUpd.data.length === 0) {
-      console.error(
-        `${LOG} write-failed-status affected 0 rows scanId=${scanId} (likely RLS)`,
-      );
-    }
+      .eq("id", scanId);
     return Response.json(
       { status: "failed", scanId, error: message },
       { status: 500 },

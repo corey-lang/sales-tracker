@@ -1,3 +1,10 @@
+-- ===========================================================================
+-- BASE schema — the 5 core tables only. This file is NOT the complete schema.
+-- Later salespeople columns (is_admin, is_test, admin_pin) and all RLS live in
+-- separate migrations. See supabase/README.md for the authoritative migration
+-- order; a database built from this file alone will not run the app.
+-- ===========================================================================
+
 CREATE EXTENSION IF NOT EXISTS citext;
 
 CREATE TABLE salespeople (
