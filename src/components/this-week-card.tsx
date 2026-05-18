@@ -1,0 +1,293 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { CalendarDays, Trophy, Zap } from "lucide-react";
+
+import { progressColor } from "@/lib/goals";
+import { cn } from "@/lib/utils";
+
+import { Card, CardContent } from "@/components/ui/card";
+
+// The AE's single "This week" section: personal momentum (the hero) plus a
+// compact, secondary leaderboard for context — one card, one /api/leaderboard
+// fetch. Percentages come from the server; raw goal targets never reach the
+// browser.
+
+type Props = {
+  salespersonId: string;
+  refreshKey: number;
+};
+
+type Standing = { id: string; first_name: string; percent: number | null };
+
+/** Business days remaining in the current Mon-Fri week, including today. */
+function businessDaysLeft(today = new Date()): number {
+  const dow = today.getDay(); // 0 Sun .. 6 Sat
+  if (dow === 0 || dow === 6) return 0;
+  return 6 - dow; // Mon = 5 … Fri = 1
+}
+
+type Tone = "good" | "warn" | "bad" | "neutral";
+
+/** Short, encouraging pace read for the compact status pill. */
+function paceStatus(
+  percent: number,
+  daysLeft: number,
+): { label: string; tone: Tone } {
+  if (percent >= 100) return { label: "Goal smashed", tone: "good" };
+  if (daysLeft === 0) return { label: "Week wrapped", tone: "neutral" };
+  const expected = ((5 - daysLeft) / 5) * 100;
+  if (percent >= expected) return { label: "On pace", tone: "good" };
+  if (percent >= expected - 15) return { label: "Almost on pace", tone: "warn" };
+  return { label: "Behind pace", tone: "bad" };
+}
+
+const TONE_CLASS: Record<Tone, string> = {
+  good: "bg-green-500/10 text-green-700 dark:text-green-400",
+  warn: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  bad: "bg-red-500/10 text-red-700 dark:text-red-400",
+  neutral: "bg-muted text-muted-foreground",
+};
+
+export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
+  const [standings, setStandings] = useState<Standing[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/leaderboard")
+      .then(async (res) => {
+        const body = (await res.json()) as {
+          standings?: Standing[];
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(body.error ?? "Couldn't load this week.");
+          return;
+        }
+        setStandings(body.standings ?? []);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Couldn't load this week.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [salespersonId, refreshKey]);
+
+  return (
+    <section className="space-y-1.5">
+      <h2 className="px-0.5 text-sm font-medium text-muted-foreground">
+        This week
+      </h2>
+      <Card
+        size="sm"
+        className="border-primary/15 bg-gradient-to-br from-primary/[0.07] to-card"
+      >
+        <CardContent>
+          {error ? (
+            <p className="text-sm text-destructive">
+              Couldn&apos;t load: {error}
+            </p>
+          ) : !standings ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : (
+            <ThisWeekBody
+              standings={standings}
+              salespersonId={salespersonId}
+            />
+          )}
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+function ThisWeekBody({
+  standings,
+  salespersonId,
+}: {
+  standings: Standing[];
+  salespersonId: string;
+}) {
+  // Rank by percent (no goal = lowest), name as tiebreak.
+  const ranked = [...standings].sort(
+    (a, b) =>
+      (b.percent ?? -1) - (a.percent ?? -1) ||
+      a.first_name.localeCompare(b.first_name),
+  );
+  const myIndex = ranked.findIndex((s) => s.id === salespersonId);
+  const mine = myIndex >= 0 ? ranked[myIndex] : null;
+
+  // Top 3, plus the current rep's row when they sit outside it.
+  const rows: Array<{ standing: Standing; rank: number; detached: boolean }> =
+    ranked.slice(0, 3).map((standing, i) => ({
+      standing,
+      rank: i + 1,
+      detached: false,
+    }));
+  if (myIndex >= 3 && mine) {
+    rows.push({ standing: mine, rank: myIndex + 1, detached: true });
+  }
+
+  return (
+    <div className="space-y-3">
+      <Momentum mine={mine} rank={myIndex + 1} total={ranked.length} />
+      <Leaderboard rows={rows} currentSalespersonId={salespersonId} />
+    </div>
+  );
+}
+
+/** Personal momentum — the hero of the section. */
+function Momentum({
+  mine,
+  rank,
+  total,
+}: {
+  mine: Standing | null;
+  rank: number;
+  total: number;
+}) {
+  if (!mine || mine.percent === null) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Weekly momentum appears once an admin sets your weekly goal.
+      </p>
+    );
+  }
+
+  const percent = mine.percent;
+  const daysLeft = businessDaysLeft();
+  const status = paceStatus(percent, daysLeft);
+  const color = progressColor(percent);
+  const daysLeftLabel =
+    daysLeft === 0
+      ? "Week wrapped"
+      : daysLeft === 1
+        ? "Final day"
+        : `${daysLeft} days left`;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-end justify-between gap-2">
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={cn(
+              "text-4xl font-bold leading-none tabular-nums",
+              color.text,
+            )}
+          >
+            {percent}%
+          </span>
+          <span className="text-xs text-muted-foreground">of goal</span>
+        </div>
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+            TONE_CLASS[status.tone],
+          )}
+        >
+          <Zap aria-hidden="true" className="size-3" />
+          {status.label}
+        </span>
+      </div>
+
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn("h-full rounded-full transition-all", color.bar)}
+          style={{ width: `${Math.min(percent, 100)}%` }}
+        />
+      </div>
+
+      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1">
+          <Trophy aria-hidden="true" className="size-3.5 text-amber-500" />
+          <span className="font-semibold text-foreground tabular-nums">
+            #{rank}
+          </span>
+          of {total}
+        </span>
+        <span aria-hidden="true">·</span>
+        <span className="inline-flex items-center gap-1">
+          <CalendarDays aria-hidden="true" className="size-3.5" />
+          {daysLeftLabel}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Compact, secondary leaderboard — context around the rep's week. */
+function Leaderboard({
+  rows,
+  currentSalespersonId,
+}: {
+  rows: Array<{ standing: Standing; rank: number; detached: boolean }>;
+  currentSalespersonId: string;
+}) {
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="space-y-1 border-t pt-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Leaderboard
+        </span>
+        <Link
+          href="/leaderboard"
+          className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          Full →
+        </Link>
+      </div>
+      <ul>
+        {rows.map(({ standing, rank, detached }) => {
+          const isMe = standing.id === currentSalespersonId;
+          const { text: percentColor } = progressColor(standing.percent ?? 0);
+          return (
+            <li
+              key={standing.id}
+              className={cn(
+                "flex items-center gap-2 rounded-md px-1.5 py-1",
+                isMe && "bg-primary/5",
+                detached && "mt-0.5 border-t border-dashed pt-1.5",
+              )}
+            >
+              <span className="w-4 shrink-0 text-center text-xs font-semibold tabular-nums text-muted-foreground">
+                {rank}
+              </span>
+              {rank === 1 ? (
+                <Trophy
+                  aria-hidden="true"
+                  className="size-3.5 shrink-0 text-amber-500"
+                />
+              ) : (
+                <span aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+              <span className="flex-1 truncate text-sm font-medium">
+                {standing.first_name}
+                {isMe && (
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    (you)
+                  </span>
+                )}
+              </span>
+              <span
+                className={cn(
+                  "text-sm font-semibold tabular-nums",
+                  percentColor,
+                )}
+              >
+                {standing.percent ?? 0}%
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}

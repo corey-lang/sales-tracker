@@ -22,6 +22,7 @@ Run these in the Supabase SQL editor, top to bottom:
 | 6 | `business_card_scans_phase5.sql` | AI-extraction columns on `business_card_scans`. |
 | 7 | `business_card_contacts.sql` | `business_card_contacts`, `business_card_export_batches`, verification/export columns. |
 | 8 | `business_card_rls.sql` | Enables RLS on the business-card tables (anon = SELECT only; writes via service role). |
+| 9 | `ae_tasks.sql` | AE To-Do / Follow-Up tasks table + indexes + `updated_at` trigger. RLS on, no policy — all access via the `/api/tasks/*` service-role routes. |
 
 ## Staged migrations — DO NOT APPLY YET
 

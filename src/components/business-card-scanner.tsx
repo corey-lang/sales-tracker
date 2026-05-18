@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { Camera } from "lucide-react";
+import { Camera, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
@@ -10,6 +10,7 @@ import type { StoredSalesperson } from "@/lib/use-salesperson";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -56,6 +57,8 @@ const RECENT_STATUS_META: Record<
 
 type Props = {
   salesperson: StoredSalesperson;
+  /** Closes the scan panel — the dashboard owns the open/closed state. */
+  onClose: () => void;
 };
 
 // Live AE rollout: every AE sees the real scanner — there is no longer a
@@ -65,8 +68,8 @@ type Props = {
 // real AE data. Either way this writes ONLY to business_card_scans + the
 // business-card-scans storage bucket — it never produces leaderboard or
 // metric data.
-export function BusinessCardScanner({ salesperson }: Props) {
-  return <ActiveScanner salesperson={salesperson} />;
+export function BusinessCardScanner({ salesperson, onClose }: Props) {
+  return <ActiveScanner salesperson={salesperson} onClose={onClose} />;
 }
 
 function sanitizeFilename(name: string): string {
@@ -87,8 +90,7 @@ function sanitizeFilename(name: string): string {
   return `${base}.${ext}`;
 }
 
-function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
-  const [open, setOpen] = useState(false);
+function ActiveScanner({ salesperson, onClose }: Props) {
   // `uploading` covers only the brief image-upload + scan-row insert. AI
   // extraction is NEVER tracked here — it runs in the background per card.
   const [uploading, setUploading] = useState(false);
@@ -212,27 +214,13 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
   };
 
   const close = () => {
-    setOpen(false);
     setUploading(false);
     setErrorMessage(null);
     setRecent([]);
+    onClose();
   };
 
-  if (!open) {
-    return (
-      <Button
-        type="button"
-        size="lg"
-        className="w-full text-base font-semibold sm:w-auto sm:self-start"
-        onClick={() => setOpen(true)}
-      >
-        <Camera aria-hidden="true" className="size-5" />
-        Scan Business Card
-      </Button>
-    );
-  }
-
-  const labelClass = `flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-6 text-center transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40 ${
+  const labelClass = `flex flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-5 text-center transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40 ${
     uploading
       ? "cursor-not-allowed opacity-60"
       : "cursor-pointer hover:border-primary hover:bg-primary/10"
@@ -244,15 +232,25 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
   );
 
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader>
-        <CardTitle className="text-xl">Scan Business Card</CardTitle>
+        <CardTitle className="text-base">Scan Business Card</CardTitle>
         <CardDescription>
-          Cards save instantly — AI reads each one in the background, so you
-          can keep scanning. A reviewer confirms the details afterward.
+          Cards save instantly — AI reads each one in the background.
         </CardDescription>
+        <CardAction>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={close}
+            aria-label="Close scanner"
+          >
+            <X aria-hidden="true" className="size-4" />
+          </Button>
+        </CardAction>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-3">
         {/* Upload control stays available at all times so the AE can scan
             card after card without waiting for AI extraction. */}
         <label className={labelClass}>
@@ -314,12 +312,6 @@ function ActiveScanner({ salesperson }: { salesperson: StoredSalesperson }) {
             {errorMessage}
           </p>
         )}
-
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="ghost" onClick={close}>
-            Close
-          </Button>
-        </div>
       </CardContent>
     </Card>
   );
