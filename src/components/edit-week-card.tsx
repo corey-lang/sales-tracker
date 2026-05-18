@@ -38,7 +38,6 @@ import {
 // Saturday/Sunday rows are intentionally left alone: they fall outside the
 // business week every other view sums over, so the editor never shows or
 // touches them. Deletes are scoped to this salesperson and this week only.
-const GOLD_COL = "gold_list_touches";
 
 type Props = {
   salespersonId: string;
@@ -54,10 +53,6 @@ export function EditWeekCard({
   const weeks = useMemo(() => recentBusinessWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const [values, setValues] = useState<ActivityValues>(ZERO_ACTIVITY);
-  // gold_list_touches isn't in the AE entry form (ACTIVITIES), but it is a
-  // column on activity_entries. Carry the week's sum through so consolidating
-  // onto Monday doesn't drop it when the Tue-Fri rows are deleted.
-  const [goldTouches, setGoldTouches] = useState(0);
   const [hasExisting, setHasExisting] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +66,7 @@ export function EditWeekCard({
     let cancelled = false;
     supabase
       .from("activity_entries")
-      .select([...ACTIVITIES.map((a) => a.key), GOLD_COL].join(","))
+      .select(ACTIVITIES.map((a) => a.key).join(","))
       .eq("salesperson_id", salespersonId)
       .gte("entry_date", weekStart)
       .lte("entry_date", friday)
@@ -82,19 +77,14 @@ export function EditWeekCard({
           setHasExisting(null);
           return;
         }
-        const rows = (data ?? []) as unknown as Array<
-          Partial<ActivityValues> & { gold_list_touches?: number }
-        >;
+        const rows = (data ?? []) as unknown as Array<Partial<ActivityValues>>;
         const next: ActivityValues = { ...ZERO_ACTIVITY };
-        let gold = 0;
         for (const row of rows) {
           for (const a of ACTIVITIES) {
             next[a.key] += Number(row[a.key] ?? 0);
           }
-          gold += Number(row.gold_list_touches ?? 0);
         }
         setValues(next);
-        setGoldTouches(gold);
         setHasExisting(rows.length > 0);
         setError(null);
         setSavedMsg(null);
@@ -120,7 +110,6 @@ export function EditWeekCard({
           salesperson_id: salespersonId,
           entry_date: weekStart,
           ...values,
-          gold_list_touches: goldTouches,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "salesperson_id,entry_date" },

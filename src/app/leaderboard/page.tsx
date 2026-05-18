@@ -7,7 +7,6 @@ import { useRouter } from "next/navigation";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
-import { ACTIVITIES, type ActivityKey, type ActivityValues } from "@/lib/activities";
 import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
@@ -20,13 +19,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-// Shape returned by GET /api/leaderboard. Percentages are computed
-// server-side; raw weekly_goals targets never reach the browser.
+// AE-facing leaderboard. Reps compare by weighted % of weekly goal — raw
+// activity counts and raw goal targets are intentionally NOT shown here.
+// Percentages are computed server-side by GET /api/leaderboard (the route
+// also returns raw totals for admin use; this page simply ignores them).
 type Standing = {
   id: string;
   first_name: string;
-  total: number;
-  totals: ActivityValues;
   percent: number | null;
 };
 
@@ -62,18 +61,16 @@ export default function LeaderboardPage() {
         }
         const result = body.standings ?? [];
 
-        // Sort by percent desc (null goes last); name as tiebreaker.
+        // Sort by percent desc; reps with no goal (null) go last; name as
+        // the tiebreaker.
         result.sort((a, b) => {
           if (a.percent === null && b.percent === null) {
-            return (
-              b.total - a.total || a.first_name.localeCompare(b.first_name)
-            );
+            return a.first_name.localeCompare(b.first_name);
           }
           if (a.percent === null) return 1;
           if (b.percent === null) return -1;
           return (
             b.percent - a.percent ||
-            b.total - a.total ||
             a.first_name.localeCompare(b.first_name)
           );
         });
@@ -171,69 +168,34 @@ function StandingRow({
   isMe: boolean;
 }) {
   const percent = standing.percent;
-  const { text: percentColor } =
-    percent === null ? { text: "" } : progressColor(percent);
+  const percentColor =
+    percent === null ? "text-muted-foreground" : progressColor(percent).text;
   return (
     <li
       className={cn(
-        "rounded-lg border p-3",
+        "flex items-center justify-between gap-3 rounded-lg border p-3",
         isMe ? "border-primary bg-primary/5" : "border-border",
       )}
     >
-      <div className="flex items-baseline justify-between gap-3">
-        <div className="flex items-baseline gap-3">
-          <span className="text-lg font-semibold tabular-nums text-muted-foreground">
-            #{rank}
-          </span>
-          <span className="text-base font-medium">
-            {standing.first_name}
-            {isMe && (
-              <span className="ml-2 text-xs text-muted-foreground">(you)</span>
-            )}
-          </span>
-        </div>
-        <div className="flex flex-col items-end leading-tight">
-          <span className="text-2xl font-semibold tabular-nums">
-            {standing.total}
-          </span>
-          {percent !== null && (
-            <span
-              className={cn("text-sm font-semibold tabular-nums", percentColor)}
-            >
-              {percent}%
-            </span>
+      <div className="flex min-w-0 items-baseline gap-3">
+        <span className="text-lg font-semibold tabular-nums text-muted-foreground">
+          #{rank}
+        </span>
+        <span className="truncate text-base font-medium">
+          {standing.first_name}
+          {isMe && (
+            <span className="ml-2 text-xs text-muted-foreground">(you)</span>
           )}
-        </div>
+        </span>
       </div>
-      <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-muted-foreground sm:grid-cols-6">
-        {ACTIVITIES.map((a) => (
-          <div key={a.key} className="flex items-baseline justify-between">
-            <dt className="truncate">{shortLabel(a.key)}</dt>
-            <dd className="ml-1 tabular-nums text-foreground">
-              {standing.totals[a.key]}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <span
+        className={cn(
+          "shrink-0 text-2xl font-bold tabular-nums",
+          percentColor,
+        )}
+      >
+        {percent === null ? "—" : `${percent}%`}
+      </span>
     </li>
   );
-}
-
-function shortLabel(key: ActivityKey): string {
-  switch (key) {
-    case "office_visits":
-      return "Visits";
-    case "service_requests":
-      return "Reqs";
-    case "ones_scheduled":
-      return "1:1 Sch";
-    case "ones_held":
-      return "1:1 Held";
-    case "presentations":
-      return "Pres";
-    case "impressions":
-      return "Impr";
-    case "team_meetings":
-      return "Mtgs";
-  }
 }

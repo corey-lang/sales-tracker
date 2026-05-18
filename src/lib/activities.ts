@@ -6,6 +6,7 @@ export const ACTIVITIES = [
   { key: "presentations", label: "Presentations" },
   { key: "impressions", label: "Impressions" },
   { key: "team_meetings", label: "Team meetings" },
+  { key: "gold_list_touches", label: "Gold List Contact" },
 ] as const;
 
 export type ActivityKey = (typeof ACTIVITIES)[number]["key"];
@@ -20,4 +21,5 @@ export const ZERO_ACTIVITY: ActivityValues = {
   presentations: 0,
   impressions: 0,
   team_meetings: 0,
+  gold_list_touches: 0,
 };
