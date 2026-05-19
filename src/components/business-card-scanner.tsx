@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
@@ -18,21 +18,35 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-/** Background AI state for a single card the AE just uploaded. */
-type RecentStatus = "saved" | "reading" | "complete" | "failed";
+/** Lifecycle state for a single card the AE captured this session. */
+type RecentStatus =
+  | "uploading" // optimistic — image still uploading / scan row still saving
+  | "saved" // scan row created
+  | "reading" // AI extraction running
+  | "complete" // AI extraction done
+  | "failed" // AI extraction failed (scan exists — Tonja can retry)
+  | "upload_failed"; // upload / scan-row insert failed (no scan was created)
 
-/** A card uploaded this session, tracked while AI extraction runs in the background. */
+/** A card captured this session, tracked while it processes in the background. */
 type RecentUpload = {
-  scanId: string;
+  /** Client-generated id — stable for the whole lifecycle, before scanId exists. */
+  id: string;
+  /** The server scan id, once the scan row has been created. */
+  scanId: string | null;
   fileName: string;
   status: RecentStatus;
 };
 
-/** Badge label + styling for each background-AI state in the recent list. */
+/** Badge label + styling for each lifecycle state in the recent list. */
 const RECENT_STATUS_META: Record<
   RecentStatus,
   { label: string; className: string }
 > = {
+  uploading: {
+    label: "Saving…",
+    className:
+      "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  },
   saved: {
     label: "Card saved",
     className:
@@ -52,6 +66,10 @@ const RECENT_STATUS_META: Record<
     label: "AI failed — Tonja can retry",
     className: "border-destructive/40 bg-destructive/10 text-destructive",
   },
+  upload_failed: {
+    label: "Upload failed — recapture",
+    className: "border-destructive/40 bg-destructive/10 text-destructive",
+  },
 };
 
 type Props = {
@@ -65,7 +83,7 @@ type Props = {
    */
   fileKey: number;
   /**
-   * Re-opens the dashboard's camera input directly — powers "Scan Another
+   * Re-opens the dashboard's camera input directly — powers "Capture Another
    * Card" so the AE can batch-scan without returning to the dashboard.
    */
   onScanAnother: () => void;
@@ -78,6 +96,11 @@ type Props = {
 // chosen file and processes it: upload image -> save business_card_scans row
 // -> background AI extraction. Scanning another card re-taps the dashboard
 // action, which bumps `fileKey` so the next card joins the same running list.
+//
+// RAPID-SCAN UX: the post-capture state ("Card Captured" + the next-action
+// buttons) appears OPTIMISTICALLY the instant a photo is selected — it never
+// waits on the upload, the scan API, the DB insert, or AI extraction. Those
+// all run in the background and only update the secondary per-card status list.
 //
 // The seeded Test account uses this flow too; the only difference is
 // `is_test_data`, which the /api/business-card/scan route derives server-side.
@@ -94,52 +117,65 @@ function ActiveScanner({
   onScanAnother,
   onClose,
 }: Props) {
-  // `uploading` covers only the brief image-upload + scan-row insert. AI
-  // extraction is NEVER tracked here — it runs in the background per card.
-  const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [recent, setRecent] = useState<RecentUpload[]>([]);
+  // Monotonic source of stable client ids — assigned before a scan id exists.
+  const localIdRef = useRef(0);
 
-  /** Updates one recent upload's background-AI status by scan id. */
-  const setRecentStatus = useCallback(
-    (scanId: string, status: RecentStatus) => {
+  /** Merges a patch into one recent entry, found by its client id. */
+  const updateRecent = useCallback(
+    (id: string, patch: Partial<RecentUpload>) => {
       setRecent((prev) =>
-        prev.map((item) =>
-          item.scanId === scanId ? { ...item, status } : item,
-        ),
+        prev.map((item) => (item.id === id ? { ...item, ...patch } : item)),
       );
     },
     [],
   );
 
   /**
-   * Runs AI extraction for an already-saved scan. Deliberately NOT awaited by
-   * the upload flow: the scan row + image are already persisted, so a failure
-   * here only flips this card's status to "failed". The scan still stands and
-   * shows in the Verification Center (with a failed/pending extraction status)
-   * for Tonja to retry — nothing is rolled back or deleted.
+   * Runs AI extraction for an already-saved scan. Deliberately fire-and-forget:
+   * the scan row + image are already persisted, so a failure here only flips
+   * this card's badge to "failed". The scan still stands and shows in the
+   * Verification Center for Tonja to retry — nothing is rolled back or deleted.
    */
   const runExtraction = useCallback(
-    async (scanId: string) => {
-      setRecentStatus(scanId, "reading");
+    async (id: string, scanId: string) => {
+      updateRecent(id, { status: "reading" });
       try {
         const res = await apiFetch("/api/business-card/process", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scanId }),
         });
-        setRecentStatus(scanId, res.ok ? "complete" : "failed");
+        updateRecent(id, { status: res.ok ? "complete" : "failed" });
       } catch {
-        setRecentStatus(scanId, "failed");
+        updateRecent(id, { status: "failed" });
       }
     },
-    [setRecentStatus],
+    [updateRecent],
   );
 
   const handleFile = async (picked: File) => {
     setErrorMessage(null);
-    setUploading(true);
 
+    // OPTIMISTIC: register the card and surface the post-capture UI ("Card
+    // Captured" + the next-action buttons) IMMEDIATELY — before any upload,
+    // API call, DB insert, or AI work. Everything below runs in the background
+    // and only updates this entry's badge.
+    const localId = `card-${(localIdRef.current += 1)}`;
+    setRecent((prev) =>
+      [
+        {
+          id: localId,
+          scanId: null,
+          fileName: picked.name,
+          status: "uploading" as RecentStatus,
+        },
+        ...prev,
+      ].slice(0, 5),
+    );
+
+    // --- Background work from here on -------------------------------------
     const ext = sanitizeFilename(picked.name);
     const path = `${salesperson.id}/${Date.now()}-${ext}`;
 
@@ -151,8 +187,8 @@ function ActiveScanner({
       });
 
     if (upload.error) {
+      updateRecent(localId, { status: "upload_failed" });
       setErrorMessage(`Upload failed: ${upload.error.message}`);
-      setUploading(false);
       return;
     }
 
@@ -184,32 +220,24 @@ function ActiveScanner({
         | null;
 
       if (!res.ok || !payload?.scanId) {
+        updateRecent(localId, { status: "upload_failed" });
         setErrorMessage(
           `Save failed: ${payload?.error ?? `server returned ${res.status}`}`,
         );
-        setUploading(false);
         return;
       }
       scanId = payload.scanId;
     } catch (err) {
+      updateRecent(localId, { status: "upload_failed" });
       setErrorMessage(
         `Save failed: ${err instanceof Error ? err.message : "network error"}`,
       );
-      setUploading(false);
       return;
     }
 
-    // The image + scan row are now fully saved. From here the UI never blocks
-    // on AI: record the card as saved and fire extraction in the background so
-    // the AE can immediately scan the next card without waiting.
-    setRecent((prev) =>
-      [
-        { scanId, fileName: picked.name, status: "saved" as RecentStatus },
-        ...prev,
-      ].slice(0, 5),
-    );
-    setUploading(false);
-    void runExtraction(scanId);
+    // Scan row + image are saved. Fire AI extraction in the background.
+    updateRecent(localId, { scanId, status: "saved" });
+    void runExtraction(localId, scanId);
   };
 
   // Process each picked image. `fileKey` changes on every dashboard pick (even
@@ -223,15 +251,17 @@ function ActiveScanner({
   }, [fileKey]);
 
   const close = () => {
-    setUploading(false);
     setErrorMessage(null);
     setRecent([]);
     onClose();
   };
 
-  // Banner reflects the newest activity: still reading vs. all done.
-  const anyReading = recent.some(
-    (item) => item.status === "saved" || item.status === "reading",
+  // True while any card is still uploading / saving / being read by AI.
+  const anyWorking = recent.some(
+    (item) =>
+      item.status === "uploading" ||
+      item.status === "saved" ||
+      item.status === "reading",
   );
 
   return (
@@ -254,20 +284,21 @@ function ActiveScanner({
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Before the first card lands — just the saving status. */}
-        {uploading && recent.length === 0 && !errorMessage && (
+        {/* Single-frame initial state before the optimistic entry registers. */}
+        {recent.length === 0 && !errorMessage && (
           <p
             role="status"
             className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground"
           >
-            Saving card…
+            Capturing card…
           </p>
         )}
 
         {/* After a capture, the NEXT ACTION dominates: the buttons sit above
             the AI status, which is demoted to small text + the list below.
-            Batch scanning — "Capture Another Card" re-opens the camera
-            directly, no dashboard return, no picker re-selection. */}
+            This block appears OPTIMISTICALLY — the moment a photo is picked,
+            not when the upload finishes. "Capture Another Card" re-opens the
+            camera directly, with no dashboard return and no picker step. */}
         {(recent.length > 0 || errorMessage) && (
           <div className="space-y-2.5">
             {recent.length > 0 && (
@@ -289,7 +320,6 @@ function ActiveScanner({
             <Button
               type="button"
               onClick={onScanAnother}
-              disabled={uploading}
               className="h-14 w-full text-base font-semibold"
             >
               Capture Another Card
@@ -305,8 +335,8 @@ function ActiveScanner({
 
             {recent.length > 0 && (
               <p className="text-center text-xs text-muted-foreground">
-                {anyReading
-                  ? "AI is reading it in the background."
+                {anyWorking
+                  ? "Saving and reading your cards in the background."
                   : "AI finished — review in the Verification Center."}
               </p>
             )}
@@ -320,7 +350,7 @@ function ActiveScanner({
               const meta = RECENT_STATUS_META[item.status];
               return (
                 <li
-                  key={item.scanId}
+                  key={item.id}
                   className="flex items-center justify-between gap-2"
                 >
                   <span className="min-w-0 truncate text-sm text-muted-foreground">
