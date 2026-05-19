@@ -201,6 +201,35 @@ export default function DashboardPage() {
     }
   };
 
+  // Focused review mode: while the AE is in the "Scan Card & Save Contact"
+  // flow, the rest of the dashboard (momentum/leaderboard, quick actions,
+  // to-do, log activity, …) is hidden so the screen reads as a dedicated
+  // contact review-and-save workflow. Closing the panel restores the dashboard.
+  if (isAe && phoneScan) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
+        <PhoneContactScanner
+          salesperson={salesperson}
+          file={phoneScan.file}
+          fileKey={phoneScan.key}
+          onScanAnother={() => phoneCameraRef.current?.click()}
+          onClose={() => setPhoneScan(null)}
+        />
+        {/* Kept mounted so "Scan Another Contact" can reopen the camera. */}
+        <input
+          ref={phoneCameraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={(e) => handlePickedFile(e, "phone")}
+          className="sr-only"
+          aria-hidden="true"
+          tabIndex={-1}
+        />
+      </main>
+    );
+  }
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
       {/* Compact greeting — the weekly momentum card is the visual hero. */}
@@ -237,8 +266,10 @@ export default function DashboardPage() {
           Quick actions
         </h2>
 
-        {/* Active scanners render here; the action buttons below stay visible
-            so another card can be scanned with a single tap. */}
+        {/* The admin scanner renders here; the action buttons below stay
+            visible so another card can be scanned with a single tap. The
+            phone-contact flow instead takes over the screen in focused mode
+            (see the early return above). */}
         {isAe && adminScan && (
           <BusinessCardScanner
             salesperson={salesperson}
@@ -246,15 +277,6 @@ export default function DashboardPage() {
             fileKey={adminScan.key}
             onScanAnother={() => adminCameraRef.current?.click()}
             onClose={() => setAdminScan(null)}
-          />
-        )}
-        {isAe && phoneScan && (
-          <PhoneContactScanner
-            salesperson={salesperson}
-            file={phoneScan.file}
-            fileKey={phoneScan.key}
-            onScanAnother={() => phoneCameraRef.current?.click()}
-            onClose={() => setPhoneScan(null)}
           />
         )}
 

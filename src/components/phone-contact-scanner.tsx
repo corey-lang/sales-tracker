@@ -22,13 +22,14 @@ import { Input } from "@/components/ui/input";
 // "Scan Card & Save Contact" — the AE-facing phone-contact flow.
 //
 // The dashboard's "Scan Card & Save Contact" action opens the native picker
-// directly (no intermediate modal); this panel receives the chosen file and
-// drives it through: upload -> create scan row -> WAIT for AI extraction ->
-// AE reviews/edits the fields -> save AE-owned contact -> hand off a vCard to
-// the phone. Picking another card re-taps the dashboard action, which bumps
-// `fileKey` and restarts this panel with the new card. The admin/Tonja review
-// flow is untouched. (Feature is gated to the test account — see the dashboard
-// and the /api/business-card/ae-contact + /vcard routes.)
+// directly; this panel receives the chosen file and drives a focused
+// review-and-save workflow: upload -> create scan row -> WAIT for AI
+// extraction -> AE reviews/edits the fields -> save AE-owned contact -> hand
+// off a vCard to the phone. The dashboard renders this panel in a focused
+// mode (the rest of the dashboard is hidden) so the AE knows this is now a
+// dedicated contact-save workflow. The admin/Tonja review flow is untouched.
+// (Feature is gated to the test account — see the dashboard and the
+// /api/business-card/ae-contact + /vcard routes.)
 
 type Props = {
   salesperson: StoredSalesperson;
@@ -73,8 +74,15 @@ const EMPTY_FIELDS: ContactFields = {
   notes: "",
 };
 
-/** Workflow stages for one card. */
-type Stage = "working" | "review" | "saved" | "failed";
+/**
+ * Workflow stages for one card.
+ *  - working        upload + AI extraction in progress
+ *  - extract_failed AI couldn't read the card (scan IS saved — retry possible)
+ *  - review         editable fields, ready to save to phone
+ *  - saved          contact saved + vCard handed to the phone
+ *  - failed         upload / scan-row failure (no scan to review)
+ */
+type Stage = "working" | "extract_failed" | "review" | "saved" | "failed";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -126,7 +134,10 @@ export function PhoneContactScanner({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [scanId, setScanId] = useState<string | null>(null);
   const [fields, setFields] = useState<ContactFields>(EMPTY_FIELDS);
-  const [extractionFailed, setExtractionFailed] = useState(false);
+  /** True when the AE chose to type the contact in by hand after a failed read. */
+  const [manualEntry, setManualEntry] = useState(false);
+  /** Consecutive AI-extraction failures for the current card. */
+  const [extractionFailures, setExtractionFailures] = useState(0);
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -135,17 +146,49 @@ export function PhoneContactScanner({
   };
 
   /**
+   * Runs AI extraction for an already-saved scan. On success, populates the
+   * review form; on failure, counts the attempt and shows the retry screen.
+   * Used both for the first read and for "Try Again".
+   */
+  const runExtraction = async (id: string) => {
+    setErrorMessage(null);
+    setStage("working");
+    try {
+      const res = await apiFetch("/api/business-card/process", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ scanId: id }),
+      });
+      const payload = (await res.json().catch(() => null)) as
+        | { extraction?: Record<string, unknown> }
+        | null;
+      if (res.ok && payload?.extraction) {
+        setFields(fieldsFromExtraction(payload.extraction));
+        setManualEntry(false);
+        setExtractionFailures(0);
+        setStage("review");
+        return;
+      }
+    } catch {
+      // fall through to the failure handling below
+    }
+    // Extraction failed — the scan + image are still saved. Offer a retry.
+    setExtractionFailures((n) => n + 1);
+    setStage("extract_failed");
+  };
+
+  /**
    * Upload -> create scan row -> run AI extraction. The scan + image are saved
-   * regardless of whether extraction succeeds; on extraction failure the AE
-   * just fills the review form in by hand. An upload / scan-row failure has no
-   * scan to review, so it lands on the "failed" stage to retry from scratch.
+   * regardless of whether extraction succeeds. An upload / scan-row failure
+   * has no scan to review, so it lands on the "failed" stage.
    */
   const handleFile = async (picked: File) => {
     // Reset all per-card state — handles a re-tap restarting the panel.
     setErrorMessage(null);
     setScanId(null);
     setFields(EMPTY_FIELDS);
-    setExtractionFailed(false);
+    setManualEntry(false);
+    setExtractionFailures(0);
     setDuplicateWarning(null);
     setSaving(false);
     setStage("working");
@@ -200,28 +243,7 @@ export function PhoneContactScanner({
     setScanId(newScanId);
 
     // Run AI extraction and WAIT for it — the AE needs the fields to review.
-    try {
-      const res = await apiFetch("/api/business-card/process", {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: JSON.stringify({ scanId: newScanId }),
-      });
-      const payload = (await res.json().catch(() => null)) as
-        | { extraction?: Record<string, unknown> }
-        | null;
-      if (res.ok && payload?.extraction) {
-        setFields(fieldsFromExtraction(payload.extraction));
-        setExtractionFailed(false);
-      } else {
-        // Extraction failed — the scan is still saved; enter details manually.
-        setFields(EMPTY_FIELDS);
-        setExtractionFailed(true);
-      }
-    } catch {
-      setFields(EMPTY_FIELDS);
-      setExtractionFailed(true);
-    }
-    setStage("review");
+    await runExtraction(newScanId);
   };
 
   // Process the picked image. `fileKey` changes on every dashboard pick (even
@@ -233,6 +255,20 @@ export function PhoneContactScanner({
     void handleFile(file);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
+
+  /** "Try Again" — re-runs AI extraction on the same saved scan. */
+  const handleRetry = () => {
+    if (!scanId) return;
+    void runExtraction(scanId);
+  };
+
+  /** "Enter Manually" — skip AI and fill the review form in by hand. */
+  const enterManually = () => {
+    setFields(EMPTY_FIELDS);
+    setManualEntry(true);
+    setErrorMessage(null);
+    setStage("review");
+  };
 
   /** Generates the vCard and triggers the mobile download/import. */
   const downloadVCard = async (id: string | null) => {
@@ -304,6 +340,9 @@ export function PhoneContactScanner({
     </p>
   );
 
+  /** First failure leads with "Try Again"; a repeat leads with "Enter Manually". */
+  const firstFailure = extractionFailures <= 1;
+
   return (
     <Card size="sm">
       <CardHeader>
@@ -319,7 +358,9 @@ export function PhoneContactScanner({
             ? "Edit anything AI missed, then add it to your phone."
             : stage === "saved"
               ? "Saved to app + ready for phone."
-              : "Getting this card ready to review."}
+              : stage === "working"
+                ? "Getting this card ready to review."
+                : "Scan a business card to save it to your phone."}
         </CardDescription>
         <CardAction>
           <Button
@@ -354,6 +395,64 @@ export function PhoneContactScanner({
           </div>
         )}
 
+        {/* ---- Stage: extract_failed (AI couldn't read the card) ------- */}
+        {stage === "extract_failed" && (
+          <div className="space-y-2.5 text-center">
+            <p className="text-base font-semibold text-foreground">
+              {firstFailure
+                ? "We couldn't read this card clearly."
+                : "Still having trouble reading this card."}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {firstFailure
+                ? "Give it another try, or enter the details yourself."
+                : "Entering the details yourself is the quickest way from here."}
+            </p>
+
+            {errorBanner}
+
+            {/* First failure leads with Try Again; a repeat leads with
+                Enter Manually. The other action stays as the secondary. */}
+            {firstFailure ? (
+              <>
+                <Button
+                  type="button"
+                  onClick={handleRetry}
+                  className="h-14 w-full text-base font-semibold"
+                >
+                  Try Again
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={enterManually}
+                  className="h-12 w-full"
+                >
+                  Enter Manually
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  onClick={enterManually}
+                  className="h-14 w-full text-base font-semibold"
+                >
+                  Enter Manually
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleRetry}
+                  className="h-12 w-full"
+                >
+                  Try Again
+                </Button>
+              </>
+            )}
+          </div>
+        )}
+
         {/* ---- Stage: failed (upload / save error) --------------------- */}
         {stage === "failed" && (
           <>
@@ -364,7 +463,7 @@ export function PhoneContactScanner({
             <Button
               type="button"
               variant="outline"
-              className="w-full"
+              className="h-12 w-full"
               onClick={onClose}
             >
               Close
@@ -375,12 +474,20 @@ export function PhoneContactScanner({
         {/* ---- Stage: review ------------------------------------------- */}
         {stage === "review" && (
           <>
-            {extractionFailed && (
-              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-                AI couldn&apos;t read this card. The scan was still saved —
-                enter the contact details below.
-              </p>
-            )}
+            {/* Primary CTA — visible immediately, no scrolling needed. */}
+            <Button
+              type="button"
+              onClick={handleAddToPhone}
+              disabled={saving}
+              className="h-14 w-full text-base font-semibold"
+            >
+              {saving ? "Saving…" : "Add to Phone Contacts"}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              {manualEntry
+                ? "Enter the contact details below, then save."
+                : "Editing below is optional — fix anything AI got wrong, then save."}
+            </p>
 
             <div className="grid grid-cols-2 gap-2">
               <FieldInput
@@ -444,9 +551,9 @@ export function PhoneContactScanner({
 
             <Button
               type="button"
-              className="w-full"
               onClick={handleAddToPhone}
               disabled={saving}
+              className="h-12 w-full"
             >
               {saving ? "Saving…" : "Add to Phone Contacts"}
             </Button>
@@ -477,13 +584,17 @@ export function PhoneContactScanner({
             {errorBanner}
 
             {/* Re-opens the camera directly for the next card. */}
-            <Button type="button" className="w-full" onClick={onScanAnother}>
+            <Button
+              type="button"
+              className="h-14 w-full text-base font-semibold"
+              onClick={onScanAnother}
+            >
               Scan Another Contact
             </Button>
             <Button
               type="button"
               variant="outline"
-              className="w-full"
+              className="h-12 w-full"
               onClick={onClose}
             >
               Done
