@@ -48,102 +48,24 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-:root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0.042 264.695);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.129 0.042 264.695);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.208 0.042 265.755);
-  --primary-foreground: oklch(0.984 0.003 247.858);
-  --secondary: oklch(0.968 0.007 247.896);
-  --secondary-foreground: oklch(0.208 0.042 265.755);
-  --muted: oklch(0.968 0.007 247.896);
-  --muted-foreground: oklch(0.554 0.046 257.417);
-  --accent: oklch(0.968 0.007 247.896);
-  --accent-foreground: oklch(0.208 0.042 265.755);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.929 0.013 255.508);
-  --input: oklch(0.929 0.013 255.508);
-  --ring: oklch(0.704 0.04 256.788);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.984 0.003 247.858);
-  --sidebar-foreground: oklch(0.129 0.042 264.695);
-  --sidebar-primary: oklch(0.208 0.042 265.755);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.968 0.007 247.896);
-  --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
-  --sidebar-border: oklch(0.929 0.013 255.508);
-  --sidebar-ring: oklch(0.704 0.04 256.788);
-}
-
-.dark {
-  --background: oklch(0.129 0.042 264.695);
-  --foreground: oklch(0.984 0.003 247.858);
-  --card: oklch(0.208 0.042 265.755);
-  --card-foreground: oklch(0.984 0.003 247.858);
-  --popover: oklch(0.208 0.042 265.755);
-  --popover-foreground: oklch(0.984 0.003 247.858);
-  --primary: oklch(0.929 0.013 255.508);
-  --primary-foreground: oklch(0.208 0.042 265.755);
-  --secondary: oklch(0.279 0.041 260.031);
-  --secondary-foreground: oklch(0.984 0.003 247.858);
-  --muted: oklch(0.279 0.041 260.031);
-  --muted-foreground: oklch(0.704 0.04 256.788);
-  --accent: oklch(0.279 0.041 260.031);
-  --accent-foreground: oklch(0.984 0.003 247.858);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.551 0.027 264.364);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.208 0.042 265.755);
-  --sidebar-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.279 0.041 260.031);
-  --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.551 0.027 264.364);
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
-  }
-}
-
 /* ============================================================================
-   Premium dark theme preview — TEST ACCOUNTS ONLY
+   Premium dark/orange theme — the global default.
    ----------------------------------------------------------------------------
-   Toggled on <html> by ThemeApplier (src/components/theme-applier.tsx) only
-   when the signed-in salesperson is the seeded Test account. Production users
-   never match the gate, so they never see this — their UI is byte-identical
-   to before.
-   The whole theme works by overriding the same CSS variables the existing
-   light theme uses (declared above in `:root`), so every Tailwind token —
-   bg-background, text-foreground, bg-card, border-border, bg-primary, ring,
-   etc. — automatically picks up the new values. No component had to change.
-   Inspiration: Linear / fintech dashboards. Charcoal surfaces, soft borders,
+   The whole theme is CSS-variable based, so every Tailwind token
+   (bg-background, text-foreground, bg-card, border-border, bg-primary, ring,
+   etc.) picks up these values automatically and no component has to know
+   anything about a theme.
+
+   `class="dark"` is also set on <html> in the root layout — that triggers
+   Tailwind's `dark:` utility variant (via the @custom-variant rule above),
+   so components that use semantic colors like `text-emerald-700
+   dark:text-emerald-400` render the dark-mode shade and read cleanly on
+   charcoal. There is intentionally no light fallback any more.
+
+   Inspiration: Linear / fintech dashboards — charcoal surfaces, soft borders,
    one orange accent for primary actions and focus rings.
    ============================================================================ */
-.theme-premium-dark {
+:root {
   /* Native form controls + scrollbars follow the dark palette. */
   color-scheme: dark;
 
@@ -172,8 +94,8 @@
   --input: #262b36;
   --ring: #ff7a00;
 
-  /* Sidebar + chart tokens kept on-palette so any component referencing them
-     stays cohesive (the radix-nova preset wires these into Tailwind too). */
+  /* Sidebar + chart tokens kept on-palette for cohesion (the radix-nova preset
+     wires these into Tailwind too). */
   --sidebar: #0f1115;
   --sidebar-foreground: #f3f4f6;
   --sidebar-primary: #ff7a00;
@@ -187,46 +109,37 @@
   --chart-3: #5eead4;
   --chart-4: #93c5fd;
   --chart-5: #c4b5fd;
+
+  --radius: 0.625rem;
 }
 
-/* Slightly softer, more elevated card shadow under the dark theme.
-   Targets shadcn's `data-slot="card"`; harmless if not present. */
-.theme-premium-dark [data-slot="card"] {
-  box-shadow:
-    0 1px 0 0 rgb(0 0 0 / 0.04),
-    0 12px 32px -18px rgb(0 0 0 / 0.55);
-}
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
 
-/* Smooth color transitions on interactive controls — gives the orange
-   hover/active states a calmer, more "premium" feel without changing any
-   component behavior. */
-.theme-premium-dark button,
-.theme-premium-dark a,
-.theme-premium-dark [role="button"] {
-  transition-property:
-    color, background-color, border-color, box-shadow, opacity;
-  transition-duration: 150ms;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-}
+  /* Elevated cards — a soft, deep shadow that reads well on charcoal. */
+  [data-slot="card"] {
+    box-shadow:
+      0 1px 0 0 rgb(0 0 0 / 0.04),
+      0 12px 32px -18px rgb(0 0 0 / 0.55);
+  }
 
-/* Brand-logo theme swap (see src/components/logo.tsx).
-   Both <img> variants render; CSS picks which one is visible. */
-.logo-dark {
-  display: none;
-}
-.theme-premium-dark .logo-light {
-  display: none;
-}
-.theme-premium-dark .logo-dark {
-  display: revert;
-}
-
-/* Utility: an element that should ONLY render when the premium dark preview
-   theme is active. Used by the small dashboard-greeting logo so production
-   users never see anything new at all in that header. */
-.theme-premium-only {
-  display: none;
-}
-.theme-premium-dark .theme-premium-only {
-  display: inline-flex;
+  /* Smooth color transitions on interactive controls — gives the orange
+     hover/active states a calmer, more premium feel without changing any
+     component behavior. */
+  button,
+  a,
+  [role="button"] {
+    transition-property:
+      color, background-color, border-color, box-shadow, opacity;
+    transition-duration: 150ms;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
 }

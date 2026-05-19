@@ -221,12 +221,8 @@ export default function DashboardPage() {
       {/* Compact greeting — the weekly momentum card is the visual hero. */}
       <header className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          {/* Subtle white brand mark — premium dark theme only. The wrapper
-              class hides it entirely for everyone else, so the production
-              greeting is untouched. */}
-          <span className="theme-premium-only shrink-0 opacity-90">
-            <Logo width={120} height={37} />
-          </span>
+          {/* Subtle white brand mark next to the greeting — premium-dark global. */}
+          <Logo width={120} height={37} className="shrink-0 opacity-90" />
           <div className="min-w-0">
             <p className="text-xs font-medium text-muted-foreground">{today}</p>
             <h1 className="truncate text-xl font-bold tracking-tight">
