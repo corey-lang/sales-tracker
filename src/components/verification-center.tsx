@@ -600,6 +600,43 @@ export function VerificationCenter() {
     [load, scans],
   );
 
+  const handleReopen = useCallback(
+    async (scanId: string) => {
+      setActioningId(scanId);
+      setActionMessage(null);
+      try {
+        const res = await apiFetch("/api/business-card/reopen", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId }),
+        });
+        if (!res.ok) {
+          let message = `Action failed (${res.status})`;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (typeof data.error === "string" && data.error.length > 0) {
+              message = data.error;
+            }
+          } catch {
+            // ignore parse error; keep status-based message
+          }
+          throw new Error(message);
+        }
+        setActionMessage({
+          kind: "success",
+          text: "Scan sent back to manual review.",
+        });
+        await load();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setActionMessage({ kind: "error", text: message });
+      } finally {
+        setActioningId((current) => (current === scanId ? null : current));
+      }
+    },
+    [load],
+  );
+
   const handleExport = useCallback(
     async (target: {
       key: string;
@@ -921,6 +958,7 @@ export function VerificationCenter() {
                                 setEditError(null);
                                 setEditingScan(scan);
                               }}
+                              onReopen={() => void handleReopen(scan.id)}
                             />
                           ))}
                         </ul>
@@ -1064,6 +1102,7 @@ function ScanCard({
   onPreview,
   canEdit,
   onEdit,
+  onReopen,
 }: {
   scan: Scan;
   duplicateContact: DuplicateContact | undefined;
@@ -1078,6 +1117,8 @@ function ScanCard({
   /** True for admins — gates the Edit action (the route enforces it too). */
   canEdit: boolean;
   onEdit: () => void;
+  /** Sends an auto-marked duplicate back to manual duplicate review. */
+  onReopen: () => void;
 }) {
   const status = effectiveStatus(scan);
   const needsAction =
@@ -1176,6 +1217,24 @@ function ScanCard({
             canEdit={canEdit}
             onEdit={onEdit}
           />
+        )}
+        {status === "auto_duplicate" && (
+          <div className="flex flex-col gap-1.5 border-t pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onReopen}
+              disabled={actionsDisabled || actioning}
+              className="self-start"
+            >
+              {actioning ? "Working…" : "Send Back to Review"}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Auto-marked a duplicate. Send it back to manually approve it as a
+              contact, confirm the duplicate, or reject it.
+            </p>
+          </div>
         )}
         <ExtractedFields scan={scan} />
       </div>
@@ -1653,8 +1712,10 @@ function SheetField({
 }
 
 /**
- * Admin-only slide-over for correcting a scan's extracted contact fields
- * before it is approved into a contact. Save persists via the admin-guarded
+ * Admin-only centered modal for correcting a scan's extracted contact fields
+ * before it is approved into a contact. The card image sits beside the form
+ * (stacked on mobile) so the admin can read the card while editing — the image
+ * is never blurred. Save persists via the admin-guarded
  * /api/business-card/update-scan route; the Verification Center then refreshes.
  * After editing, the admin can still approve / reject / mark-duplicate.
  */
@@ -1716,17 +1777,17 @@ function EditScanSheet({
       aria-modal="true"
       aria-label="Edit contact details"
       onClick={onClose}
-      className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
     >
       <div
         onClick={(event) => event.stopPropagation()}
-        className="flex h-full w-full max-w-md flex-col bg-background shadow-2xl"
+        className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg bg-background shadow-2xl"
       >
         <header className="flex items-center justify-between gap-2 border-b px-4 py-3">
           <div className="min-w-0">
             <h2 className="text-base font-semibold">Edit Contact</h2>
             <p className="text-xs text-muted-foreground">
-              Correct what AI extracted, then approve.
+              Compare the card to the fields, fix what AI missed, then approve.
             </p>
           </div>
           <button
@@ -1740,8 +1801,29 @@ function EditScanSheet({
         </header>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
-          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-            <div className="grid grid-cols-2 gap-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 sm:flex-row">
+            {/* Card image — left on desktop, stacked on top on mobile. Sits
+                inside the modal (never blurred) so it can be read against the
+                fields. */}
+            <div className="sm:w-2/5 sm:shrink-0">
+              <a
+                href={scan.image_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the full image in a new tab"
+                className="block overflow-hidden rounded-md border bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={scan.image_url}
+                  alt="Scanned business card"
+                  className="block h-auto w-full"
+                />
+              </a>
+            </div>
+            {/* Editable fields — right on desktop, below the image on mobile. */}
+            <div className="min-w-0 flex-1 space-y-3">
+              <div className="grid grid-cols-2 gap-2">
               <SheetField label="First name">
                 <Input
                   value={form.first_name}
@@ -1824,6 +1906,7 @@ function EditScanSheet({
                 {error}
               </p>
             )}
+            </div>
           </div>
 
           <footer className="flex gap-2 border-t px-4 py-3">

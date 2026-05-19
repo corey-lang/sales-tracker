@@ -68,16 +68,17 @@ export default function Home() {
       });
   }, [loaded, salesperson, router]);
 
-  const matchedAdmin = useMemo(() => {
+  // The salesperson whose name exactly matches what's typed/selected, or null.
+  // Sign in stays disabled until this is set — no AE name is ever pre-filled.
+  const selectedPerson = useMemo(() => {
     if (!people) return null;
     const lower = typed.trim().toLowerCase();
     if (!lower) return null;
-    return (
-      people.find(
-        (p) => p.first_name.toLowerCase() === lower && p.is_admin,
-      ) ?? null
-    );
+    return people.find((p) => p.first_name.toLowerCase() === lower) ?? null;
   }, [people, typed]);
+
+  // Admins additionally enter a PIN.
+  const matchedAdmin = selectedPerson?.is_admin ? selectedPerson : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -154,11 +155,7 @@ export default function Home() {
                 list="salespeople-list"
                 autoComplete="off"
                 autoCapitalize="words"
-                placeholder={
-                  people && people.length > 0
-                    ? people[0].first_name
-                    : "Your name"
-                }
+                placeholder="Select your name"
                 value={typed}
                 onChange={(e) => {
                   setTyped(e.target.value);
@@ -207,7 +204,7 @@ export default function Home() {
             <Button
               className="w-full"
               type="submit"
-              disabled={loading || !typed || (!!matchedAdmin && !pin)}
+              disabled={loading || !selectedPerson || (!!matchedAdmin && !pin)}
             >
               {loading ? "Signing in…" : "Sign in"}
             </Button>
