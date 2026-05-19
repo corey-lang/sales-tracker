@@ -91,18 +91,80 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * Acronyms / industry + brand terms kept UPPERCASE even when 4+ letters long
+ * (so they survive the title-casing below). Shorter terms like LLC, INC, HOA,
+ * USA, MLS, KW, EXP are also preserved by the <=3-letter rule, but are listed
+ * here too so the intent is explicit in one place. Compared case-insensitively.
+ */
+const PRESERVED_UPPERCASE = new Set([
+  "LLC",
+  "PLLC",
+  "INC",
+  "CORP",
+  "REALTOR",
+  "REALTORS",
+  "HOA",
+  "NASA",
+  "USA",
+  "MLS",
+  "NMLS",
+  "RE/MAX",
+  "KW",
+  "EXP",
+  "AT&T",
+]);
+
+/**
+ * Normalizes an ALL-CAPS name/company/title value to Title Case for display.
+ *
+ * AI/OCR often returns these fields shouting (e.g. "MIRAN WIETECHA",
+ * "ESCROW ASSISTANT", "AUSTIN TITLE"). This converts them to "Miran Wietecha"
+ * etc. before the review form renders. It deliberately leaves alone:
+ *  - any value that already contains a lowercase letter (intentional casing);
+ *  - values with no 4+ letter word, so pure short acronyms (IBM) are untouched;
+ *  - short tokens (<=3 letters) inside a value — likely acronyms (LLC, TX);
+ *  - tokens with slash / ampersand brand formatting (RE/MAX, AT&T);
+ *  - 4+ letter acronyms in {@link PRESERVED_UPPERCASE} (NASA, REALTORS, …).
+ * Apply only to name-like fields — never to emails or URLs.
+ */
+function normalizeCaps(value: string): string {
+  if (!value) return value;
+  // Already has lowercase → assume the casing is intentional, leave it.
+  if (value !== value.toUpperCase()) return value;
+  // No real word (4+ letters) → likely a pure acronym; leave it.
+  if (!/[A-Z]{4,}/.test(value)) return value;
+  return value.replace(/\S+/g, (token) => {
+    const letterCount = (token.match(/[A-Za-z]/g) ?? []).length;
+    // Keep short tokens as-is (LLC, INC, HOA, TX, &, numbers).
+    if (letterCount <= 3) return token;
+    // Slash / ampersand brand formatting is kept verbatim (RE/MAX, AT&T).
+    if (token.includes("/") || token.includes("&")) return token;
+    // Title-case each alphabetic run — but keep whitelisted acronyms in caps.
+    // Handles hyphens / underscores / apostrophes: "WIETECHA-SMITH" ->
+    // "Wietecha-Smith", "O'BRIEN" -> "O'Brien", "HOA_BOARD" -> "HOA_Board".
+    return token.replace(/[A-Za-z]+/g, (run) =>
+      PRESERVED_UPPERCASE.has(run.toUpperCase())
+        ? run.toUpperCase()
+        : run.charAt(0).toUpperCase() + run.slice(1).toLowerCase(),
+    );
+  });
+}
+
 /** Maps an AI extraction payload to the editable form fields. */
 function fieldsFromExtraction(payload: Record<string, unknown>): ContactFields {
   return {
-    firstName: str(payload.extracted_first_name),
-    lastName: str(payload.extracted_last_name),
-    fullName: str(payload.extracted_full_name),
-    company: str(payload.extracted_company),
-    title: str(payload.extracted_title),
+    // Name-like fields are de-shouted before display; email / website / phone
+    // are copied verbatim (casing there is significant).
+    firstName: normalizeCaps(str(payload.extracted_first_name)),
+    lastName: normalizeCaps(str(payload.extracted_last_name)),
+    fullName: normalizeCaps(str(payload.extracted_full_name)),
+    company: normalizeCaps(str(payload.extracted_company)),
+    title: normalizeCaps(str(payload.extracted_title)),
     phone: str(payload.extracted_phone),
     email: str(payload.extracted_email),
     website: str(payload.extracted_website),
-    address: str(payload.extracted_address),
+    address: normalizeCaps(str(payload.extracted_address)),
     notes: "",
   };
 }
@@ -483,6 +545,10 @@ export function PhoneContactScanner({
             >
               {saving ? "Saving…" : "Add to Phone Contacts"}
             </Button>
+            {/* iPhones open a contact preview but still need an explicit save. */}
+            <p className="rounded-md bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground">
+              On iPhone: tap “Create New Contact”, then tap “Done” to save.
+            </p>
             <p className="text-xs text-muted-foreground">
               {manualEntry
                 ? "Enter the contact details below, then save."
