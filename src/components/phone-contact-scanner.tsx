@@ -545,10 +545,34 @@ export function PhoneContactScanner({
             >
               {saving ? "Saving…" : "Add to Phone Contacts"}
             </Button>
-            {/* iPhones open a contact preview but still need an explicit save. */}
-            <p className="rounded-md bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground">
-              On iPhone: tap “Create New Contact”, then tap “Done” to save.
-            </p>
+            {/* Prominent iPhone walkthrough — users kept missing the final
+                save tap on the iOS contact preview screen. */}
+            <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3.5 py-3">
+              <p className="text-base font-semibold text-foreground">
+                iPhone users:
+              </p>
+              <p className="text-sm text-foreground/80">
+                After tapping “Add to Phone Contacts”:
+              </p>
+              <ol className="space-y-1.5">
+                <li className="flex items-center gap-2">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+                    1
+                  </span>
+                  <span className="text-sm font-medium text-foreground">
+                    Tap “Create New Contact”
+                  </span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+                    2
+                  </span>
+                  <span className="text-sm font-medium text-foreground">
+                    Tap “Done” to save
+                  </span>
+                </li>
+              </ol>
+            </div>
             <p className="text-xs text-muted-foreground">
               {manualEntry
                 ? "Enter the contact details below, then save."
