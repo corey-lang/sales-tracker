@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
@@ -20,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Logo } from "@/components/logo";
 import { ThisWeekCard } from "@/components/this-week-card";
 import { AeTasksCard } from "@/components/ae-tasks-card";
 import { BusinessCardScanner } from "@/components/business-card-scanner";
@@ -145,14 +145,7 @@ export default function DashboardPage() {
                 Hi, {salesperson.first_name}
               </h1>
             </div>
-            <Image
-              src="/logo.png"
-              alt="Elevate Homescriptions"
-              width={180}
-              height={55}
-              priority
-              className="shrink-0"
-            />
+            <Logo width={180} height={55} priority className="shrink-0" />
           </div>
           <Button variant="outline" size="sm" onClick={handleSwitchUser}>
             Log out
@@ -227,11 +220,19 @@ export default function DashboardPage() {
     <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
       {/* Compact greeting — the weekly momentum card is the visual hero. */}
       <header className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs font-medium text-muted-foreground">{today}</p>
-          <h1 className="truncate text-xl font-bold tracking-tight">
-            Hi, {salesperson.first_name} 👋
-          </h1>
+        <div className="flex min-w-0 items-center gap-3">
+          {/* Subtle white brand mark — premium dark theme only. The wrapper
+              class hides it entirely for everyone else, so the production
+              greeting is untouched. */}
+          <span className="theme-premium-only shrink-0 opacity-90">
+            <Logo width={120} height={37} />
+          </span>
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-muted-foreground">{today}</p>
+            <h1 className="truncate text-xl font-bold tracking-tight">
+              Hi, {salesperson.first_name} 👋
+            </h1>
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {salesperson.is_admin && (

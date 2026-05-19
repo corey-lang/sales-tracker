@@ -220,3 +220,13 @@
 .theme-premium-dark .logo-dark {
   display: revert;
 }
+
+/* Utility: an element that should ONLY render when the premium dark preview
+   theme is active. Used by the small dashboard-greeting logo so production
+   users never see anything new at all in that header. */
+.theme-premium-only {
+  display: none;
+}
+.theme-premium-dark .theme-premium-only {
+  display: inline-flex;
+}
