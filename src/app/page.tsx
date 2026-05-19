@@ -31,6 +31,7 @@ type LoginResponse = {
     id: string;
     first_name: string;
     is_admin: boolean;
+    is_test: boolean;
     role: string;
   };
   token?: string;
@@ -123,6 +124,7 @@ export default function Home() {
       id: signedIn.id,
       first_name: signedIn.first_name,
       is_admin: signedIn.is_admin,
+      is_test: signedIn.is_test === true,
       role: isUserRole(signedIn.role) ? signedIn.role : "ae",
       token,
     });

@@ -10,6 +10,11 @@ export type StoredSalesperson = {
   id: string;
   first_name: string;
   is_admin: boolean;
+  /** Authoritative test-account flag from `salespeople.is_test`. Optional only
+   *  for backwards compatibility with sessions stored before this was shipped
+   *  — newer sessions always carry it; isTestAccount() falls back to a
+   *  case-insensitive name match when it is absent. */
+  is_test?: boolean;
   role: UserRole;
   /** Signed session token issued by /api/auth/login; sent on every API call. */
   token: string;
@@ -34,10 +39,15 @@ function hydrate(raw: unknown): StoredSalesperson | null {
     : is_admin
       ? "admin"
       : "ae";
+  // `is_test` only exists on sessions issued after this fix shipped; older
+  // ones fall through to the name-based check in isTestAccount.
+  const is_test =
+    typeof obj.is_test === "boolean" ? obj.is_test : undefined;
   return {
     id: obj.id,
     first_name: obj.first_name,
     is_admin,
+    is_test,
     role,
     token: obj.token,
   };

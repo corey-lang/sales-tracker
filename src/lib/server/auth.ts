@@ -199,11 +199,12 @@ export async function requireSalesperson(
     throw unauthorized("Invalid or expired session. Please sign in again.");
   }
 
-  // role is re-read from the DB — never trusted from the token or the client.
+  // role + is_test are re-read from the DB — never trusted from the token or
+  // the client. is_test is the authoritative test-account flag.
   const supabase = getServerSupabase();
   const res = await supabase
     .from("salespeople")
-    .select("id, first_name, role")
+    .select("id, first_name, role, is_test")
     .eq("id", payload.sub)
     .maybeSingle();
 
@@ -214,7 +215,12 @@ export async function requireSalesperson(
     throw unauthorized("This account no longer exists. Please sign in again.");
   }
 
-  const row = res.data as { id: string; first_name: string; role: unknown };
+  const row = res.data as {
+    id: string;
+    first_name: string;
+    role: unknown;
+    is_test: boolean | null;
+  };
   const role: UserRole = isUserRole(row.role) ? row.role : "ae";
 
   return {

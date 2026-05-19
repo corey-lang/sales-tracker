@@ -34,10 +34,12 @@ export async function POST(req: Request) {
     const { name, pin } = await parseBody(req, LoginSchema);
 
     const supabase = getServerSupabase();
-    // CITEXT makes first_name lookup case-insensitive.
+    // CITEXT makes first_name lookup case-insensitive. `is_test` is the
+    // authoritative test-account flag — shipped back so the client can gate
+    // theme/feature previews without relying on a name match.
     const res = await supabase
       .from("salespeople")
-      .select("id, first_name, admin_pin, role")
+      .select("id, first_name, admin_pin, role, is_test")
       .eq("first_name", name)
       .maybeSingle();
 
@@ -53,6 +55,7 @@ export async function POST(req: Request) {
       first_name: string;
       admin_pin: string | null;
       role: unknown;
+      is_test: boolean | null;
     };
     const role: UserRole = isUserRole(row.role) ? row.role : "ae";
     const isAdmin = role === "admin";
@@ -84,6 +87,7 @@ export async function POST(req: Request) {
         id: row.id,
         first_name: row.first_name,
         is_admin: isAdmin,
+        is_test: row.is_test === true,
         role,
       },
       token,
