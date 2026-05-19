@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -18,6 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Logo } from "@/components/logo";
 
 // AE-facing leaderboard. Reps compare by weighted % of weekly goal — raw
 // activity counts and raw goal targets are intentionally NOT shown here.
@@ -108,14 +108,7 @@ export default function LeaderboardPage() {
             Leaderboard
           </h1>
         </div>
-        <Image
-          src="/logo.png"
-          alt="Elevate Homescriptions"
-          width={180}
-          height={55}
-          priority
-          className="shrink-0"
-        />
+        <Logo width={180} height={55} priority className="shrink-0" />
         <Link
           href={salesperson.is_admin ? "/admin" : "/dashboard"}
           className={buttonVariants({ variant: "outline", size: "sm" })}

@@ -208,3 +208,15 @@
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* Brand-logo theme swap (see src/components/logo.tsx).
+   Both <img> variants render; CSS picks which one is visible. */
+.logo-dark {
+  display: none;
+}
+.theme-premium-dark .logo-light {
+  display: none;
+}
+.theme-premium-dark .logo-dark {
+  display: revert;
+}

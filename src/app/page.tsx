@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 
 import { supabase } from "@/lib/supabase/client";
@@ -9,6 +8,7 @@ import { isUserRole } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
+import { Logo } from "@/components/logo";
 import {
   Card,
   CardContent,
@@ -131,13 +131,7 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-4">
-      <Image
-        src="/logo.png"
-        alt="Elevate Homescriptions"
-        width={240}
-        height={74}
-        priority
-      />
+      <Logo width={240} height={74} priority />
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Sign in</CardTitle>

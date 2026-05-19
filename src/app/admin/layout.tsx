@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
@@ -9,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
+import { Logo } from "@/components/logo";
 
 // Shared shell for every /admin/* page. It owns the one admin-role guard, the
 // top bar (logo + log out), and the section navigation — so each admin page
@@ -65,14 +65,7 @@ export default function AdminLayout({
             Hi, {salesperson.first_name}
           </h1>
         </div>
-        <Image
-          src="/logo.png"
-          alt="Elevate Homescriptions"
-          width={160}
-          height={49}
-          priority
-          className="shrink-0"
-        />
+        <Logo width={160} height={49} priority className="shrink-0" />
         <Button variant="outline" size="sm" onClick={handleLogout}>
           Log out
         </Button>
