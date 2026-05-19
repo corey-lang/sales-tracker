@@ -23,6 +23,7 @@ Run these in the Supabase SQL editor, top to bottom:
 | 7 | `business_card_contacts.sql` | `business_card_contacts`, `business_card_export_batches`, verification/export columns. |
 | 8 | `business_card_rls.sql` | Enables RLS on the business-card tables (anon = SELECT only; writes via service role). |
 | 9 | `ae_tasks.sql` | AE To-Do / Follow-Up tasks table + indexes + `updated_at` trigger. RLS on, no policy — all access via the `/api/tasks/*` service-role routes. |
+| 10 | `business_card_crm_hardening.sql` | CRM prep: `storage_path`, `normalized_email`, `normalized_phone`, `raw_extraction_json`, `extraction_model`, `updated_at` (+ trigger) on `business_card_scans`; `storage_path` / `normalized_email` / `normalized_phone` on `business_card_contacts`. Backfills existing rows. **Must be run before deploying the CRM-hardening app code** — that code writes the new columns, and inserts/updates will fail until they exist. Additive and idempotent, so it is safe to run early. |
 
 ## Staged migrations — DO NOT APPLY YET
 
@@ -59,6 +60,36 @@ Drops the anon `SELECT` policies on `business_card_scans` /
 **Apply only after the release that adds `GET /api/business-card/verification`
 is deployed** — before that release the Verification Center reads those tables
 directly with the anon key.
+
+## Storage bucket privacy — `business-card-scans` (planned, NOT done)
+
+The `business-card-scans` Storage bucket is currently **public-read** (created
+`public = true` in `business_card_scans.sql`, with anon `SELECT` on
+`storage.objects`). Any business card image is viewable by anyone holding its
+URL — names, emails, phone numbers included.
+
+CRM hardening prepared, but did **not** trigger, the move to a private bucket:
+
+- `business_card_scans.storage_path` now persists the stable object path for
+  every scan (and contacts copy it), so image references no longer depend on
+  the public URL format.
+- `src/lib/supabase/storage.ts` ships `createSignedScanUrl()` — a ready, unused
+  helper that mints short-lived signed URLs from a `storage_path`.
+
+To actually make the bucket private later, all of the following must ship
+together (none done yet):
+
+1. `UPDATE storage.buckets SET public = false WHERE id = 'business-card-scans';`
+   and drop the `business-card-scans anon select` policy.
+2. Every place that renders an image by `image_url` (the Verification Center —
+   `src/components/verification-center.tsx`) must instead request a signed URL
+   via a new service-role route backed by `createSignedScanUrl()`.
+3. The AI extraction route (`/api/business-card/process`) passes `image_url` to
+   OpenAI; with a private bucket it must pass a freshly signed URL instead.
+4. The CSV export currently emits `image_url`; decide whether to emit
+   `storage_path` (stable) or a signed URL (expires) for CRM import.
+
+Until then the bucket stays public — an accepted gap for the closed team.
 
 ## Maintenance scripts (NOT migrations)
 

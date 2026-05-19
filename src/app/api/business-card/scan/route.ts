@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { storagePathFromPublicUrl } from "@/lib/supabase/storage";
 import { isTestAccount } from "@/lib/permissions";
 import {
   handleApiError,
@@ -10,7 +11,7 @@ import {
 
 // Server-side intake for a business card scan.
 // POST /api/business-card/scan
-//   body: { imageUrl: string }
+//   body: { imageUrl: string, storagePath?: string }
 //   200:  { scanId: string }
 //
 // AUTHORIZATION (Phase 0)
@@ -30,13 +31,17 @@ const IMAGE_URL_MARKER = "/business-card-scans/";
 
 const ScanSchema = z.object({
   imageUrl: z.string().min(1, "imageUrl is required."),
+  // Optional client-reported Storage object path. NOT authoritative: the
+  // server derives storage_path from the validated imageUrl. This is kept
+  // only as a fallback / debug-comparison value.
+  storagePath: z.string().optional(),
 });
 
 export async function POST(req: Request) {
   try {
     // Identity comes from the session token, not the request body.
     const me = await requireSalesperson(req);
-    const { imageUrl } = await parseBody(req, ScanSchema);
+    const { imageUrl, storagePath } = await parseBody(req, ScanSchema);
 
     // Only accept an image we just uploaded to our own bucket — never an
     // arbitrary external URL the client may have supplied.
@@ -47,6 +52,25 @@ export async function POST(req: Request) {
       );
     }
 
+    // Persist the stable Storage object path alongside the public URL. The
+    // server-derived path (parsed from the validated imageUrl) is AUTHORITATIVE
+    // so storage_path always matches the object actually referenced by
+    // image_url. A client-sent storagePath is NOT trusted as the source of
+    // truth — it is used only as a fallback if derivation somehow fails (and
+    // logged when it disagrees, for debugging).
+    const derivedStoragePath = storagePathFromPublicUrl(imageUrl);
+    if (
+      derivedStoragePath &&
+      storagePath &&
+      storagePath.trim() !== derivedStoragePath
+    ) {
+      console.warn(
+        `[business-card/scan] client storagePath "${storagePath.trim()}" ` +
+          `disagrees with server-derived "${derivedStoragePath}" — using derived.`,
+      );
+    }
+    const resolvedStoragePath = derivedStoragePath ?? storagePath?.trim() ?? null;
+
     const supabase = getServerSupabase();
 
     const insert = await supabase
@@ -56,6 +80,7 @@ export async function POST(req: Request) {
         // Server-trusted: the authenticated salesperson, not a body field.
         salesperson_name: me.first_name,
         image_url: imageUrl,
+        storage_path: resolvedStoragePath,
         status: "processing",
         // Keeps the seeded "Test" account's scans separable from real AE data
         // for the cleanup script.

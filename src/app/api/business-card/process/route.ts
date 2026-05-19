@@ -8,6 +8,8 @@ import {
 } from "@/lib/server/auth";
 import {
   maybeAutoApproveScan,
+  normalizeEmail,
+  normalizePhone,
   type ContactScan,
 } from "@/lib/server/business-card-contacts";
 
@@ -23,6 +25,11 @@ import {
 // Performs OCR + structured field extraction into the Phase 5 columns
 // (extracted_*, ai_confidence, ai_notes, extraction_status, extracted_at,
 // extraction_error), then runs the safe auto-approval rule.
+//
+// CRM hardening: also persists the raw AI response (raw_extraction_json,
+// pre-normalization), the model that produced it (extraction_model), and the
+// normalized email/phone (normalized_email / normalized_phone) for reliable
+// duplicate matching.
 
 export const runtime = "nodejs";
 // Vision calls can take 10–30s; default 10s is too tight.
@@ -100,10 +107,20 @@ function normalize(raw: Partial<ExtractionPayload>): ExtractionPayload {
   };
 }
 
+/** Result of one extraction call: normalized fields + the untouched raw
+ *  response and the model that produced it, for auditing / re-derivation. */
+type ExtractionResult = {
+  extraction: ExtractionPayload;
+  /** The raw JSON object the model returned, before {@link normalize}. */
+  rawResponse: unknown;
+  /** The model id used for this extraction. */
+  model: string;
+};
+
 async function callOpenAI(
   imageUrl: string,
   apiKey: string,
-): Promise<ExtractionPayload> {
+): Promise<ExtractionResult> {
   const model = process.env.OPENAI_VISION_MODEL ?? "gpt-4o-mini";
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
@@ -151,7 +168,9 @@ async function callOpenAI(
   } catch {
     throw new Error("OpenAI returned non-JSON content");
   }
-  return normalize(parsed);
+  // `parsed` is kept verbatim as the raw response; `normalize` only shapes the
+  // copy written to the extracted_* columns.
+  return { extraction: normalize(parsed), rawResponse: parsed, model };
 }
 
 export async function POST(req: Request) {
@@ -220,12 +239,21 @@ export async function POST(req: Request) {
   }
 
   try {
-    const extraction = await callOpenAI(scan.image_url, apiKey);
+    const { extraction, rawResponse, model } = await callOpenAI(
+      scan.image_url,
+      apiKey,
+    );
 
     const upd = await supabase
       .from("business_card_scans")
       .update({
         ...extraction,
+        // CRM hardening: keep the raw AI response + model for auditing, and
+        // persist normalized email/phone for reliable duplicate matching.
+        raw_extraction_json: rawResponse,
+        extraction_model: model,
+        normalized_email: normalizeEmail(extraction.extracted_email),
+        normalized_phone: normalizePhone(extraction.extracted_phone),
         extraction_status: "completed",
         extracted_at: new Date().toISOString(),
         extraction_error: null,

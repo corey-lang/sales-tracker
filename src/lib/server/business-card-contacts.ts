@@ -36,6 +36,9 @@ export const SCAN_SELECT_COLUMNS = [
   "salesperson_id",
   "salesperson_name",
   "image_url",
+  "storage_path",
+  "normalized_email",
+  "normalized_phone",
   "extracted_first_name",
   "extracted_last_name",
   "extracted_full_name",
@@ -61,6 +64,13 @@ export type ContactScan = {
   salesperson_id: string | null;
   salesperson_name: string | null;
   image_url: string | null;
+  /** Stable Storage object path. Optional: present on rows scanned after the
+   *  CRM-hardening migration / backfilled for older rows. */
+  storage_path?: string | null;
+  /** Persisted normalized email/phone (CRM-hardening migration). Optional so
+   *  callers selecting an older column set still type-check. */
+  normalized_email?: string | null;
+  normalized_phone?: string | null;
   extracted_first_name: string | null;
   extracted_last_name: string | null;
   extracted_full_name: string | null;
@@ -172,13 +182,19 @@ export function confidenceToPercent(value: number | null): number | null {
   return value <= 1 ? value * 100 : value;
 }
 
-function normalizeEmail(value: string | null | undefined): string | null {
+/** Normalized email for storage + duplicate matching: lowercase, trimmed. */
+export function normalizeEmail(
+  value: string | null | undefined,
+): string | null {
   if (!value) return null;
   const trimmed = value.trim().toLowerCase();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizePhone(value: string | null | undefined): string | null {
+/** Normalized phone for storage + duplicate matching: digits only. */
+export function normalizePhone(
+  value: string | null | undefined,
+): string | null {
   if (!value) return null;
   const digits = value.replace(/\D/g, "");
   return digits.length > 0 ? digits : null;
@@ -216,6 +232,11 @@ export async function createContactFromScan(
     options.verificationStatus === "auto_approved" ||
     options.verificationStatus === "approved";
 
+  // Resolve email/phone once: the contact's normalized_* columns must reflect
+  // the final (post-admin-edit) values, not the scan's raw extracted values.
+  const resolvedEmail = resolveField(edited.email, scan.extracted_email);
+  const resolvedPhone = resolveField(edited.phone, scan.extracted_phone);
+
   const insertRow = {
     scan_id: scan.id,
     salesperson_id: scan.salesperson_id,
@@ -230,13 +251,19 @@ export async function createContactFromScan(
     full_name: resolveField(edited.full_name, scan.extracted_full_name),
     company: resolveField(edited.company, scan.extracted_company),
     title: resolveField(edited.title, scan.extracted_title),
-    email: resolveField(edited.email, scan.extracted_email),
-    phone: resolveField(edited.phone, scan.extracted_phone),
+    email: resolvedEmail,
+    phone: resolvedPhone,
     website: resolveField(edited.website, scan.extracted_website),
     address: resolveField(edited.address, scan.extracted_address),
-    // business_card_scans only stores a public image_url; there is no separate
-    // storage path column to copy, so image_path stays null for now.
-    image_path: null,
+    // Normalized copies for reliable CRM-side duplicate matching. Derived from
+    // the resolved values above so admin edits are reflected.
+    normalized_email: normalizeEmail(resolvedEmail),
+    normalized_phone: normalizePhone(resolvedPhone),
+    // Copy the scan's stable Storage object path. image_path mirrors it for
+    // backward compatibility (the column predates storage_path and was always
+    // NULL before the CRM-hardening migration).
+    storage_path: scan.storage_path ?? null,
+    image_path: scan.storage_path ?? null,
     image_url: scan.image_url,
     ai_confidence: scan.ai_confidence,
     verification_status: options.verificationStatus,
@@ -292,6 +319,10 @@ type ContactDupRow = {
   scan_id: string | null;
   email: string | null;
   phone: string | null;
+  /** Persisted normalized values (CRM-hardening migration); may be null on
+   *  contacts created before the backfill ran. */
+  normalized_email: string | null;
+  normalized_phone: string | null;
   full_name: string | null;
   company: string | null;
 };
@@ -323,8 +354,12 @@ export async function findDuplicateContact(
   supabase: SupabaseClient,
   scan: ContactScan,
 ): Promise<DuplicateMatch | null> {
-  const email = normalizeEmail(scan.extracted_email);
-  const phone = normalizePhone(scan.extracted_phone);
+  // Prefer the scan's persisted normalized_* values; fall back to normalizing
+  // the raw extracted values for rows scanned before that column existed.
+  // normalizeEmail / normalizePhone are idempotent, so re-running them on an
+  // already-normalized value is safe.
+  const email = normalizeEmail(scan.normalized_email ?? scan.extracted_email);
+  const phone = normalizePhone(scan.normalized_phone ?? scan.extracted_phone);
   const fullName = normalizeName(scan.extracted_full_name);
   const company = normalizeName(scan.extracted_company);
 
@@ -335,7 +370,9 @@ export async function findDuplicateContact(
 
   const res = await supabase
     .from("business_card_contacts")
-    .select("id, scan_id, email, phone, full_name, company");
+    .select(
+      "id, scan_id, email, phone, normalized_email, normalized_phone, full_name, company",
+    );
 
   if (res.error) {
     throw new Error(`Duplicate check failed: ${res.error.message}`);
@@ -347,14 +384,16 @@ export async function findDuplicateContact(
     // A contact already derived from this same scan is not a "duplicate".
     if (row.scan_id && row.scan_id === scan.id) continue;
 
-    if (email && normalizeEmail(row.email) === email) {
+    // Prefer the contact's persisted normalized value; fall back to its raw
+    // column for contacts created before the normalized columns existed.
+    if (email && normalizeEmail(row.normalized_email ?? row.email) === email) {
       return {
         contactId: row.id,
         matchType: "email",
         reason: `matching email (${scan.extracted_email})`,
       };
     }
-    if (phone && normalizePhone(row.phone) === phone) {
+    if (phone && normalizePhone(row.normalized_phone ?? row.phone) === phone) {
       return {
         contactId: row.id,
         matchType: "phone",

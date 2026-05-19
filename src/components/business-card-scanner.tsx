@@ -169,7 +169,12 @@ function ActiveScanner({ salesperson, onClose }: Props) {
         headers: { "Content-Type": "application/json" },
         // The scan is attributed to the authenticated salesperson server-side
         // (from the session token), so no id is sent in the body.
-        body: JSON.stringify({ imageUrl: publicUrl.publicUrl }),
+        // storagePath is the stable Storage object path — persisted so CRM
+        // code never has to depend on parsing the public image_url.
+        body: JSON.stringify({
+          imageUrl: publicUrl.publicUrl,
+          storagePath: upload.data.path,
+        }),
       });
       const payload = (await res.json().catch(() => null)) as
         | { scanId?: string; error?: string }
