@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, X } from "lucide-react";
+import { Check, ChevronDown, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
@@ -319,7 +319,7 @@ export function PhoneContactScanner({
             ? "Edit anything AI missed, then add it to your phone."
             : stage === "saved"
               ? "Saved to app + ready for phone."
-              : "Reading the card with AI…"}
+              : "Getting this card ready to review."}
         </CardDescription>
         <CardAction>
           <Button
@@ -335,14 +335,23 @@ export function PhoneContactScanner({
       </CardHeader>
 
       <CardContent className="space-y-3">
-        {/* ---- Stage: working (upload + AI extraction) ----------------- */}
+        {/* ---- Stage: working (preparing the contact) ------------------ */}
         {stage === "working" && (
-          <p
+          <div
             role="status"
-            className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground"
+            className="flex flex-col items-center gap-2 rounded-lg border bg-muted/30 px-4 py-10 text-center"
           >
-            Saving the card and reading it with AI…
-          </p>
+            <p className="text-base font-semibold text-foreground">
+              Preparing contact details…
+            </p>
+            <p className="text-sm text-muted-foreground">
+              This usually takes just a few seconds.
+            </p>
+            <p className="mt-3 flex items-center gap-1 text-xs font-medium text-primary">
+              <ChevronDown aria-hidden="true" className="size-3.5" />
+              Review and save contact next
+            </p>
+          </div>
         )}
 
         {/* ---- Stage: failed (upload / save error) --------------------- */}
