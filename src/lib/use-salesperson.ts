@@ -6,6 +6,13 @@ import { isUserRole, type UserRole } from "@/lib/permissions";
 
 export const STORAGE_KEY = "sales-tracker:salesperson";
 
+/** Window event broadcast on every login / logout in this tab. Listened to
+ *  by useSalesperson() (so all hook instances stay in sync after a login
+ *  even without a page reload) and by ThemeApplier (so the dark theme
+ *  activates the instant a test user logs in). Native `storage` events only
+ *  fire in OTHER tabs, so a same-tab custom event is required. */
+export const SALESPERSON_CHANGED_EVENT = "sales-tracker:salesperson-changed";
+
 export type StoredSalesperson = {
   id: string;
   first_name: string;
@@ -62,26 +69,43 @@ export function useSalesperson() {
   useEffect(() => {
     // Reading localStorage requires the client; setting state on mount is
     // the canonical pattern despite the react-hooks/set-state-in-effect rule.
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setSalespersonState(hydrate(JSON.parse(raw)));
+    const read = () => {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        return raw ? hydrate(JSON.parse(raw)) : null;
+      } catch {
+        return null;
       }
-    } catch {
-      // ignore corrupt JSON; treat as not-selected
-    }
+    };
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSalespersonState(read());
     setLoaded(true);
+
+    // Login / logout from any component re-hydrates every hook instance, so
+    // long-lived consumers (e.g. ThemeApplier in the root layout) don't get
+    // stuck on a stale pre-login snapshot.
+    const onChanged = () => setSalespersonState(read());
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY) setSalespersonState(read());
+    };
+    window.addEventListener(SALESPERSON_CHANGED_EVENT, onChanged);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(SALESPERSON_CHANGED_EVENT, onChanged);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   const setSalesperson = useCallback((value: StoredSalesperson) => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
     setSalespersonState(value);
+    window.dispatchEvent(new Event(SALESPERSON_CHANGED_EVENT));
   }, []);
 
   const clear = useCallback(() => {
     window.localStorage.removeItem(STORAGE_KEY);
     setSalespersonState(null);
+    window.dispatchEvent(new Event(SALESPERSON_CHANGED_EVENT));
   }, []);
 
   return { salesperson, setSalesperson, clear, loaded };
