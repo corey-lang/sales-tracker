@@ -63,6 +63,10 @@ type Scan = {
   duplicate_notes: string | null;
   duplicate_of_contact_id: string | null;
   rejection_reason: string | null;
+  /** Set by the verification route for auto_duplicate scans only — a
+   *  re-classification under the current conservative duplicate rules. */
+  auto_duplicate_category?: "likely_false" | "likely_true";
+  auto_duplicate_reason?: string;
 };
 
 /**
@@ -436,6 +440,8 @@ export function VerificationCenter() {
   const [editingScan, setEditingScan] = useState<Scan | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  // True while a bulk auto-duplicate reopen is in flight.
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -637,6 +643,48 @@ export function VerificationCenter() {
     [load],
   );
 
+  const handleReopenBulk = useCallback(
+    async (scanIds: string[]) => {
+      if (scanIds.length === 0) return;
+      setBulkBusy(true);
+      setActionMessage(null);
+      try {
+        const res = await apiFetch("/api/business-card/reopen-bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanIds }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          reopened?: number;
+          skipped?: number;
+          error?: string;
+        } | null;
+        if (!res.ok) {
+          throw new Error(data?.error ?? `Action failed (${res.status})`);
+        }
+        const reopened = data?.reopened ?? 0;
+        const skipped = data?.skipped ?? 0;
+        setActionMessage({
+          kind: "success",
+          text:
+            `${reopened} scan${reopened === 1 ? "" : "s"} sent back to review.` +
+            (skipped > 0
+              ? ` ${skipped} skipped — no longer auto-duplicates.`
+              : ""),
+        });
+        await load();
+      } catch (err) {
+        setActionMessage({
+          kind: "error",
+          text: err instanceof Error ? err.message : "Unknown error",
+        });
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [load],
+  );
+
   const handleExport = useCallback(
     async (target: {
       key: string;
@@ -779,6 +827,13 @@ export function VerificationCenter() {
     });
   };
 
+  // Every auto-marked duplicate, regardless of the active status filters —
+  // the cleanup panel always has the full set to categorize.
+  const autoDuplicateScans = useMemo(
+    () => scans.filter((scan) => effectiveStatus(scan) === "auto_duplicate"),
+    [scans],
+  );
+
   const aeGroups = groupScansByAe(filteredScans);
 
   return (
@@ -891,6 +946,16 @@ export function VerificationCenter() {
               summary={exportSummary}
               exportingKey={exportingKey}
               onExport={handleExport}
+            />
+          )}
+
+          {!loading && !error && autoDuplicateScans.length > 0 && (
+            <AutoDuplicateCleanup
+              scans={autoDuplicateScans}
+              busy={bulkBusy}
+              onBulkReopen={handleReopenBulk}
+              onReopenOne={(scanId) => void handleReopen(scanId)}
+              onPreview={setPreview}
             />
           )}
 
@@ -1086,6 +1151,240 @@ function ExportSection({
         })}
       </ul>
     </section>
+  );
+}
+
+/**
+ * Auto-Duplicate Cleanup — splits old auto_duplicate scans into "likely false"
+ * (safe to bulk send back to review) and "likely true" (one-by-one only),
+ * using the verification route's re-classification under the current
+ * conservative rules. Sending scans back to review NEVER approves anything —
+ * it only moves them into manual duplicate_review.
+ */
+function AutoDuplicateCleanup({
+  scans,
+  busy,
+  onBulkReopen,
+  onReopenOne,
+  onPreview,
+}: {
+  scans: Scan[];
+  busy: boolean;
+  onBulkReopen: (scanIds: string[]) => void;
+  onReopenOne: (scanId: string) => void;
+  onPreview: (preview: Preview) => void;
+}) {
+  // An unclassified scan (route couldn't match it) defaults to "likely false"
+  // — safe, since the bulk action only sends scans to manual review.
+  const likelyFalse = scans.filter(
+    (s) => s.auto_duplicate_category !== "likely_true",
+  );
+  const likelyTrue = scans.filter(
+    (s) => s.auto_duplicate_category === "likely_true",
+  );
+
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [open, setOpen] = useState(true);
+
+  // Selection is intersected with the rows still present, so ids that were
+  // already reopened (and dropped from the list) are simply ignored.
+  const falseIds = likelyFalse.map((s) => s.id);
+  const selectedIds = falseIds.filter((id) => selected.has(id));
+  const allSelected =
+    likelyFalse.length > 0 && selectedIds.length === likelyFalse.length;
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(falseIds));
+
+  return (
+    <section className="mb-4 rounded-lg border border-orange-500/40 bg-orange-500/5 p-3 sm:p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold">
+            Auto-Duplicate Cleanup ({scans.length})
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Old cards auto-flagged as duplicates, re-checked under the current
+            rules. Sending cards back to review never approves anything — a
+            human still decides.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-foreground transition hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {open ? "Hide" : "Show"}
+        </button>
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-4">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Likely false duplicates — needs review ({likelyFalse.length})
+            </h4>
+            {likelyFalse.length === 0 ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                None — no likely-false auto-duplicates.
+              </p>
+            ) : (
+              <>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      className="size-4"
+                    />
+                    Select all visible
+                  </label>
+                  <span className="text-xs text-muted-foreground">
+                    {selectedIds.length} selected
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => onBulkReopen(selectedIds)}
+                    disabled={busy || selectedIds.length === 0}
+                  >
+                    {busy ? "Working…" : "Send selected back to review"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onBulkReopen(falseIds)}
+                    disabled={busy || likelyFalse.length === 0}
+                  >
+                    Send all likely false back to review
+                  </Button>
+                </div>
+                <ul className="mt-2 max-h-[420px] space-y-1.5 overflow-y-auto">
+                  {likelyFalse.map((scan) => (
+                    <AutoDuplicateRow
+                      key={scan.id}
+                      scan={scan}
+                      selectable
+                      checked={selected.has(scan.id)}
+                      onToggle={() => toggle(scan.id)}
+                      onPreview={onPreview}
+                    />
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Likely true duplicates ({likelyTrue.length})
+            </h4>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              These look like real duplicates — not bulk-moved. Send one back
+              individually only if you need to re-check it.
+            </p>
+            {likelyTrue.length === 0 ? (
+              <p className="mt-1 text-sm text-muted-foreground">None.</p>
+            ) : (
+              <ul className="mt-2 max-h-[320px] space-y-1.5 overflow-y-auto">
+                {likelyTrue.map((scan) => (
+                  <AutoDuplicateRow
+                    key={scan.id}
+                    scan={scan}
+                    onPreview={onPreview}
+                    action={
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onReopenOne(scan.id)}
+                        disabled={busy}
+                      >
+                        Send Back to Review
+                      </Button>
+                    }
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** One scan row inside the Auto-Duplicate Cleanup panel. */
+function AutoDuplicateRow({
+  scan,
+  selectable = false,
+  checked = false,
+  onToggle,
+  onPreview,
+  action,
+}: {
+  scan: Scan;
+  selectable?: boolean;
+  checked?: boolean;
+  onToggle?: () => void;
+  onPreview: (preview: Preview) => void;
+  action?: React.ReactNode;
+}) {
+  return (
+    <li className="flex items-center gap-3 rounded-md border bg-card p-2">
+      {selectable && (
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className="size-4 shrink-0"
+          aria-label={`Select card from ${scan.salesperson_name ?? "unknown"}`}
+        />
+      )}
+      <button
+        type="button"
+        onClick={() =>
+          onPreview({
+            url: scan.image_url,
+            name: scan.salesperson_name ?? "unknown",
+          })
+        }
+        className="shrink-0 overflow-hidden rounded border bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label="Preview business card"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={scan.image_url}
+          alt=""
+          className="h-12 w-20 object-cover"
+          loading="lazy"
+        />
+      </button>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">
+          {scan.extracted_full_name?.trim() ||
+            scan.extracted_company?.trim() ||
+            "Unnamed card"}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">
+          {scan.salesperson_name ?? "Unknown"}
+          {scan.auto_duplicate_reason
+            ? ` · ${scan.auto_duplicate_reason}`
+            : ""}
+        </p>
+      </div>
+      {action}
+    </li>
   );
 }
 

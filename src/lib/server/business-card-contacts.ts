@@ -247,7 +247,8 @@ export async function createContactFromScan(
 // Duplicate detection
 // ---------------------------------------------------------------------------
 
-type ContactDupRow = {
+/** Contact columns the duplicate matcher compares against. */
+export type ContactDupRow = {
   id: string;
   scan_id: string | null;
   email: string | null;
@@ -259,6 +260,26 @@ type ContactDupRow = {
   full_name: string | null;
   last_name: string | null;
   company: string | null;
+};
+
+/** SELECT list for loading {@link ContactDupRow}s from business_card_contacts. */
+export const CONTACT_DUP_COLUMNS =
+  "id, scan_id, email, phone, normalized_email, normalized_phone, full_name, last_name, company";
+
+/**
+ * Minimal scan shape the duplicate matcher reads. {@link ContactScan} satisfies
+ * it structurally, and so does a verification-route scan row — so the matcher
+ * can be reused to re-check old auto-duplicates.
+ */
+export type DuplicateScanInput = {
+  id: string;
+  extracted_email: string | null;
+  extracted_phone: string | null;
+  extracted_full_name: string | null;
+  extracted_last_name: string | null;
+  extracted_company: string | null;
+  normalized_email?: string | null;
+  normalized_phone?: string | null;
 };
 
 /** How decisive a duplicate match is. */
@@ -285,9 +306,9 @@ export type DuplicateMatch = {
 };
 
 /**
- * Duplicate check against existing contacts. Deliberately conservative about
- * phone numbers — an office / shared line matching is NOT enough to call a
- * confident duplicate.
+ * Matches a scan against an already-fetched list of contacts. Deliberately
+ * conservative about phone numbers — an office / shared line matching is NOT
+ * enough to call a confident duplicate.
  *
  * STRONG (confident duplicate):
  *  - same email address
@@ -299,47 +320,22 @@ export type DuplicateMatch = {
  *  - same last name + same company, but not an exact full-name match
  *  - same phone only, different name
  *
- * A phone-only match never escalates to STRONG: a different person on the
- * same office number must not be auto-marked a duplicate.
- *
- * Returns the strongest match found (a STRONG match short-circuits; otherwise
- * the first POSSIBLE match), or null. Detection only — never merges/deletes.
+ * A phone-only match never escalates to STRONG. Returns the strongest match
+ * (a STRONG match short-circuits; otherwise the first POSSIBLE), or null.
+ * Pure — no I/O, no mutation. Reused for live detection (findDuplicateContact)
+ * and for re-checking old auto-duplicates in bulk.
  */
-export async function findDuplicateContact(
-  supabase: SupabaseClient,
-  scan: ContactScan,
-): Promise<DuplicateMatch | null> {
+export function matchScanAgainstContacts(
+  scan: DuplicateScanInput,
+  rows: ContactDupRow[],
+): DuplicateMatch | null {
   // Prefer the scan's persisted normalized_* values; fall back to normalizing
-  // the raw extracted values for rows scanned before that column existed.
-  // normalizeEmail / normalizePhone are idempotent, so re-running them on an
-  // already-normalized value is safe.
+  // the raw extracted values. normalizeEmail / normalizePhone are idempotent.
   const email = normalizeEmail(scan.normalized_email ?? scan.extracted_email);
   const phone = normalizePhone(scan.normalized_phone ?? scan.extracted_phone);
   const fullName = normalizeName(scan.extracted_full_name);
   const lastName = normalizeName(scan.extracted_last_name);
   const company = normalizeName(scan.extracted_company);
-
-  // No matchable signal combination — cannot assess duplicate risk.
-  if (
-    !email &&
-    !phone &&
-    !(fullName && company) &&
-    !(lastName && company)
-  ) {
-    return null;
-  }
-
-  const res = await supabase
-    .from("business_card_contacts")
-    .select(
-      "id, scan_id, email, phone, normalized_email, normalized_phone, full_name, last_name, company",
-    );
-
-  if (res.error) {
-    throw new Error(`Duplicate check failed: ${res.error.message}`);
-  }
-
-  const rows = (res.data ?? []) as ContactDupRow[];
 
   // The first POSSIBLE match is remembered while we keep scanning — a STRONG
   // match anywhere outranks it.
@@ -420,6 +416,35 @@ export async function findDuplicateContact(
   }
 
   return possible;
+}
+
+/**
+ * Live duplicate check: fetches existing contacts and runs
+ * {@link matchScanAgainstContacts}. Detection only — never merges/deletes.
+ */
+export async function findDuplicateContact(
+  supabase: SupabaseClient,
+  scan: ContactScan,
+): Promise<DuplicateMatch | null> {
+  const email = normalizeEmail(scan.normalized_email ?? scan.extracted_email);
+  const phone = normalizePhone(scan.normalized_phone ?? scan.extracted_phone);
+  const fullName = normalizeName(scan.extracted_full_name);
+  const lastName = normalizeName(scan.extracted_last_name);
+  const company = normalizeName(scan.extracted_company);
+
+  // No matchable signal combination — skip the contacts query entirely.
+  if (!email && !phone && !(fullName && company) && !(lastName && company)) {
+    return null;
+  }
+
+  const res = await supabase
+    .from("business_card_contacts")
+    .select(CONTACT_DUP_COLUMNS);
+  if (res.error) {
+    throw new Error(`Duplicate check failed: ${res.error.message}`);
+  }
+
+  return matchScanAgainstContacts(scan, (res.data ?? []) as ContactDupRow[]);
 }
 
 // ---------------------------------------------------------------------------

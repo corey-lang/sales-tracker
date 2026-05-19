@@ -1,5 +1,12 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, requireReviewer } from "@/lib/server/auth";
+import {
+  CONTACT_DUP_COLUMNS,
+  matchScanAgainstContacts,
+  type ContactDupRow,
+  type DuplicateMatch,
+  type DuplicateScanInput,
+} from "@/lib/server/business-card-contacts";
 
 // Phase 0: data feed for the Verification Center.
 // GET /api/business-card/verification
@@ -26,6 +33,22 @@ const SCAN_COLUMNS =
 /** Columns needed to render a matched duplicate contact side-by-side. */
 const DUPLICATE_CONTACT_COLUMNS =
   "id, full_name, company, title, email, phone, website, address, contact_bucket, salesperson_name, verification_status, created_at";
+
+/** Short, human label for why an auto-duplicate (re-)matched. */
+const AUTO_DUP_REASON_LABELS: Record<DuplicateMatch["matchType"], string> = {
+  email: "Same email",
+  name_company: "Same name + company",
+  name_phone: "Same name + direct phone",
+  company_phone: "Same office phone, different name",
+  lastname_company: "Same last name + company",
+  phone_only: "Phone-only match",
+};
+
+function autoDupReasonLabel(match: DuplicateMatch | null): string {
+  return match
+    ? AUTO_DUP_REASON_LABELS[match.matchType]
+    : "No current duplicate match found";
+}
 
 export async function GET(req: Request) {
   try {
@@ -71,6 +94,37 @@ export async function GET(req: Request) {
           string,
           unknown
         >[];
+      }
+    }
+
+    // 4. Re-classify auto-marked duplicates under the CURRENT conservative
+    //    rules. This lets the Verification Center split old auto_duplicate
+    //    scans into "likely false" (phone / shared-office-line matches — safe
+    //    to send back to review) and "likely true" (email, name+company,
+    //    name+phone). Read-only: no scan or contact is changed here.
+    const autoDupScans = scans.filter(
+      (scan) =>
+        (typeof scan.verification_status === "string"
+          ? scan.verification_status.toLowerCase().trim()
+          : "") === "auto_duplicate",
+    );
+    if (autoDupScans.length > 0) {
+      const dupContactsRes = await supabase
+        .from("business_card_contacts")
+        .select(CONTACT_DUP_COLUMNS);
+      const dupRows = (
+        dupContactsRes.error ? [] : (dupContactsRes.data ?? [])
+      ) as ContactDupRow[];
+      for (const scan of autoDupScans) {
+        const match = matchScanAgainstContacts(
+          scan as unknown as DuplicateScanInput,
+          dupRows,
+        );
+        // Strong = likely a real duplicate; anything weaker (or no current
+        // match) = likely false, safe for the bulk send-back-to-review.
+        scan.auto_duplicate_category =
+          match?.strength === "strong" ? "likely_true" : "likely_false";
+        scan.auto_duplicate_reason = autoDupReasonLabel(match);
       }
     }
 
