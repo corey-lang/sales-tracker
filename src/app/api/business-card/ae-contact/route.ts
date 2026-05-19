@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
-  forbidden,
   handleApiError,
   parseBody,
   requireScanAccess,
@@ -38,11 +37,6 @@ import { normalizeScanContactType } from "@/lib/contact-type";
 //
 // AUTHORIZATION
 //   requireScanAccess() — the AE who owns the scan, or any reviewer.
-//
-// TEMPORARY GATE — limited live testing before rollout.
-//   The whole phone-contact feature is gated to the test account for now.
-//   Beyond requireScanAccess(), this route also rejects any caller whose
-//   me.is_test is false. Remove this check when the feature ships broadly.
 
 export const runtime = "nodejs";
 
@@ -76,13 +70,7 @@ export async function POST(req: Request) {
     const { scanId, contact } = await parseBody(req, AeContactSchema);
 
     // Authorize: AE who owns the scan, or a reviewer.
-    const { me } = await requireScanAccess(req, scanId);
-
-    // TEMPORARY — phone-contact feature is in limited testing. Only the test
-    // account may use it; remove this gate at full rollout.
-    if (!me.is_test) {
-      throw forbidden("The Add to Phone Contacts feature is still in testing.");
-    }
+    await requireScanAccess(req, scanId);
 
     const supabase = getServerSupabase();
 

@@ -9,7 +9,6 @@ import { Camera, ImageUp, ListChecks, type LucideIcon } from "lucide-react";
 
 import { formatDateMDY } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
-import { isTestAccount } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
@@ -168,12 +167,6 @@ export default function DashboardPage() {
   const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
   const isAe = salesperson.role === "ae";
 
-  // TEMPORARY — "Scan Card & Save Contact" is gated to the test account for
-  // limited live testing before rollout. Non-test AEs only see "Scan Business
-  // Card". The backend routes enforce the same gate (me.is_test). Remove this
-  // when the phone-contact feature ships broadly.
-  const isTest = isTestAccount(salesperson);
-
   const scrollToLog = () => {
     document
       .getElementById("log-activity")
@@ -288,8 +281,7 @@ export default function DashboardPage() {
             onUploadImage={() => adminUploadRef.current?.click()}
           />
         )}
-        {/* TEMPORARY — phone-contact feature is gated to the test account. */}
-        {isAe && isTest && (
+        {isAe && (
           <ScanFeature
             title="Scan Card & Save Contact"
             onTakePhoto={() => phoneCameraRef.current?.click()}
@@ -332,7 +324,7 @@ export default function DashboardPage() {
             />
           </>
         )}
-        {isAe && isTest && (
+        {isAe && (
           <>
             <input
               ref={phoneCameraRef}

@@ -28,8 +28,6 @@ import { Input } from "@/components/ui/input";
 // off a vCard to the phone. The dashboard renders this panel in a focused
 // mode (the rest of the dashboard is hidden) so the AE knows this is now a
 // dedicated contact-save workflow. The admin/Tonja review flow is untouched.
-// (Feature is gated to the test account — see the dashboard and the
-// /api/business-card/ae-contact + /vcard routes.)
 
 type Props = {
   salesperson: StoredSalesperson;

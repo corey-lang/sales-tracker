@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
-  forbidden,
   handleApiError,
   parseBody,
   requireSalesperson,
@@ -23,11 +22,6 @@ import {
 //
 // AUTHORIZATION
 //   requireSalesperson() — any signed-in salesperson.
-//
-// TEMPORARY GATE — limited live testing before rollout.
-//   The phone-contact feature is gated to the test account for now: this
-//   route also rejects any caller whose me.is_test is false. Remove this
-//   check when the feature ships broadly.
 
 export const runtime = "nodejs";
 
@@ -81,13 +75,6 @@ function fileSlug(value: string): string {
 export async function POST(req: Request) {
   try {
     const me = await requireSalesperson(req);
-
-    // TEMPORARY — phone-contact feature is in limited testing. Only the test
-    // account may use it; remove this gate at full rollout.
-    if (!me.is_test) {
-      throw forbidden("The Add to Phone Contacts feature is still in testing.");
-    }
-
     const { contactId, contact } = await parseBody(req, VCardSchema);
 
     const firstName = clean(contact.firstName);
