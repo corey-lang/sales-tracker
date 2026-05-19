@@ -47,6 +47,31 @@ export function storagePathFromPublicUrl(url: string): string | null {
   }
 }
 
+/**
+ * Sanitizes a user-supplied filename into a safe `<base>.<ext>` form for use
+ * in a Storage object path: lowercased, non-alphanumerics collapsed to dashes,
+ * length-capped, with a fallback base/extension. Shared by the business card
+ * scanners so every uploaded image path is predictable.
+ */
+export function sanitizeFilename(name: string): string {
+  const dot = name.lastIndexOf(".");
+  const base =
+    (dot === -1 ? name : name.slice(0, dot))
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "card";
+  const ext =
+    dot === -1
+      ? "jpg"
+      : name
+          .slice(dot + 1)
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "")
+          .slice(0, 5) || "jpg";
+  return `${base}.${ext}`;
+}
+
 /** Default lifetime for a signed business-card image URL (1 hour). */
 export const SIGNED_URL_TTL_SECONDS = 60 * 60;
 

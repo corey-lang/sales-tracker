@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/card";
 import { ThisWeekCard } from "@/components/this-week-card";
 import { AeTasksCard } from "@/components/ae-tasks-card";
-import { BusinessCardScanner } from "@/components/business-card-scanner";
+import { BusinessCardPanel } from "@/components/business-card-panel";
 import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { EditWeekCard } from "@/components/edit-week-card";
@@ -160,7 +160,7 @@ export default function DashboardPage() {
           Quick actions
         </h2>
         {isAe && scanOpen ? (
-          <BusinessCardScanner
+          <BusinessCardPanel
             salesperson={salesperson}
             onClose={() => setScanOpen(false)}
           />

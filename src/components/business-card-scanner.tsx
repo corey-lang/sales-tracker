@@ -5,6 +5,7 @@ import { Camera, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
+import { BUSINESS_CARD_BUCKET, sanitizeFilename } from "@/lib/supabase/storage";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
@@ -16,8 +17,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-
-const BUCKET = "business-card-scans";
 
 /** Background AI state for a single card the AE just uploaded. */
 type RecentStatus = "saved" | "reading" | "complete" | "failed";
@@ -72,24 +71,6 @@ export function BusinessCardScanner({ salesperson, onClose }: Props) {
   return <ActiveScanner salesperson={salesperson} onClose={onClose} />;
 }
 
-function sanitizeFilename(name: string): string {
-  const dot = name.lastIndexOf(".");
-  const base = (dot === -1 ? name : name.slice(0, dot))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40) || "card";
-  const ext =
-    dot === -1
-      ? "jpg"
-      : name
-          .slice(dot + 1)
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, "")
-          .slice(0, 5) || "jpg";
-  return `${base}.${ext}`;
-}
-
 function ActiveScanner({ salesperson, onClose }: Props) {
   // `uploading` covers only the brief image-upload + scan-row insert. AI
   // extraction is NEVER tracked here — it runs in the background per card.
@@ -141,7 +122,7 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     const path = `${salesperson.id}/${Date.now()}-${ext}`;
 
     const upload = await supabase.storage
-      .from(BUCKET)
+      .from(BUSINESS_CARD_BUCKET)
       .upload(path, file, {
         contentType: file.type || "image/jpeg",
         upsert: false,
@@ -154,7 +135,7 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     }
 
     const { data: publicUrl } = supabase.storage
-      .from(BUCKET)
+      .from(BUSINESS_CARD_BUCKET)
       .getPublicUrl(upload.data.path);
 
     // business_card_scans has RLS enabled and the app has no Supabase Auth, so
