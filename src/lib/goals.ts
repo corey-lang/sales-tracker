@@ -75,6 +75,31 @@ export function recentBusinessWeeks(
   return out;
 }
 
+// Picks the goal in effect for a person as of `asOf` (yyyy-MM-dd): the most
+// recent per-person row, else the most recent global (null) row — both with
+// effective_from <= asOf. Pure: operates on an already-fetched goal list, so
+// callers can resolve goals for any week (not just today). Mirrors the goal
+// resolution in /api/leaderboard and fetchActiveGoalFor.
+export function resolveActiveGoal(
+  personId: string,
+  goals: WeeklyGoal[],
+  asOf: string,
+): WeeklyGoal | null {
+  const byRecency = (a: WeeklyGoal, b: WeeklyGoal) => {
+    const eff = b.effective_from.localeCompare(a.effective_from);
+    if (eff !== 0) return eff;
+    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+  };
+  const personal = goals
+    .filter((g) => g.salesperson_id === personId && g.effective_from <= asOf)
+    .sort(byRecency);
+  if (personal[0]) return personal[0];
+  const global = goals
+    .filter((g) => g.salesperson_id === null && g.effective_from <= asOf)
+    .sort(byRecency);
+  return global[0] ?? null;
+}
+
 // Score = unweighted average of per-activity completion percents
 // (actual / target × 100). Activities with target ≤ 0 are skipped so they
 // don't drag the average toward 0. Returns null when no activity has a
