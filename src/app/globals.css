@@ -128,3 +128,83 @@
     @apply font-sans;
   }
 }
+
+/* ============================================================================
+   Premium dark theme preview — TEST ACCOUNTS ONLY
+   ----------------------------------------------------------------------------
+   Toggled on <html> by ThemeApplier (src/components/theme-applier.tsx) only
+   when the signed-in salesperson is the seeded Test account. Production users
+   never match the gate, so they never see this — their UI is byte-identical
+   to before.
+   The whole theme works by overriding the same CSS variables the existing
+   light theme uses (declared above in `:root`), so every Tailwind token —
+   bg-background, text-foreground, bg-card, border-border, bg-primary, ring,
+   etc. — automatically picks up the new values. No component had to change.
+   Inspiration: Linear / fintech dashboards. Charcoal surfaces, soft borders,
+   one orange accent for primary actions and focus rings.
+   ============================================================================ */
+.theme-premium-dark {
+  /* Native form controls + scrollbars follow the dark palette. */
+  color-scheme: dark;
+
+  /* Surfaces. */
+  --background: #0f1115;
+  --foreground: #f3f4f6;
+  --card: #171a21;
+  --card-foreground: #f3f4f6;
+  --popover: #171a21;
+  --popover-foreground: #f3f4f6;
+
+  /* Single orange accent — primary actions, focus rings, active states. */
+  --primary: #ff7a00;
+  --primary-foreground: #0f1115;
+
+  /* Subtle secondary/muted surfaces for hover backgrounds, badges, etc. */
+  --secondary: #1c2029;
+  --secondary-foreground: #f3f4f6;
+  --muted: #1c2029;
+  --muted-foreground: #9aa4b2;
+  --accent: #1c2029;
+  --accent-foreground: #f3f4f6;
+
+  --destructive: #ef4444;
+  --border: #262b36;
+  --input: #262b36;
+  --ring: #ff7a00;
+
+  /* Sidebar + chart tokens kept on-palette so any component referencing them
+     stays cohesive (the radix-nova preset wires these into Tailwind too). */
+  --sidebar: #0f1115;
+  --sidebar-foreground: #f3f4f6;
+  --sidebar-primary: #ff7a00;
+  --sidebar-primary-foreground: #0f1115;
+  --sidebar-accent: #1c2029;
+  --sidebar-accent-foreground: #f3f4f6;
+  --sidebar-border: #262b36;
+  --sidebar-ring: #ff7a00;
+  --chart-1: #ff7a00;
+  --chart-2: #ff922e;
+  --chart-3: #5eead4;
+  --chart-4: #93c5fd;
+  --chart-5: #c4b5fd;
+}
+
+/* Slightly softer, more elevated card shadow under the dark theme.
+   Targets shadcn's `data-slot="card"`; harmless if not present. */
+.theme-premium-dark [data-slot="card"] {
+  box-shadow:
+    0 1px 0 0 rgb(0 0 0 / 0.04),
+    0 12px 32px -18px rgb(0 0 0 / 0.55);
+}
+
+/* Smooth color transitions on interactive controls — gives the orange
+   hover/active states a calmer, more "premium" feel without changing any
+   component behavior. */
+.theme-premium-dark button,
+.theme-premium-dark a,
+.theme-premium-dark [role="button"] {
+  transition-property:
+    color, background-color, border-color, box-shadow, opacity;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
