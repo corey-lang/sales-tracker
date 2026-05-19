@@ -755,6 +755,60 @@ export function VerificationCenter() {
     [load],
   );
 
+  const handleRecheckAll = useCallback(async () => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "This will recheck old auto-duplicates using the new duplicate rules. It will not approve anything.",
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    setActionMessage(null);
+    try {
+      const res = await apiFetch(
+        "/api/business-card/recheck-auto-duplicates",
+        { method: "POST" },
+      );
+      const data = (await res.json().catch(() => null)) as {
+        totalChecked?: number;
+        kept?: number;
+        movedToDuplicateReview?: number;
+        movedToNeedsReview?: number;
+        skipped?: number;
+        hitCap?: boolean;
+        error?: string;
+      } | null;
+      if (!res.ok) {
+        throw new Error(data?.error ?? `Action failed (${res.status})`);
+      }
+      const total = data?.totalChecked ?? 0;
+      const kept = data?.kept ?? 0;
+      const review = data?.movedToDuplicateReview ?? 0;
+      const needs = data?.movedToNeedsReview ?? 0;
+      const skipped = data?.skipped ?? 0;
+      setActionMessage({
+        kind: "success",
+        text:
+          `Rechecked ${total} auto-duplicate${total === 1 ? "" : "s"}: ` +
+          `kept ${kept} · moved ${review} to review · ${needs} to needs review` +
+          (skipped > 0 ? ` · ${skipped} skipped` : "") +
+          (data?.hitCap
+            ? " · more remain — run again to continue."
+            : "."),
+      });
+      await load();
+    } catch (err) {
+      setActionMessage({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Unknown error",
+      });
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [load]);
+
   const handleExport = useCallback(
     async (target: {
       key: string;
@@ -1025,6 +1079,7 @@ export function VerificationCenter() {
               busy={bulkBusy}
               onBulkReopen={handleReopenBulk}
               onReopenOne={(scanId) => void handleReopen(scanId)}
+              onRecheckAll={() => void handleRecheckAll()}
               onPreview={setPreview}
             />
           )}
@@ -1242,12 +1297,15 @@ function AutoDuplicateCleanup({
   busy,
   onBulkReopen,
   onReopenOne,
+  onRecheckAll,
   onPreview,
 }: {
   scans: Scan[];
   busy: boolean;
   onBulkReopen: (scanIds: string[]) => void;
   onReopenOne: (scanId: string) => void;
+  /** Reclassifies every auto-duplicate scan under the current rules. */
+  onRecheckAll: () => void;
   onPreview: (preview: Preview) => void;
 }) {
   // An unclassified scan (route couldn't match it) defaults to "likely false"
@@ -1292,14 +1350,25 @@ function AutoDuplicateCleanup({
             human still decides.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          className="rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-foreground transition hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {open ? "Hide" : "Show"}
-        </button>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={onRecheckAll}
+            disabled={busy}
+          >
+            {busy ? "Working…" : "Re-run duplicate check"}
+          </Button>
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-foreground transition hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {open ? "Hide" : "Show"}
+          </button>
+        </div>
       </div>
 
       {open && (
