@@ -64,6 +64,11 @@ type Props = {
    * the AE picks the same File twice.
    */
   fileKey: number;
+  /**
+   * Re-opens the dashboard's camera input directly — powers "Scan Another
+   * Card" so the AE can batch-scan without returning to the dashboard.
+   */
+  onScanAnother: () => void;
   /** Closes the scan panel — the dashboard owns the open/closed state. */
   onClose: () => void;
 };
@@ -82,7 +87,13 @@ export function BusinessCardScanner(props: Props) {
   return <ActiveScanner {...props} />;
 }
 
-function ActiveScanner({ salesperson, file, fileKey, onClose }: Props) {
+function ActiveScanner({
+  salesperson,
+  file,
+  fileKey,
+  onScanAnother,
+  onClose,
+}: Props) {
   // `uploading` covers only the brief image-upload + scan-row insert. AI
   // extraction is NEVER tracked here — it runs in the background per card.
   const [uploading, setUploading] = useState(false);
@@ -293,6 +304,17 @@ function ActiveScanner({ salesperson, file, fileKey, onClose }: Props) {
             {errorMessage}
           </p>
         )}
+
+        {/* Batch scanning: re-opens the camera directly so the AE can scan
+            card after card without returning to the dashboard. */}
+        <Button
+          type="button"
+          className="w-full"
+          onClick={onScanAnother}
+          disabled={uploading}
+        >
+          Scan Another Card
+        </Button>
       </CardContent>
     </Card>
   );

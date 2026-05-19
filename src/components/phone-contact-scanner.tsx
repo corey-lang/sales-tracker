@@ -36,6 +36,12 @@ type Props = {
   file: File;
   /** Bumps for every new pick — restarts the panel even for the same File. */
   fileKey: number;
+  /**
+   * Re-opens the dashboard's camera input directly — powers "Scan Another
+   * Contact" so the AE can scan the next card without returning to the
+   * dashboard.
+   */
+  onScanAnother: () => void;
   /** Closes the panel — the dashboard owns the open/closed state. */
   onClose: () => void;
 };
@@ -109,11 +115,16 @@ function vcardSlug(fields: ContactFields): string {
   );
 }
 
-export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Props) {
+export function PhoneContactScanner({
+  salesperson,
+  file,
+  fileKey,
+  onScanAnother,
+  onClose,
+}: Props) {
   const [stage, setStage] = useState<Stage>("working");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [scanId, setScanId] = useState<string | null>(null);
-  const [contactId, setContactId] = useState<string | null>(null);
   const [fields, setFields] = useState<ContactFields>(EMPTY_FIELDS);
   const [extractionFailed, setExtractionFailed] = useState(false);
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
@@ -133,7 +144,6 @@ export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Pro
     // Reset all per-card state — handles a re-tap restarting the panel.
     setErrorMessage(null);
     setScanId(null);
-    setContactId(null);
     setFields(EMPTY_FIELDS);
     setExtractionFailed(false);
     setDuplicateWarning(null);
@@ -273,7 +283,6 @@ export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Pro
         );
         return;
       }
-      setContactId(payload.contactId);
       setDuplicateWarning(payload.duplicate?.reason ?? null);
       await downloadVCard(payload.contactId);
       setStage("saved");
@@ -283,20 +292,6 @@ export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Pro
       );
     } finally {
       setSaving(false);
-    }
-  };
-
-  /** Re-triggers the vCard download from the success screen. */
-  const handleRedownload = async () => {
-    setErrorMessage(null);
-    try {
-      await downloadVCard(contactId);
-    } catch (err) {
-      setErrorMessage(
-        `Couldn't open the contact file: ${
-          err instanceof Error ? err.message : "try again"
-        }`,
-      );
     }
   };
 
@@ -459,7 +454,7 @@ export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Pro
               />
               <p className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
                 Saved to app + ready for phone. Your phone should prompt you to
-                create the contact — if it didn&apos;t, tap the button below.
+                create the contact.
               </p>
             </div>
 
@@ -472,8 +467,9 @@ export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Pro
 
             {errorBanner}
 
-            <Button type="button" className="w-full" onClick={handleRedownload}>
-              Add to Phone Contacts
+            {/* Re-opens the camera directly for the next card. */}
+            <Button type="button" className="w-full" onClick={onScanAnother}>
+              Scan Another Contact
             </Button>
             <Button
               type="button"

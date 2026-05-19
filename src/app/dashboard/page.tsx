@@ -5,11 +5,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
-import { Camera, ListChecks, type LucideIcon } from "lucide-react";
+import { Camera, ImageUp, ListChecks, type LucideIcon } from "lucide-react";
 
 import { formatDateMDY } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
-import { cn } from "@/lib/utils";
 import { isTestAccount } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -54,6 +53,35 @@ function QuickAction({
   );
 }
 
+/**
+ * A business card feature shown as a titled pair of sub-actions: Take Photo
+ * (rear camera) and Upload Image (photo library / files). Each button opens a
+ * hidden native input owned by the dashboard.
+ */
+function ScanFeature({
+  title,
+  onTakePhoto,
+  onUploadImage,
+}: {
+  title: string;
+  onTakePhoto: () => void;
+  onUploadImage: () => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="px-0.5 text-xs font-medium text-foreground/70">{title}</p>
+      <div className="grid grid-cols-2 gap-2">
+        <QuickAction icon={Camera} label="Take Photo" onClick={onTakePhoto} />
+        <QuickAction
+          icon={ImageUp}
+          label="Upload Image"
+          onClick={onUploadImage}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const { salesperson, clear, loaded } = useSalesperson();
@@ -61,11 +89,16 @@ export default function DashboardPage() {
   const [quote, setQuote] = useState<string>("");
 
   // Business card scanning. The dashboard owns hidden native file inputs; the
-  // Quick action buttons click them directly, so there is no intermediate
-  // modal. A pick stores { file, key } and renders the matching scanner; `key`
-  // bumps on every pick so re-picking (even the same file) re-processes.
-  const adminInputRef = useRef<HTMLInputElement>(null);
-  const phoneInputRef = useRef<HTMLInputElement>(null);
+  // sub-action buttons click them directly, so there is no intermediate modal.
+  // Each feature has TWO inputs: a camera input (capture="environment", biases
+  // the rear camera) and an upload input (no capture — Photo Library / Files).
+  // A pick stores { file, key } and renders the matching scanner; `key` bumps
+  // on every pick so re-picking (even the same file) re-processes — that is
+  // also how the in-panel "Scan Another …" buttons work.
+  const adminCameraRef = useRef<HTMLInputElement>(null);
+  const adminUploadRef = useRef<HTMLInputElement>(null);
+  const phoneCameraRef = useRef<HTMLInputElement>(null);
+  const phoneUploadRef = useRef<HTMLInputElement>(null);
   const scanKeyRef = useRef(0);
   const [adminScan, setAdminScan] = useState<{
     file: File;
@@ -199,7 +232,7 @@ export default function DashboardPage() {
       <MessagesCard salespersonId={salesperson.id} />
 
       {/* 2 — Quick actions */}
-      <section className="space-y-1.5">
+      <section className="space-y-3">
         <h2 className="px-0.5 text-sm font-medium text-muted-foreground">
           Quick actions
         </h2>
@@ -211,6 +244,7 @@ export default function DashboardPage() {
             salesperson={salesperson}
             file={adminScan.file}
             fileKey={adminScan.key}
+            onScanAnother={() => adminCameraRef.current?.click()}
             onClose={() => setAdminScan(null)}
           />
         )}
@@ -219,27 +253,29 @@ export default function DashboardPage() {
             salesperson={salesperson}
             file={phoneScan.file}
             fileKey={phoneScan.key}
+            onScanAnother={() => phoneCameraRef.current?.click()}
             onClose={() => setPhoneScan(null)}
           />
         )}
 
-        <div
-          className={cn("grid gap-2", isAe ? "grid-cols-2" : "grid-cols-1")}
-        >
-          {isAe && (
-            <QuickAction
-              icon={Camera}
-              label="Scan Business Card"
-              onClick={() => adminInputRef.current?.click()}
-            />
-          )}
-          {isAe && isTest && (
-            <QuickAction
-              icon={Camera}
-              label="Scan Card & Save Contact"
-              onClick={() => phoneInputRef.current?.click()}
-            />
-          )}
+        {/* Each business card feature exposes Take Photo + Upload Image. */}
+        {isAe && (
+          <ScanFeature
+            title="Scan Business Card"
+            onTakePhoto={() => adminCameraRef.current?.click()}
+            onUploadImage={() => adminUploadRef.current?.click()}
+          />
+        )}
+        {/* TEMPORARY — phone-contact feature is gated to the test account. */}
+        {isAe && isTest && (
+          <ScanFeature
+            title="Scan Card & Save Contact"
+            onTakePhoto={() => phoneCameraRef.current?.click()}
+            onUploadImage={() => phoneUploadRef.current?.click()}
+          />
+        )}
+
+        <div className="grid grid-cols-1 gap-2">
           <QuickAction
             icon={ListChecks}
             label="Log activity"
@@ -247,30 +283,55 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* Hidden native file inputs. The Quick action buttons click these
-            directly — no intermediate modal. No `capture` attribute, so the
-            OS still offers Take Photo / Photo Library / Files. */}
+        {/* Hidden native file inputs — clicked directly by the buttons above,
+            so there is no intermediate modal. "Take Photo" sets
+            capture="environment" to bias the rear camera; "Upload Image"
+            omits capture so the OS offers Photo Library / Files / Camera. */}
         {isAe && (
-          <input
-            ref={adminInputRef}
-            type="file"
-            accept="image/*"
-            onChange={(e) => handlePickedFile(e, "admin")}
-            className="sr-only"
-            aria-hidden="true"
-            tabIndex={-1}
-          />
+          <>
+            <input
+              ref={adminCameraRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => handlePickedFile(e, "admin")}
+              className="sr-only"
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+            <input
+              ref={adminUploadRef}
+              type="file"
+              accept="image/*"
+              onChange={(e) => handlePickedFile(e, "admin")}
+              className="sr-only"
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+          </>
         )}
         {isAe && isTest && (
-          <input
-            ref={phoneInputRef}
-            type="file"
-            accept="image/*"
-            onChange={(e) => handlePickedFile(e, "phone")}
-            className="sr-only"
-            aria-hidden="true"
-            tabIndex={-1}
-          />
+          <>
+            <input
+              ref={phoneCameraRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => handlePickedFile(e, "phone")}
+              className="sr-only"
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+            <input
+              ref={phoneUploadRef}
+              type="file"
+              accept="image/*"
+              onChange={(e) => handlePickedFile(e, "phone")}
+              className="sr-only"
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+          </>
         )}
       </section>
 
