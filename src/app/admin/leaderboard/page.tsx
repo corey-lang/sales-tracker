@@ -27,7 +27,6 @@ import {
 type Standing = {
   id: string;
   first_name: string;
-  total: number;
   percent: number | null;
 };
 type Load =
@@ -154,7 +153,7 @@ function StandingRow({
   rank: number;
   standing: Standing;
 }) {
-  const { percent, total } = standing;
+  const { percent } = standing;
   const percentColor =
     percent === null ? "text-muted-foreground" : progressColor(percent).text;
   return (
@@ -163,16 +162,11 @@ function StandingRow({
         <span className="text-lg font-semibold tabular-nums text-muted-foreground">
           #{rank}
         </span>
-        <div className="min-w-0">
-          <span className="block truncate text-base font-medium">
-            {standing.first_name}
-          </span>
-          {/* Admin-only detail — raw activity count for the week. */}
-          <span className="text-xs text-muted-foreground">
-            {total} {total === 1 ? "activity" : "activities"} logged
-          </span>
-        </div>
+        <span className="truncate text-base font-medium">
+          {standing.first_name}
+        </span>
       </div>
+      {/* Score only — raw activity counts live on /admin/reports/activity. */}
       <span
         className={cn(
           "shrink-0 text-2xl font-bold tabular-nums",
