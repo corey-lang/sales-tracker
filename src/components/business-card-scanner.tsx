@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { Camera, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
@@ -56,22 +56,33 @@ const RECENT_STATUS_META: Record<
 
 type Props = {
   salesperson: StoredSalesperson;
+  /** The image the AE picked from the dashboard's native file picker. */
+  file: File;
+  /**
+   * Bumps for every new pick. The dashboard opens the native picker directly
+   * and increments this on each selection, so processing re-fires even when
+   * the AE picks the same File twice.
+   */
+  fileKey: number;
   /** Closes the scan panel — the dashboard owns the open/closed state. */
   onClose: () => void;
 };
 
-// Live AE rollout: every AE sees the real scanner — there is no longer a
-// "Coming Soon" gate. The seeded Test account still gets the scanner too; the
-// only difference is `is_test_data`, which the /api/business-card/scan route
-// derives server-side so the Test account's scans stay cleanly separable from
-// real AE data. Either way this writes ONLY to business_card_scans + the
-// business-card-scans storage bucket — it never produces leaderboard or
-// metric data.
-export function BusinessCardScanner({ salesperson, onClose }: Props) {
-  return <ActiveScanner salesperson={salesperson} onClose={onClose} />;
+// "Send Card to Admin" flow. The dashboard's "Scan Business Card" action opens
+// the native picker directly (no intermediate modal); this panel receives the
+// chosen file and processes it: upload image -> save business_card_scans row
+// -> background AI extraction. Scanning another card re-taps the dashboard
+// action, which bumps `fileKey` so the next card joins the same running list.
+//
+// The seeded Test account uses this flow too; the only difference is
+// `is_test_data`, which the /api/business-card/scan route derives server-side.
+// This writes ONLY to business_card_scans + the storage bucket — it never
+// produces leaderboard or metric data.
+export function BusinessCardScanner(props: Props) {
+  return <ActiveScanner {...props} />;
 }
 
-function ActiveScanner({ salesperson, onClose }: Props) {
+function ActiveScanner({ salesperson, file, fileKey, onClose }: Props) {
   // `uploading` covers only the brief image-upload + scan-row insert. AI
   // extraction is NEVER tracked here — it runs in the background per card.
   const [uploading, setUploading] = useState(false);
@@ -114,17 +125,17 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     [setRecentStatus],
   );
 
-  const handleFile = async (file: File) => {
+  const handleFile = async (picked: File) => {
     setErrorMessage(null);
     setUploading(true);
 
-    const ext = sanitizeFilename(file.name);
+    const ext = sanitizeFilename(picked.name);
     const path = `${salesperson.id}/${Date.now()}-${ext}`;
 
     const upload = await supabase.storage
       .from(BUSINESS_CARD_BUCKET)
-      .upload(path, file, {
-        contentType: file.type || "image/jpeg",
+      .upload(path, picked, {
+        contentType: picked.type || "image/jpeg",
         upsert: false,
       });
 
@@ -178,12 +189,11 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     }
 
     // The image + scan row are now fully saved. From here the UI never blocks
-    // on AI: record the card as saved, return the scanner to its ready state,
-    // and fire extraction in the background so the AE can immediately scan the
-    // next card without waiting.
+    // on AI: record the card as saved and fire extraction in the background so
+    // the AE can immediately scan the next card without waiting.
     setRecent((prev) =>
       [
-        { scanId, fileName: file.name, status: "saved" as RecentStatus },
+        { scanId, fileName: picked.name, status: "saved" as RecentStatus },
         ...prev,
       ].slice(0, 5),
     );
@@ -191,13 +201,15 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     void runExtraction(scanId);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    // Reset so picking the same file again re-fires onChange.
-    e.target.value = "";
-    if (!file) return;
+  // Process each picked image. `fileKey` changes on every dashboard pick (even
+  // when the same File is re-selected), so this runs exactly once per pick and
+  // appends to the running list. Only `fileKey` belongs in the deps: `file`
+  // and `handleFile` are intentionally excluded so a re-render never re-uploads.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void handleFile(file);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileKey]);
 
   const close = () => {
     setUploading(false);
@@ -205,12 +217,6 @@ function ActiveScanner({ salesperson, onClose }: Props) {
     setRecent([]);
     onClose();
   };
-
-  const labelClass = `flex flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-5 text-center transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40 ${
-    uploading
-      ? "cursor-not-allowed opacity-60"
-      : "cursor-pointer hover:border-primary hover:bg-primary/10"
-  }`;
 
   // Banner reflects the newest activity: still reading vs. all done.
   const anyReading = recent.some(
@@ -237,25 +243,14 @@ function ActiveScanner({ salesperson, onClose }: Props) {
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Upload control stays available at all times so the AE can scan
-            card after card without waiting for AI extraction. */}
-        <label className={labelClass}>
-          <Camera aria-hidden="true" className="size-6 text-primary" />
-          <span className="text-base font-semibold text-primary">
-            {uploading ? "Saving card…" : "Upload or Take Photo"}
-          </span>
-          <span className="text-xs text-muted-foreground">
-            Choose a photo from your library or take a new photo on your phone.
-          </span>
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handleFileChange}
-            disabled={uploading}
-            className="sr-only"
-          />
-        </label>
+        {uploading && (
+          <p
+            role="status"
+            className="rounded-lg border bg-muted/30 px-3 py-3 text-center text-sm text-muted-foreground"
+          >
+            Saving card…
+          </p>
+        )}
 
         {recent.length > 0 && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">

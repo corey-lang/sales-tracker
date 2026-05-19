@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Camera, Check, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
@@ -19,16 +19,23 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-// "Scan & Add to Phone Contacts" — the AE-facing phone-contact flow.
+// "Scan Card & Save Contact" — the AE-facing phone-contact flow.
 //
-// This is a SECOND business card path. It reuses the existing scan pipeline
-// (Storage upload -> /api/business-card/scan -> /api/business-card/process)
-// but, unlike the admin scanner, it WAITS for AI extraction so the AE can
-// review/edit the fields, then saves an AE-owned contact and hands the AE a
-// vCard to import into their phone. The admin/Tonja review flow is untouched.
+// The dashboard's "Scan Card & Save Contact" action opens the native picker
+// directly (no intermediate modal); this panel receives the chosen file and
+// drives it through: upload -> create scan row -> WAIT for AI extraction ->
+// AE reviews/edits the fields -> save AE-owned contact -> hand off a vCard to
+// the phone. Picking another card re-taps the dashboard action, which bumps
+// `fileKey` and restarts this panel with the new card. The admin/Tonja review
+// flow is untouched. (Feature is gated to the test account — see the dashboard
+// and the /api/business-card/ae-contact + /vcard routes.)
 
 type Props = {
   salesperson: StoredSalesperson;
+  /** The image the AE picked from the dashboard's native file picker. */
+  file: File;
+  /** Bumps for every new pick — restarts the panel even for the same File. */
+  fileKey: number;
   /** Closes the panel — the dashboard owns the open/closed state. */
   onClose: () => void;
 };
@@ -61,7 +68,7 @@ const EMPTY_FIELDS: ContactFields = {
 };
 
 /** Workflow stages for one card. */
-type Stage = "upload" | "working" | "review" | "saved";
+type Stage = "working" | "review" | "saved" | "failed";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -102,8 +109,8 @@ function vcardSlug(fields: ContactFields): string {
   );
 }
 
-export function PhoneContactScanner({ salesperson, onClose }: Props) {
-  const [stage, setStage] = useState<Stage>("upload");
+export function PhoneContactScanner({ salesperson, file, fileKey, onClose }: Props) {
+  const [stage, setStage] = useState<Stage>("working");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [scanId, setScanId] = useState<string | null>(null);
   const [contactId, setContactId] = useState<string | null>(null);
@@ -116,8 +123,14 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
     setFields((prev) => ({ ...prev, [key]: value }));
   };
 
-  const resetForAnother = () => {
-    setStage("upload");
+  /**
+   * Upload -> create scan row -> run AI extraction. The scan + image are saved
+   * regardless of whether extraction succeeds; on extraction failure the AE
+   * just fills the review form in by hand. An upload / scan-row failure has no
+   * scan to review, so it lands on the "failed" stage to retry from scratch.
+   */
+  const handleFile = async (picked: File) => {
+    // Reset all per-card state — handles a re-tap restarting the panel.
     setErrorMessage(null);
     setScanId(null);
     setContactId(null);
@@ -125,27 +138,18 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
     setExtractionFailed(false);
     setDuplicateWarning(null);
     setSaving(false);
-  };
-
-  /**
-   * Upload -> create scan row -> run AI extraction. The scan + image are saved
-   * regardless of whether extraction succeeds; on failure the AE just fills
-   * the review form in by hand.
-   */
-  const handleFile = async (file: File) => {
-    setErrorMessage(null);
     setStage("working");
 
-    const path = `${salesperson.id}/${Date.now()}-${sanitizeFilename(file.name)}`;
+    const path = `${salesperson.id}/${Date.now()}-${sanitizeFilename(picked.name)}`;
     const upload = await supabase.storage
       .from(BUSINESS_CARD_BUCKET)
-      .upload(path, file, {
-        contentType: file.type || "image/jpeg",
+      .upload(path, picked, {
+        contentType: picked.type || "image/jpeg",
         upsert: false,
       });
     if (upload.error) {
       setErrorMessage(`Upload failed: ${upload.error.message}`);
-      setStage("upload");
+      setStage("failed");
       return;
     }
 
@@ -172,7 +176,7 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
         setErrorMessage(
           `Save failed: ${payload?.error ?? `server returned ${res.status}`}`,
         );
-        setStage("upload");
+        setStage("failed");
         return;
       }
       newScanId = payload.scanId;
@@ -180,7 +184,7 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
       setErrorMessage(
         `Save failed: ${err instanceof Error ? err.message : "network error"}`,
       );
-      setStage("upload");
+      setStage("failed");
       return;
     }
     setScanId(newScanId);
@@ -210,11 +214,15 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
     setStage("review");
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (file) void handleFile(file);
-  };
+  // Process the picked image. `fileKey` changes on every dashboard pick (even
+  // when the same File is re-selected), so this runs exactly once per pick.
+  // Only `fileKey` belongs in the deps: `file` and `handleFile` are
+  // intentionally excluded so a re-render never re-processes the card.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void handleFile(file);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileKey]);
 
   /** Generates the vCard and triggers the mobile download/import. */
   const downloadVCard = async (id: string | null) => {
@@ -309,14 +317,14 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
             ? "Review Contact"
             : stage === "saved"
               ? "Saved to phone"
-              : "Scan & Add to Phone Contact"}
+              : "Scan Card & Save Contact"}
         </CardTitle>
         <CardDescription>
           {stage === "review"
             ? "Edit anything AI missed, then add it to your phone."
             : stage === "saved"
               ? "Saved to app + ready for phone."
-              : "Scan a card — AI fills in the contact for you to review."}
+              : "Reading the card with AI…"}
         </CardDescription>
         <CardAction>
           <Button
@@ -332,29 +340,6 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
       </CardHeader>
 
       <CardContent className="space-y-3">
-        {/* ---- Stage: upload ------------------------------------------- */}
-        {stage === "upload" && (
-          <>
-            <label className="flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-primary/40 bg-primary/5 px-4 py-5 text-center transition-colors hover:border-primary hover:bg-primary/10 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/40">
-              <Camera aria-hidden="true" className="size-6 text-primary" />
-              <span className="text-base font-semibold text-primary">
-                Upload or Take Photo
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Choose a photo from your library or take a new photo.
-              </span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handleFileChange}
-                className="sr-only"
-              />
-            </label>
-            {errorBanner}
-          </>
-        )}
-
         {/* ---- Stage: working (upload + AI extraction) ----------------- */}
         {stage === "working" && (
           <p
@@ -363,6 +348,24 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
           >
             Saving the card and reading it with AI…
           </p>
+        )}
+
+        {/* ---- Stage: failed (upload / save error) --------------------- */}
+        {stage === "failed" && (
+          <>
+            {errorBanner}
+            <p className="text-sm text-muted-foreground">
+              Tap “Scan Card &amp; Save Contact” again to retry.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={onClose}
+            >
+              Close
+            </Button>
+          </>
         )}
 
         {/* ---- Stage: review ------------------------------------------- */}
@@ -469,20 +472,16 @@ export function PhoneContactScanner({ salesperson, onClose }: Props) {
 
             {errorBanner}
 
-            <Button
-              type="button"
-              className="w-full"
-              onClick={handleRedownload}
-            >
+            <Button type="button" className="w-full" onClick={handleRedownload}>
               Add to Phone Contacts
             </Button>
             <Button
               type="button"
               variant="outline"
               className="w-full"
-              onClick={resetForAnother}
+              onClick={onClose}
             >
-              Scan another card
+              Done
             </Button>
           </>
         )}

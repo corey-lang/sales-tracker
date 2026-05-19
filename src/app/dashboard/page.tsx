@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -10,6 +10,7 @@ import { Camera, ListChecks, type LucideIcon } from "lucide-react";
 import { formatDateMDY } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
 import { cn } from "@/lib/utils";
+import { isTestAccount } from "@/lib/permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
@@ -23,7 +24,8 @@ import {
 } from "@/components/ui/card";
 import { ThisWeekCard } from "@/components/this-week-card";
 import { AeTasksCard } from "@/components/ae-tasks-card";
-import { BusinessCardPanel } from "@/components/business-card-panel";
+import { BusinessCardScanner } from "@/components/business-card-scanner";
+import { PhoneContactScanner } from "@/components/phone-contact-scanner";
 import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { EditWeekCard } from "@/components/edit-week-card";
@@ -57,7 +59,22 @@ export default function DashboardPage() {
   const { salesperson, clear, loaded } = useSalesperson();
   const [entryVersion, setEntryVersion] = useState(0);
   const [quote, setQuote] = useState<string>("");
-  const [scanOpen, setScanOpen] = useState(false);
+
+  // Business card scanning. The dashboard owns hidden native file inputs; the
+  // Quick action buttons click them directly, so there is no intermediate
+  // modal. A pick stores { file, key } and renders the matching scanner; `key`
+  // bumps on every pick so re-picking (even the same file) re-processes.
+  const adminInputRef = useRef<HTMLInputElement>(null);
+  const phoneInputRef = useRef<HTMLInputElement>(null);
+  const scanKeyRef = useRef(0);
+  const [adminScan, setAdminScan] = useState<{
+    file: File;
+    key: number;
+  } | null>(null);
+  const [phoneScan, setPhoneScan] = useState<{
+    file: File;
+    key: number;
+  } | null>(null);
 
   useEffect(() => {
     if (loaded && !salesperson) router.replace("/");
@@ -118,10 +135,37 @@ export default function DashboardPage() {
   const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
   const isAe = salesperson.role === "ae";
 
+  // TEMPORARY — "Scan Card & Save Contact" is gated to the test account for
+  // limited live testing before rollout. Non-test AEs only see "Scan Business
+  // Card". The backend routes enforce the same gate (me.is_test). Remove this
+  // when the phone-contact feature ships broadly.
+  const isTest = isTestAccount(salesperson);
+
   const scrollToLog = () => {
     document
       .getElementById("log-activity")
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  /** Records a picked image and opens the matching scanner panel. */
+  const handlePickedFile = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    target: "admin" | "phone",
+  ) => {
+    const file = e.target.files?.[0];
+    // Reset so picking the same file again re-fires onChange.
+    e.target.value = "";
+    if (!file) return;
+    scanKeyRef.current += 1;
+    const pick = { file, key: scanKeyRef.current };
+    // The two flows are mutually exclusive — opening one closes the other.
+    if (target === "admin") {
+      setPhoneScan(null);
+      setAdminScan(pick);
+    } else {
+      setAdminScan(null);
+      setPhoneScan(pick);
+    }
   };
 
   return (
@@ -159,31 +203,74 @@ export default function DashboardPage() {
         <h2 className="px-0.5 text-sm font-medium text-muted-foreground">
           Quick actions
         </h2>
-        {isAe && scanOpen ? (
-          <BusinessCardPanel
+
+        {/* Active scanners render here; the action buttons below stay visible
+            so another card can be scanned with a single tap. */}
+        {isAe && adminScan && (
+          <BusinessCardScanner
             salesperson={salesperson}
-            onClose={() => setScanOpen(false)}
+            file={adminScan.file}
+            fileKey={adminScan.key}
+            onClose={() => setAdminScan(null)}
           />
-        ) : (
-          <div
-            className={cn(
-              "grid gap-2",
-              isAe ? "grid-cols-2" : "grid-cols-1",
-            )}
-          >
-            {isAe && (
-              <QuickAction
-                icon={Camera}
-                label="Scan card"
-                onClick={() => setScanOpen(true)}
-              />
-            )}
+        )}
+        {isAe && phoneScan && (
+          <PhoneContactScanner
+            salesperson={salesperson}
+            file={phoneScan.file}
+            fileKey={phoneScan.key}
+            onClose={() => setPhoneScan(null)}
+          />
+        )}
+
+        <div
+          className={cn("grid gap-2", isAe ? "grid-cols-2" : "grid-cols-1")}
+        >
+          {isAe && (
             <QuickAction
-              icon={ListChecks}
-              label="Log activity"
-              onClick={scrollToLog}
+              icon={Camera}
+              label="Scan Business Card"
+              onClick={() => adminInputRef.current?.click()}
             />
-          </div>
+          )}
+          {isAe && isTest && (
+            <QuickAction
+              icon={Camera}
+              label="Scan Card & Save Contact"
+              onClick={() => phoneInputRef.current?.click()}
+            />
+          )}
+          <QuickAction
+            icon={ListChecks}
+            label="Log activity"
+            onClick={scrollToLog}
+          />
+        </div>
+
+        {/* Hidden native file inputs. The Quick action buttons click these
+            directly — no intermediate modal. No `capture` attribute, so the
+            OS still offers Take Photo / Photo Library / Files. */}
+        {isAe && (
+          <input
+            ref={adminInputRef}
+            type="file"
+            accept="image/*"
+            onChange={(e) => handlePickedFile(e, "admin")}
+            className="sr-only"
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+        )}
+        {isAe && isTest && (
+          <input
+            ref={phoneInputRef}
+            type="file"
+            accept="image/*"
+            onChange={(e) => handlePickedFile(e, "phone")}
+            className="sr-only"
+            aria-hidden="true"
+            tabIndex={-1}
+          />
         )}
       </section>
 
