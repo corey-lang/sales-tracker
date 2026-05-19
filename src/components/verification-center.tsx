@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
-import { Download, ExternalLink, RefreshCw, X } from "lucide-react";
+import { Download, ExternalLink, Pencil, RefreshCw, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import {
@@ -11,6 +11,7 @@ import {
   normalizeScanContactType,
   type ContactBucket,
 } from "@/lib/contact-type";
+import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
 type ExtractionStatus = "pending" | "completed" | "failed";
 
@@ -41,6 +43,8 @@ type Scan = {
   status: string;
   is_test_data: boolean;
   created_at: string;
+  extracted_first_name: string | null;
+  extracted_last_name: string | null;
   extracted_full_name: string | null;
   extracted_company: string | null;
   extracted_title: string | null;
@@ -91,6 +95,28 @@ type AeGroup = { name: string; total: number; buckets: BucketGroup[] };
 
 /** Manual Tonja/admin actions, matching the /api/business-card route names. */
 type ActionKind = "approve" | "reject" | "mark-duplicate";
+
+/** The extracted contact fields the admin "Edit" sheet can change on a scan. */
+type EditableScanFields = {
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  company: string;
+  title: string;
+  email: string;
+  phone: string;
+  website: string;
+  address: string;
+  contact_type: string;
+};
+
+/** Bucket → a canonical contact-type string the edit sheet writes back, so
+ *  normalizeScanContactType re-derives the same bucket. */
+const BUCKET_CONTACT_TYPE: Record<ContactBucket, string> = {
+  real_estate_agent: "Real Estate Agent",
+  title: "Title",
+  other: "Other",
+};
 
 // ---------------------------------------------------------------------------
 // Workflow status metadata
@@ -403,6 +429,14 @@ export function VerificationCenter() {
   const [exportSummary, setExportSummary] = useState<ExportSummaryEntry[]>([]);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
+  // Editing extracted contact fields is admin-only (the route enforces it too);
+  // the assistant can still approve / reject / mark-duplicate.
+  const { salesperson } = useSalesperson();
+  const canEdit = Boolean(salesperson?.is_admin);
+  const [editingScan, setEditingScan] = useState<Scan | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setError(null);
 
@@ -632,6 +666,43 @@ export function VerificationCenter() {
     [load],
   );
 
+  const handleSaveEdit = useCallback(
+    async (scanId: string, fields: EditableScanFields) => {
+      setSavingEdit(true);
+      setEditError(null);
+      try {
+        const res = await apiFetch("/api/business-card/update-scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId, fields }),
+        });
+        if (!res.ok) {
+          let message = `Save failed (${res.status})`;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (typeof data.error === "string" && data.error.length > 0) {
+              message = data.error;
+            }
+          } catch {
+            // ignore parse error; keep status-based message
+          }
+          throw new Error(message);
+        }
+        setEditingScan(null);
+        setActionMessage({
+          kind: "success",
+          text: "Contact details updated.",
+        });
+        await load();
+      } catch (err) {
+        setEditError(err instanceof Error ? err.message : "Unknown error");
+      } finally {
+        setSavingEdit(false);
+      }
+    },
+    [load],
+  );
+
   const counts = useMemo(() => {
     const tally: Record<FilterKey, number> = {
       needs_review: 0,
@@ -845,6 +916,11 @@ export function VerificationCenter() {
                                 void handleAction(scan.id, action)
                               }
                               onPreview={setPreview}
+                              canEdit={canEdit}
+                              onEdit={() => {
+                                setEditError(null);
+                                setEditingScan(scan);
+                              }}
                             />
                           ))}
                         </ul>
@@ -859,6 +935,19 @@ export function VerificationCenter() {
       </Card>
       {preview && (
         <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
+      )}
+      {editingScan && (
+        <EditScanSheet
+          key={editingScan.id}
+          scan={editingScan}
+          saving={savingEdit}
+          error={editError}
+          onSave={handleSaveEdit}
+          onClose={() => {
+            setEditingScan(null);
+            setEditError(null);
+          }}
+        />
       )}
     </>
   );
@@ -973,6 +1062,8 @@ function ScanCard({
   actionsDisabled,
   onAction,
   onPreview,
+  canEdit,
+  onEdit,
 }: {
   scan: Scan;
   duplicateContact: DuplicateContact | undefined;
@@ -984,6 +1075,9 @@ function ScanCard({
   actionsDisabled: boolean;
   onAction: (action: ActionKind) => void;
   onPreview: (preview: Preview) => void;
+  /** True for admins — gates the Edit action (the route enforces it too). */
+  canEdit: boolean;
+  onEdit: () => void;
 }) {
   const status = effectiveStatus(scan);
   const needsAction =
@@ -1079,6 +1173,8 @@ function ScanCard({
             disabled={actionsDisabled}
             duplicateReview={isDuplicateReview}
             onAction={onAction}
+            canEdit={canEdit}
+            onEdit={onEdit}
           />
         )}
         <ExtractedFields scan={scan} />
@@ -1092,12 +1188,17 @@ function ScanActions({
   disabled,
   duplicateReview,
   onAction,
+  canEdit,
+  onEdit,
 }: {
   busy: boolean;
   disabled: boolean;
   /** Duplicate-review cards get clearer, decision-specific button text. */
   duplicateReview: boolean;
   onAction: (action: ActionKind) => void;
+  /** Admins get an Edit action to correct extracted fields before approving. */
+  canEdit: boolean;
+  onEdit: () => void;
 }) {
   // Same three routes (approve / mark-duplicate / reject) either way — only
   // the labels change so a duplicate review reads as an explicit choice.
@@ -1111,6 +1212,18 @@ function ScanActions({
 
   return (
     <div className="flex flex-wrap gap-2 border-t pt-2">
+      {canEdit && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onEdit}
+          disabled={disabled || busy}
+        >
+          <Pencil aria-hidden="true" />
+          Edit
+        </Button>
+      )}
       <Button
         type="button"
         size="sm"
@@ -1520,5 +1633,214 @@ function TestDataBadge() {
     <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
       Test Data
     </span>
+  );
+}
+
+/** A labeled form field inside the edit sheet. */
+function SheetField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/**
+ * Admin-only slide-over for correcting a scan's extracted contact fields
+ * before it is approved into a contact. Save persists via the admin-guarded
+ * /api/business-card/update-scan route; the Verification Center then refreshes.
+ * After editing, the admin can still approve / reject / mark-duplicate.
+ */
+function EditScanSheet({
+  scan,
+  saving,
+  error,
+  onSave,
+  onClose,
+}: {
+  scan: Scan;
+  saving: boolean;
+  error: string | null;
+  onSave: (scanId: string, fields: EditableScanFields) => void;
+  onClose: () => void;
+}) {
+  const [form, setForm] = useState({
+    first_name: scan.extracted_first_name ?? "",
+    last_name: scan.extracted_last_name ?? "",
+    full_name: scan.extracted_full_name ?? "",
+    company: scan.extracted_company ?? "",
+    title: scan.extracted_title ?? "",
+    email: scan.extracted_email ?? "",
+    phone: scan.extracted_phone ?? "",
+    website: scan.extracted_website ?? "",
+    address: scan.extracted_address ?? "",
+  });
+  // Bucket is editable as a 3-way choice; it starts from the scan's derived
+  // contact-type bucket.
+  const [bucket, setBucket] = useState<ContactBucket>(() =>
+    normalizeScanContactType(scan),
+  );
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [onClose]);
+
+  const set = (key: keyof typeof form, value: string) =>
+    setForm((prev) => ({ ...prev, [key]: value }));
+
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    onSave(scan.id, { ...form, contact_type: BUCKET_CONTACT_TYPE[bucket] });
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Edit contact details"
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm"
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        className="flex h-full w-full max-w-md flex-col bg-background shadow-2xl"
+      >
+        <header className="flex items-center justify-between gap-2 border-b px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold">Edit Contact</h2>
+            <p className="text-xs text-muted-foreground">
+              Correct what AI extracted, then approve.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close edit"
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X aria-hidden="true" className="size-4" />
+          </button>
+        </header>
+
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <div className="grid grid-cols-2 gap-2">
+              <SheetField label="First name">
+                <Input
+                  value={form.first_name}
+                  onChange={(e) => set("first_name", e.target.value)}
+                />
+              </SheetField>
+              <SheetField label="Last name">
+                <Input
+                  value={form.last_name}
+                  onChange={(e) => set("last_name", e.target.value)}
+                />
+              </SheetField>
+            </div>
+            <SheetField label="Full name">
+              <Input
+                value={form.full_name}
+                onChange={(e) => set("full_name", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Company">
+              <Input
+                value={form.company}
+                onChange={(e) => set("company", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Title">
+              <Input
+                value={form.title}
+                onChange={(e) => set("title", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Email">
+              <Input
+                type="email"
+                value={form.email}
+                onChange={(e) => set("email", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Phone">
+              <Input
+                type="tel"
+                value={form.phone}
+                onChange={(e) => set("phone", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Website">
+              <Input
+                type="url"
+                value={form.website}
+                onChange={(e) => set("website", e.target.value)}
+              />
+            </SheetField>
+            <SheetField label="Address">
+              <textarea
+                value={form.address}
+                rows={2}
+                onChange={(e) => set("address", e.target.value)}
+                className="w-full min-w-0 resize-y rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-base outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm dark:bg-input/30"
+              />
+            </SheetField>
+            <SheetField label="Contact type / bucket">
+              <select
+                value={bucket}
+                onChange={(e) => setBucket(e.target.value as ContactBucket)}
+                className="rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                {CONTACT_BUCKET_ORDER.map((value) => (
+                  <option key={value} value={value}>
+                    {CONTACT_BUCKET_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+            </SheetField>
+
+            {error && (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {error}
+              </p>
+            )}
+          </div>
+
+          <footer className="flex gap-2 border-t px-4 py-3">
+            <Button type="submit" className="flex-1" disabled={saving}>
+              {saving ? "Saving…" : "Save Changes"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onClose}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+          </footer>
+        </form>
+      </div>
+    </div>
   );
 }

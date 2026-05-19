@@ -9,33 +9,33 @@ import {
 import {
   createContactFromScan,
   SCAN_SELECT_COLUMNS,
-  type EditableContactFields,
   type LoadedScan,
 } from "@/lib/server/business-card-contacts";
 
 // Build 3: manual approval of a business card scan into a verified contact.
-// POST /api/business-card/approve   body: { scanId: string, editedFields? }
+// POST /api/business-card/approve   body: { scanId: string }
 //
 // AUTHORIZATION (Phase 0)
 //   Restricted to reviewers (admin or assistant) via requireReviewer(). The
-//   `approved_by` audit value is the authenticated reviewer's name — the route
-//   no longer accepts an `approvedBy` string from the request body.
+//   `approved_by` audit value is the authenticated reviewer's name.
 //
-// Creates a verified business_card_contacts row from the scan, optionally with
-// admin edits applied, and links the scan to it. The scan and its image are
-// never deleted.
+// Creates a verified business_card_contacts row from the scan's CURRENTLY
+// STORED extracted fields, and links the scan to it. This route accepts NO
+// field overrides — a reviewer/assistant cannot alter contact values here.
+// To correct extracted fields first, an admin uses the admin-only route
+// POST /api/business-card/update-scan; approve then reads the updated scan.
+// The scan and its image are never deleted.
 
 export const runtime = "nodejs";
 
 const ApproveSchema = z.object({
   scanId: z.string().min(1, "scanId is required."),
-  editedFields: z.record(z.string(), z.unknown()).optional(),
 });
 
 export async function POST(req: Request) {
   try {
     const reviewer = await requireReviewer(req);
-    const { scanId, editedFields } = await parseBody(req, ApproveSchema);
+    const { scanId } = await parseBody(req, ApproveSchema);
 
     const supabase = getServerSupabase();
 
@@ -72,7 +72,6 @@ export async function POST(req: Request) {
       {
         verificationStatus: "approved",
         approvedBy: reviewer.first_name,
-        editedFields: editedFields as EditableContactFields | undefined,
       },
     );
 

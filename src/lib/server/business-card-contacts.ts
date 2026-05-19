@@ -17,11 +17,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import {
-  CONTACT_BUCKET_ORDER,
-  normalizeScanContactType,
-  type ContactBucket,
-} from "@/lib/contact-type";
+import { normalizeScanContactType } from "@/lib/contact-type";
 
 /** Minimum AI confidence (as a 0–100 percentage) required to auto-approve. */
 export const AUTO_APPROVE_MIN_CONFIDENCE = 90;
@@ -102,31 +98,10 @@ export type ContactVerificationStatus =
   | "approved"
   | "needs_review";
 
-/**
- * Contact fields an admin may override before approval (the `editedFields`
- * body of POST /api/business-card/approve). Unknown keys are ignored; only
- * these named fields are ever written.
- */
-export type EditableContactFields = {
-  first_name?: unknown;
-  last_name?: unknown;
-  full_name?: unknown;
-  company?: unknown;
-  title?: unknown;
-  email?: unknown;
-  phone?: unknown;
-  website?: unknown;
-  address?: unknown;
-  contact_bucket?: unknown;
-  contact_type_raw?: unknown;
-};
-
 export type CreateContactOptions = {
   verificationStatus: ContactVerificationStatus;
   /** Who approved it — stored in `approved_by` for approved/auto_approved. */
   approvedBy?: string | null;
-  /** Optional admin overrides applied on top of the scan's extracted fields. */
-  editedFields?: EditableContactFields;
   /** Duplicate state to record on the new contact. Defaults to "unchecked". */
   duplicateStatus?: string;
   /** If this contact is a known duplicate of another, its id. */
@@ -141,40 +116,6 @@ export type CreateContactResult = {
 // ---------------------------------------------------------------------------
 // Value normalization helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Resolves an admin-edited value:
- *  - `undefined`  → field not provided, caller should fall back to the scan
- *  - `null` / ""  → field explicitly cleared
- *  - non-empty string → trimmed value
- *  - any other type → ignored (treated as not provided)
- */
-function editedValue(value: unknown): string | null | undefined {
-  if (value === undefined) return undefined;
-  if (value === null) return null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-  return undefined;
-}
-
-/** Picks the admin override if provided, otherwise the scan's extracted value. */
-function resolveField(edited: unknown, fallback: string | null): string | null {
-  const resolved = editedValue(edited);
-  return resolved === undefined ? fallback : resolved;
-}
-
-/** Validates an admin-supplied contact bucket, else derives one from the scan. */
-function resolveBucket(edited: unknown, scan: ContactScan): ContactBucket {
-  if (
-    typeof edited === "string" &&
-    (CONTACT_BUCKET_ORDER as string[]).includes(edited)
-  ) {
-    return edited as ContactBucket;
-  }
-  return normalizeScanContactType(scan);
-}
 
 /** Normalizes the AI confidence to a 0–100 percentage (raw values may be 0–1). */
 export function confidenceToPercent(value: number | null): number | null {
@@ -213,10 +154,12 @@ function normalizeName(value: string | null | undefined): string | null {
 /**
  * Creates a `business_card_contacts` row from a scan and links the scan to it.
  *
- * The contact's fields are copied from the scan's `extracted_*` columns, with
- * any `options.editedFields` overrides applied on top. The originating scan is
- * never modified beyond `verified_contact_id` + `verification_status`, and is
- * never deleted.
+ * The contact's fields are copied verbatim from the scan's CURRENTLY STORED
+ * `extracted_*` columns — there is no field-override path. An admin corrects a
+ * scan beforehand via the admin-only POST /api/business-card/update-scan; a
+ * reviewer/assistant approving here can never alter field values. The
+ * originating scan is never modified beyond `verified_contact_id` +
+ * `verification_status`, and is never deleted.
  *
  * Throws if the insert fails or if the scan link-back fails.
  */
@@ -225,40 +168,30 @@ export async function createContactFromScan(
   scan: ContactScan,
   options: CreateContactOptions,
 ): Promise<CreateContactResult> {
-  const edited = options.editedFields ?? {};
-  const bucket = resolveBucket(edited.contact_bucket, scan);
   const now = new Date().toISOString();
   const isApproved =
     options.verificationStatus === "auto_approved" ||
     options.verificationStatus === "approved";
 
-  // Resolve email/phone once: the contact's normalized_* columns must reflect
-  // the final (post-admin-edit) values, not the scan's raw extracted values.
-  const resolvedEmail = resolveField(edited.email, scan.extracted_email);
-  const resolvedPhone = resolveField(edited.phone, scan.extracted_phone);
-
+  // Built ONLY from the scan's stored extracted fields — no overrides.
   const insertRow = {
     scan_id: scan.id,
     salesperson_id: scan.salesperson_id,
     salesperson_name: scan.salesperson_name,
-    contact_bucket: bucket,
-    contact_type_raw: resolveField(
-      edited.contact_type_raw,
-      scan.extracted_contact_type,
-    ),
-    first_name: resolveField(edited.first_name, scan.extracted_first_name),
-    last_name: resolveField(edited.last_name, scan.extracted_last_name),
-    full_name: resolveField(edited.full_name, scan.extracted_full_name),
-    company: resolveField(edited.company, scan.extracted_company),
-    title: resolveField(edited.title, scan.extracted_title),
-    email: resolvedEmail,
-    phone: resolvedPhone,
-    website: resolveField(edited.website, scan.extracted_website),
-    address: resolveField(edited.address, scan.extracted_address),
-    // Normalized copies for reliable CRM-side duplicate matching. Derived from
-    // the resolved values above so admin edits are reflected.
-    normalized_email: normalizeEmail(resolvedEmail),
-    normalized_phone: normalizePhone(resolvedPhone),
+    contact_bucket: normalizeScanContactType(scan),
+    contact_type_raw: scan.extracted_contact_type,
+    first_name: scan.extracted_first_name,
+    last_name: scan.extracted_last_name,
+    full_name: scan.extracted_full_name,
+    company: scan.extracted_company,
+    title: scan.extracted_title,
+    email: scan.extracted_email,
+    phone: scan.extracted_phone,
+    website: scan.extracted_website,
+    address: scan.extracted_address,
+    // Normalized copies for reliable CRM-side duplicate matching.
+    normalized_email: normalizeEmail(scan.extracted_email),
+    normalized_phone: normalizePhone(scan.extracted_phone),
     // Copy the scan's stable Storage object path. image_path mirrors it for
     // backward compatibility (the column predates storage_path and was always
     // NULL before the CRM-hardening migration).
@@ -324,31 +257,53 @@ type ContactDupRow = {
   normalized_email: string | null;
   normalized_phone: string | null;
   full_name: string | null;
+  last_name: string | null;
   company: string | null;
 };
+
+/** How decisive a duplicate match is. */
+export type DuplicateStrength = "strong" | "possible";
 
 export type DuplicateMatch = {
   /** The existing contact this scan appears to duplicate. */
   contactId: string;
+  /** Which signal combination matched. */
+  matchType:
+    | "email"
+    | "name_company"
+    | "name_phone"
+    | "company_phone"
+    | "lastname_company"
+    | "phone_only";
   /**
-   * Which signal matched. "email" / "phone" are strong (used for auto-marking
-   * duplicates); "name_company" is weaker and is left for manual review.
+   * "strong" → confident duplicate (auto-marked, no review needed).
+   * "possible" → ambiguous; routed to manual review, never auto-marked.
    */
-  matchType: "email" | "phone" | "name_company";
+  strength: DuplicateStrength;
   /** Human-readable explanation of what matched. */
   reason: string;
 };
 
 /**
- * Foundation duplicate check. A scan is a potential duplicate of an existing
- * contact when any of these match:
- *  - normalized email          → strong  (matchType "email")
- *  - normalized phone (digits) → strong  (matchType "phone")
- *  - normalized full_name AND normalized company together → weak
- *    (matchType "name_company")
+ * Duplicate check against existing contacts. Deliberately conservative about
+ * phone numbers — an office / shared line matching is NOT enough to call a
+ * confident duplicate.
  *
- * Returns the first match found, or null. Does not merge, delete, or modify
- * anything — detection only.
+ * STRONG (confident duplicate):
+ *  - same email address
+ *  - OR same normalized full name + same normalized company
+ *  - OR same normalized full name + same phone number
+ *
+ * POSSIBLE (ambiguous — needs a human, never auto-marked):
+ *  - same company + same phone, different name (likely a shared office line)
+ *  - same last name + same company, but not an exact full-name match
+ *  - same phone only, different name
+ *
+ * A phone-only match never escalates to STRONG: a different person on the
+ * same office number must not be auto-marked a duplicate.
+ *
+ * Returns the strongest match found (a STRONG match short-circuits; otherwise
+ * the first POSSIBLE match), or null. Detection only — never merges/deletes.
  */
 export async function findDuplicateContact(
   supabase: SupabaseClient,
@@ -361,17 +316,23 @@ export async function findDuplicateContact(
   const email = normalizeEmail(scan.normalized_email ?? scan.extracted_email);
   const phone = normalizePhone(scan.normalized_phone ?? scan.extracted_phone);
   const fullName = normalizeName(scan.extracted_full_name);
+  const lastName = normalizeName(scan.extracted_last_name);
   const company = normalizeName(scan.extracted_company);
 
-  // Nothing identifying to compare on — cannot assess duplicate risk.
-  if (!email && !phone && !(fullName && company)) {
+  // No matchable signal combination — cannot assess duplicate risk.
+  if (
+    !email &&
+    !phone &&
+    !(fullName && company) &&
+    !(lastName && company)
+  ) {
     return null;
   }
 
   const res = await supabase
     .from("business_card_contacts")
     .select(
-      "id, scan_id, email, phone, normalized_email, normalized_phone, full_name, company",
+      "id, scan_id, email, phone, normalized_email, normalized_phone, full_name, last_name, company",
     );
 
   if (res.error) {
@@ -380,41 +341,85 @@ export async function findDuplicateContact(
 
   const rows = (res.data ?? []) as ContactDupRow[];
 
+  // The first POSSIBLE match is remembered while we keep scanning — a STRONG
+  // match anywhere outranks it.
+  let possible: DuplicateMatch | null = null;
+
   for (const row of rows) {
     // A contact already derived from this same scan is not a "duplicate".
     if (row.scan_id && row.scan_id === scan.id) continue;
 
-    // Prefer the contact's persisted normalized value; fall back to its raw
+    // Prefer each contact's persisted normalized value; fall back to its raw
     // column for contacts created before the normalized columns existed.
-    if (email && normalizeEmail(row.normalized_email ?? row.email) === email) {
+    const rowEmail = normalizeEmail(row.normalized_email ?? row.email);
+    const rowPhone = normalizePhone(row.normalized_phone ?? row.phone);
+    const rowName = normalizeName(row.full_name);
+    const rowLast = normalizeName(row.last_name);
+    const rowCompany = normalizeName(row.company);
+
+    const emailEq = !!email && rowEmail === email;
+    const phoneEq = !!phone && rowPhone === phone;
+    const nameEq = !!fullName && rowName === fullName;
+    const lastEq = !!lastName && rowLast === lastName;
+    const companyEq = !!company && rowCompany === company;
+
+    // --- STRONG: decisive — return immediately. ---------------------------
+    if (emailEq) {
       return {
         contactId: row.id,
         matchType: "email",
-        reason: `matching email (${scan.extracted_email})`,
+        strength: "strong",
+        reason: `Same email address (${scan.extracted_email}).`,
       };
     }
-    if (phone && normalizePhone(row.normalized_phone ?? row.phone) === phone) {
-      return {
-        contactId: row.id,
-        matchType: "phone",
-        reason: `matching phone (${scan.extracted_phone})`,
-      };
-    }
-    if (
-      fullName &&
-      company &&
-      normalizeName(row.full_name) === fullName &&
-      normalizeName(row.company) === company
-    ) {
+    if (nameEq && companyEq) {
       return {
         contactId: row.id,
         matchType: "name_company",
-        reason: `matching name + company (${scan.extracted_full_name} @ ${scan.extracted_company})`,
+        strength: "strong",
+        reason: `Same name and company (${scan.extracted_full_name} @ ${scan.extracted_company}).`,
       };
+    }
+    if (nameEq && phoneEq) {
+      return {
+        contactId: row.id,
+        matchType: "name_phone",
+        strength: "strong",
+        reason: `Same name and phone number (${scan.extracted_full_name}).`,
+      };
+    }
+
+    // --- POSSIBLE: ambiguous — keep the first, keep looking for a STRONG. --
+    if (!possible) {
+      if (companyEq && phoneEq) {
+        possible = {
+          contactId: row.id,
+          matchType: "company_phone",
+          strength: "possible",
+          reason:
+            "Same company and phone number but a different name — possibly a shared office line. Review manually.",
+        };
+      } else if (lastEq && companyEq) {
+        possible = {
+          contactId: row.id,
+          matchType: "lastname_company",
+          strength: "possible",
+          reason:
+            "Same last name and company, but not an exact name match. Review manually.",
+        };
+      } else if (phoneEq) {
+        possible = {
+          contactId: row.id,
+          matchType: "phone_only",
+          strength: "possible",
+          reason:
+            "Phone number matches another contact, but the name is different — review manually.",
+        };
+      }
     }
   }
 
-  return null;
+  return possible;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,12 +464,13 @@ export type AutoApprovalResult =
  *    full_name / company)
  *
  * Duplicate handling (a contact is never created in either case):
- *  - A strong match (email OR phone) at >= 90 confidence is auto-marked:
- *    duplicate_status = confirmed_duplicate, verification_status =
- *    auto_duplicate. Tonja does NOT need to review it.
- *  - A weak match (full_name + company only) is left for manual review:
- *    duplicate_status = possible_duplicate, verification_status =
- *    duplicate_review.
+ *  - A STRONG match (see findDuplicateContact — email, name+company, or
+ *    name+phone) is auto-marked: duplicate_status = confirmed_duplicate,
+ *    verification_status = auto_duplicate. Tonja does NOT need to review it.
+ *  - A POSSIBLE match (phone-only, company+phone, last-name+company) is left
+ *    for manual review: duplicate_status = possible_duplicate,
+ *    verification_status = duplicate_review. A phone-number match alone is
+ *    never decisive — a shared office line must not auto-mark a duplicate.
  *
  * In every other case the scan is left as needs_review. The scan row and its
  * image are never deleted.
@@ -504,12 +510,9 @@ export async function maybeAutoApproveScan(
 
   const duplicate = await findDuplicateContact(supabase, scan);
   if (duplicate) {
-    const strong =
-      duplicate.matchType === "email" || duplicate.matchType === "phone";
-
-    if (strong) {
-      // Email/phone match at >= 90 confidence is decisive — auto-mark the scan
-      // as a confirmed duplicate. No contact is created, no review needed.
+    if (duplicate.strength === "strong") {
+      // A strong match (email, name+company, or name+phone) is decisive —
+      // auto-mark the scan as a confirmed duplicate. No contact, no review.
       const notes = `Auto-marked duplicate of contact ${duplicate.contactId} — ${duplicate.reason}`;
       await supabase
         .from("business_card_scans")
@@ -530,8 +533,9 @@ export async function maybeAutoApproveScan(
       };
     }
 
-    // Name + company only — weaker signal. Flag for manual duplicate review;
-    // do NOT auto-approve, do NOT create a contact, do NOT touch the original.
+    // A POSSIBLE match (phone-only, company+phone, last-name+company) — too
+    // ambiguous to auto-mark. Flag for manual duplicate review; do NOT
+    // auto-approve, do NOT create a contact, do NOT touch the original.
     const notes = `Possible duplicate of contact ${duplicate.contactId} — ${duplicate.reason}`;
     await supabase
       .from("business_card_scans")

@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
 
 /** Columns the Verification Center renders for each scan. */
 const SCAN_COLUMNS =
-  "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, duplicate_of_contact_id, rejection_reason";
+  "id, salesperson_id, salesperson_name, image_url, status, is_test_data, created_at, extracted_first_name, extracted_last_name, extracted_full_name, extracted_company, extracted_title, extracted_email, extracted_phone, extracted_website, extracted_address, extracted_contact_type, ai_confidence, extraction_status, raw_ocr_text, ai_notes, verification_status, verified_contact_id, duplicate_status, duplicate_notes, duplicate_of_contact_id, rejection_reason";
 
 /** Columns needed to render a matched duplicate contact side-by-side. */
 const DUPLICATE_CONTACT_COLUMNS =
