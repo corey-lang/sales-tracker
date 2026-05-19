@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
-import { Download, ExternalLink, Pencil, RefreshCw, X } from "lucide-react";
+import {
+  Download,
+  ExternalLink,
+  Pencil,
+  RefreshCw,
+  RotateCcw,
+  RotateCw,
+  X,
+} from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import {
@@ -40,6 +48,9 @@ type Scan = {
   salesperson_id: string;
   salesperson_name: string | null;
   image_url: string;
+  /** Display rotation in degrees (0/90/180/270). Optional: absent on rows
+   *  read before the image-rotation migration ran. */
+  image_rotation_degrees?: number | null;
   status: string;
   is_test_data: boolean;
   created_at: string;
@@ -409,8 +420,16 @@ function summarizeExports(rows: ExportContactRow[]): ExportSummaryEntry[] {
   );
 }
 
-type Preview = { url: string; name: string };
+type Preview = { url: string; name: string; rotation: number };
 type ActionMessage = { kind: "success" | "error"; text: string };
+
+/** Autosave state for a scan's rotation, keyed by scan id. */
+type RotationStatus = "saving" | "saved" | "error";
+
+/** Normalizes any degree value to one of 0 / 90 / 180 / 270. */
+function normalizeRotation(degrees: number): number {
+  return ((Math.round(degrees / 90) % 4) + 4) % 4 * 90;
+}
 
 export function VerificationCenter() {
   const [scans, setScans] = useState<Scan[]>([]);
@@ -437,11 +456,25 @@ export function VerificationCenter() {
   // the assistant can still approve / reject / mark-duplicate.
   const { salesperson } = useSalesperson();
   const canEdit = Boolean(salesperson?.is_admin);
-  const [editingScan, setEditingScan] = useState<Scan | null>(null);
+  const [editingScanId, setEditingScanId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   // True while a bulk auto-duplicate reopen is in flight.
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Per-scan rotation autosave status, keyed by scan id.
+  const [rotationStatus, setRotationStatus] = useState<
+    Record<string, RotationStatus>
+  >({});
+
+  // The scan being edited is derived from `scans` (not a snapshot), so an
+  // autosaved rotation made inside the edit modal is reflected live.
+  const editingScan = useMemo(
+    () =>
+      editingScanId
+        ? (scans.find((s) => s.id === editingScanId) ?? null)
+        : null,
+    [editingScanId, scans],
+  );
 
   const load = useCallback(async () => {
     setError(null);
@@ -643,6 +676,43 @@ export function VerificationCenter() {
     [load],
   );
 
+  const handleRotate = useCallback(
+    async (scanId: string, rotation: number) => {
+      const previous =
+        scans.find((s) => s.id === scanId)?.image_rotation_degrees ?? 0;
+      if (previous === rotation) return;
+      // Optimistic — show the new orientation immediately, autosave behind it.
+      setScans((prev) =>
+        prev.map((s) =>
+          s.id === scanId ? { ...s, image_rotation_degrees: rotation } : s,
+        ),
+      );
+      setRotationStatus((m) => ({ ...m, [scanId]: "saving" }));
+      try {
+        const res = await apiFetch("/api/business-card/update-rotation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scanId, rotation }),
+        });
+        if (!res.ok) {
+          throw new Error(`Save failed (${res.status})`);
+        }
+        setRotationStatus((m) => ({ ...m, [scanId]: "saved" }));
+      } catch {
+        // Revert so the UI matches what is actually persisted.
+        setScans((prev) =>
+          prev.map((s) =>
+            s.id === scanId
+              ? { ...s, image_rotation_degrees: previous }
+              : s,
+          ),
+        );
+        setRotationStatus((m) => ({ ...m, [scanId]: "error" }));
+      }
+    },
+    [scans],
+  );
+
   const handleReopenBulk = useCallback(
     async (scanIds: string[]) => {
       if (scanIds.length === 0) return;
@@ -773,7 +843,7 @@ export function VerificationCenter() {
           }
           throw new Error(message);
         }
-        setEditingScan(null);
+        setEditingScanId(null);
         setActionMessage({
           kind: "success",
           text: "Contact details updated.",
@@ -1021,9 +1091,13 @@ export function VerificationCenter() {
                               canEdit={canEdit}
                               onEdit={() => {
                                 setEditError(null);
-                                setEditingScan(scan);
+                                setEditingScanId(scan.id);
                               }}
                               onReopen={() => void handleReopen(scan.id)}
+                              rotationStatus={rotationStatus[scan.id]}
+                              onRotate={(rotation) =>
+                                void handleRotate(scan.id, rotation)
+                              }
                             />
                           ))}
                         </ul>
@@ -1045,9 +1119,11 @@ export function VerificationCenter() {
           scan={editingScan}
           saving={savingEdit}
           error={editError}
+          rotationStatus={rotationStatus[editingScan.id]}
+          onRotate={(rotation) => void handleRotate(editingScan.id, rotation)}
           onSave={handleSaveEdit}
           onClose={() => {
-            setEditingScan(null);
+            setEditingScanId(null);
             setEditError(null);
           }}
         />
@@ -1357,17 +1433,17 @@ function AutoDuplicateRow({
           onPreview({
             url: scan.image_url,
             name: scan.salesperson_name ?? "unknown",
+            rotation: scan.image_rotation_degrees ?? 0,
           })
         }
-        className="shrink-0 overflow-hidden rounded border bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="shrink-0 overflow-hidden rounded border focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="Preview business card"
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
+        <RotatableImage
           src={scan.image_url}
           alt=""
-          className="h-12 w-20 object-cover"
-          loading="lazy"
+          rotation={scan.image_rotation_degrees ?? 0}
+          className="size-14"
         />
       </button>
       <div className="min-w-0 flex-1">
@@ -1388,6 +1464,100 @@ function AutoDuplicateRow({
   );
 }
 
+/**
+ * Displays a scan image at its saved rotation. The image sits in a SQUARE box
+ * with object-contain, so any 0/90/180/270 rotation always fits fully — never
+ * clipped, never blurred. `className` sizes the square box.
+ */
+function RotatableImage({
+  src,
+  alt,
+  rotation,
+  className,
+}: {
+  src: string;
+  alt: string;
+  rotation: number;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`flex items-center justify-center overflow-hidden bg-muted ${
+        className ?? ""
+      }`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        style={{ transform: `rotate(${rotation}deg)` }}
+        className="max-h-full max-w-full object-contain transition-transform duration-200"
+      />
+    </div>
+  );
+}
+
+/**
+ * Rotate-left / rotate-right (+ reset) controls with an autosave indicator.
+ * `onRotate` receives the new absolute rotation (0/90/180/270).
+ */
+function RotationControls({
+  rotation,
+  status,
+  onRotate,
+}: {
+  rotation: number;
+  status: RotationStatus | undefined;
+  onRotate: (next: number) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onRotate(normalizeRotation(rotation - 90))}
+        aria-label="Rotate image left"
+      >
+        <RotateCcw aria-hidden="true" />
+        Left
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onRotate(normalizeRotation(rotation + 90))}
+        aria-label="Rotate image right"
+      >
+        <RotateCw aria-hidden="true" />
+        Right
+      </Button>
+      {rotation !== 0 && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onRotate(0)}
+        >
+          Reset
+        </Button>
+      )}
+      {status === "saving" && (
+        <span className="text-xs text-muted-foreground">Saving…</span>
+      )}
+      {status === "saved" && (
+        <span className="text-xs text-emerald-600 dark:text-emerald-400">
+          Saved
+        </span>
+      )}
+      {status === "error" && (
+        <span className="text-xs text-destructive">Save failed</span>
+      )}
+    </div>
+  );
+}
+
 function ScanCard({
   scan,
   duplicateContact,
@@ -1402,6 +1572,8 @@ function ScanCard({
   canEdit,
   onEdit,
   onReopen,
+  rotationStatus,
+  onRotate,
 }: {
   scan: Scan;
   duplicateContact: DuplicateContact | undefined;
@@ -1418,6 +1590,10 @@ function ScanCard({
   onEdit: () => void;
   /** Sends an auto-marked duplicate back to manual duplicate review. */
   onReopen: () => void;
+  /** Current rotation autosave state for this scan. */
+  rotationStatus: RotationStatus | undefined;
+  /** Persists a new display rotation (autosaved) for this scan. */
+  onRotate: (rotation: number) => void;
 }) {
   const status = effectiveStatus(scan);
   const needsAction =
@@ -1435,38 +1611,45 @@ function ScanCard({
 
   return (
     <li className="flex flex-col gap-4 rounded-lg border bg-card p-3 sm:flex-row sm:items-start">
-      <a
-        href={scan.image_url}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={(event) => {
-          if (
-            event.metaKey ||
-            event.ctrlKey ||
-            event.shiftKey ||
-            event.altKey ||
-            event.button !== 0
-          ) {
-            return;
-          }
-          event.preventDefault();
-          onPreview({
-            url: scan.image_url,
-            name: scan.salesperson_name ?? "unknown",
-          });
-        }}
-        className="group block w-full shrink-0 self-start overflow-hidden rounded-md border bg-muted transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-72 md:w-96"
-        aria-label="Expand business card image"
-        title="Click to expand · ⌘/Ctrl-click to open in new tab"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={scan.image_url}
-          alt={`Business card scanned by ${scan.salesperson_name ?? "unknown"}`}
-          className="block h-auto w-full"
-          loading="lazy"
+      <div className="w-full shrink-0 self-start space-y-1.5 sm:w-72 md:w-96">
+        <a
+          href={scan.image_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => {
+            if (
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey ||
+              event.button !== 0
+            ) {
+              return;
+            }
+            event.preventDefault();
+            onPreview({
+              url: scan.image_url,
+              name: scan.salesperson_name ?? "unknown",
+              rotation: scan.image_rotation_degrees ?? 0,
+            });
+          }}
+          className="block overflow-hidden rounded-md border transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Expand business card image"
+          title="Click to expand · ⌘/Ctrl-click to open in new tab"
+        >
+          <RotatableImage
+            src={scan.image_url}
+            alt={`Business card scanned by ${scan.salesperson_name ?? "unknown"}`}
+            rotation={scan.image_rotation_degrees ?? 0}
+            className="aspect-square w-full"
+          />
+        </a>
+        <RotationControls
+          rotation={scan.image_rotation_degrees ?? 0}
+          status={rotationStatus}
+          onRotate={onRotate}
         />
-      </a>
+      </div>
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-base font-semibold">
@@ -1644,11 +1827,11 @@ function ImageLightbox({
         className="relative max-h-full"
         onClick={(event) => event.stopPropagation()}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
+        <RotatableImage
           src={preview.url}
           alt={`Business card scanned by ${preview.name}`}
-          className="block max-h-[85vh] max-w-[95vw] rounded-md object-contain shadow-2xl"
+          rotation={preview.rotation}
+          className="aspect-square w-[min(85vh,92vw)] rounded-md shadow-2xl"
         />
         <div className="absolute right-2 top-2 flex items-center gap-2">
           <a
@@ -2022,12 +2205,16 @@ function EditScanSheet({
   scan,
   saving,
   error,
+  rotationStatus,
+  onRotate,
   onSave,
   onClose,
 }: {
   scan: Scan;
   saving: boolean;
   error: string | null;
+  rotationStatus: RotationStatus | undefined;
+  onRotate: (rotation: number) => void;
   onSave: (scanId: string, fields: EditableScanFields) => void;
   onClose: () => void;
 }) {
@@ -2104,21 +2291,26 @@ function EditScanSheet({
             {/* Card image — left on desktop, stacked on top on mobile. Sits
                 inside the modal (never blurred) so it can be read against the
                 fields. */}
-            <div className="sm:w-2/5 sm:shrink-0">
+            <div className="space-y-2 sm:w-2/5 sm:shrink-0">
               <a
                 href={scan.image_url}
                 target="_blank"
                 rel="noopener noreferrer"
                 title="Open the full image in a new tab"
-                className="block overflow-hidden rounded-md border bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="block overflow-hidden rounded-md border focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
+                <RotatableImage
                   src={scan.image_url}
                   alt="Scanned business card"
-                  className="block h-auto w-full"
+                  rotation={scan.image_rotation_degrees ?? 0}
+                  className="aspect-square w-full"
                 />
               </a>
+              <RotationControls
+                rotation={scan.image_rotation_degrees ?? 0}
+                status={rotationStatus}
+                onRotate={onRotate}
+              />
             </div>
             {/* Editable fields — right on desktop, below the image on mobile. */}
             <div className="min-w-0 flex-1 space-y-3">
