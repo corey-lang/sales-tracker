@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { Check, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
@@ -254,67 +254,88 @@ function ActiveScanner({
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
-        {uploading && (
+        {/* Before the first card lands — just the saving status. */}
+        {uploading && recent.length === 0 && !errorMessage && (
           <p
             role="status"
-            className="rounded-lg border bg-muted/30 px-3 py-3 text-center text-sm text-muted-foreground"
+            className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground"
           >
             Saving card…
           </p>
         )}
 
-        {recent.length > 0 && (
-          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
-            <p
-              role="status"
-              className="text-sm font-medium text-emerald-700 dark:text-emerald-400"
+        {/* After a capture, the NEXT ACTION dominates: the buttons sit above
+            the AI status, which is demoted to small text + the list below.
+            Batch scanning — "Capture Another Card" re-opens the camera
+            directly, no dashboard return, no picker re-selection. */}
+        {(recent.length > 0 || errorMessage) && (
+          <div className="space-y-2.5">
+            {recent.length > 0 && (
+              <p className="flex items-center justify-center gap-1.5 text-base font-semibold text-emerald-700 dark:text-emerald-400">
+                <Check aria-hidden="true" className="size-5" />
+                Card Captured
+              </p>
+            )}
+
+            {errorMessage && (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {errorMessage}
+              </p>
+            )}
+
+            <Button
+              type="button"
+              onClick={onScanAnother}
+              disabled={uploading}
+              className="h-14 w-full text-base font-semibold"
             >
-              {anyReading
-                ? "Card saved. AI is reading it in the background."
-                : "Cards saved. AI finished — review them in the Verification Center."}
-            </p>
-            <ul className="space-y-1.5">
-              {recent.map((item) => {
-                const meta = RECENT_STATUS_META[item.status];
-                return (
-                  <li
-                    key={item.scanId}
-                    className="flex items-center justify-between gap-2"
-                  >
-                    <span className="min-w-0 truncate text-sm text-muted-foreground">
-                      {item.fileName}
-                    </span>
-                    <span
-                      className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${meta.className}`}
-                    >
-                      {meta.label}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
+              Capture Another Card
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={close}
+              className="h-12 w-full"
+            >
+              Close
+            </Button>
+
+            {recent.length > 0 && (
+              <p className="text-center text-xs text-muted-foreground">
+                {anyReading
+                  ? "AI is reading it in the background."
+                  : "AI finished — review in the Verification Center."}
+              </p>
+            )}
           </div>
         )}
 
-        {errorMessage && (
-          <p
-            role="alert"
-            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {errorMessage}
-          </p>
+        {/* Secondary information: per-card upload + AI-reading status. */}
+        {recent.length > 0 && (
+          <ul className="space-y-1.5 rounded-lg border bg-muted/30 p-3">
+            {recent.map((item) => {
+              const meta = RECENT_STATUS_META[item.status];
+              return (
+                <li
+                  key={item.scanId}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className="min-w-0 truncate text-sm text-muted-foreground">
+                    {item.fileName}
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${meta.className}`}
+                  >
+                    {meta.label}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
         )}
-
-        {/* Batch scanning: re-opens the camera directly so the AE can scan
-            card after card without returning to the dashboard. */}
-        <Button
-          type="button"
-          className="w-full"
-          onClick={onScanAnother}
-          disabled={uploading}
-        >
-          Scan Another Card
-        </Button>
       </CardContent>
     </Card>
   );
