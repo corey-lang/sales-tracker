@@ -733,6 +733,17 @@ function JuiceBoxFeed({
   // bootstrap effect (react-hooks/set-state-in-effect).
   const [refreshing, setRefreshing] = useState<boolean>(() => cached !== null);
 
+  // Flips to true the moment the bootstrap fetch settles (success OR
+  // error). Distinct from cache hydration — cache rendering on its own
+  // never sets this. It's the signal the final-landing effect in
+  // FeedList waits on so the initial scroll only runs once the server
+  // window is known. Without this separation a fast cache hydration
+  // would land at the cached "latest" before fresh data revealed
+  // newer messages, and the existing nearBottom-based catch-up was
+  // racy (the browser's async scroll event hadn't yet updated
+  // nearBottomRef when the merge effect re-fired).
+  const [freshFeedLoaded, setFreshFeedLoaded] = useState(false);
+
   // Reply state: when set, ReplyModal opens overlaying the feed. Cleared on
   // successful post or Cancel. The sticky composer is intentionally NOT
   // hijacked into a "reply mode" anymore — that pattern was hard to notice
@@ -868,7 +879,14 @@ function JuiceBoxFeed({
         });
       })
       .finally(() => {
-        if (!cancelled) setRefreshing(false);
+        if (cancelled) return;
+        setRefreshing(false);
+        // Flip the "bootstrap settled" signal regardless of success
+        // or error. The final-landing effect uses this to decide
+        // when to perform the one-shot initial scroll; if we left it
+        // false on error the user would stay at scroll=0 of a cached
+        // feed forever after a transient bootstrap failure.
+        setFreshFeedLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -1271,6 +1289,7 @@ function JuiceBoxFeed({
         hasMore={hasMore}
         loadingMore={loadingMore}
         refreshing={refreshing}
+        freshFeedLoaded={freshFeedLoaded}
       />
       {/*
         Composer moved to a FIXED position above the BottomNav for messaging-
@@ -2183,6 +2202,7 @@ function FeedList({
   hasMore,
   loadingMore,
   refreshing,
+  freshFeedLoaded,
 }: {
   state: FeedState;
   currentUserId: string;
@@ -2224,6 +2244,11 @@ function FeedList({
   /** True while the bootstrap fetch is running AFTER cache hydration —
    *  drives the subtle "Refreshing…" pill above the feed. */
   refreshing: boolean;
+  /** Flips to true the moment the bootstrap fetch settles. The
+   *  final-landing effect waits on this so cache hydration alone
+   *  never causes a one-shot scroll — the initial landing always
+   *  happens against fresh server data. */
+  freshFeedLoaded: boolean;
 }) {
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
@@ -2337,15 +2362,17 @@ function FeedList({
   }, [onNearBottom]);
 
   // Scroll-position discipline:
-  //   * On the very first arrival of messages, snap to the bottom (latest
-  //     post) so the page lands where chat-style feeds always land.
+  //   * INITIAL LANDING is owned by a SEPARATE effect (see "Final
+  //     initial landing" below) — gated on the bootstrap fetch having
+  //     settled, NOT on cache hydration. Cache rendering paints
+  //     content but never causes a scroll, so the one-shot landing
+  //     always targets fresh server data.
   //   * For each subsequent message, only auto-scroll if either
   //       (a) the user just hit Post themselves (forceScrollRef), or
   //       (b) they are currently within NEAR_BOTTOM_PX of the bottom.
   //     Otherwise — they have scrolled up to read older posts — leave them
   //     alone. No yanking the viewport while they're reading.
   const NEAR_BOTTOM_PX = 200;
-  const firstScrollRef = useRef(true);
   const nearBottomRef = useRef(true);
 
   useEffect(() => {
@@ -2373,17 +2400,31 @@ function FeedList({
     };
   }, []);
 
-  // One-shot cancel: if the user scrolls (wheel on desktop, touchmove
-  // on mobile) BEFORE the initial landing has happened, consume
-  // firstScrollRef so we never yank them after the fact. Programmatic
-  // scrolls (our own window.scrollTo, scrollIntoView from reply
-  // previews) don't fire wheel/touchmove, so they don't accidentally
-  // self-cancel. Listeners are { once: true } so each removes itself
-  // on first fire, and the cleanup removes the survivor at unmount.
+  // ─── Final initial landing ────────────────────────────────────────────
+  // Distinct ref, distinct effect. Cache hydration NEVER consumes this;
+  // the only paths that consume it are:
+  //   (a) the dedicated final-landing effect successfully scrolling,
+  //   (b) the user scrolling manually before (a) gets to fire.
+  //
+  // The previous design reused `firstScrollRef` for both initial
+  // landing and the "is this the first scroll ever?" gate inside the
+  // generic scroll effect. With cache hydration, an unlucky timing
+  // where the bootstrap merge raced the async scroll-event update
+  // could leave nearBottomRef stale (=false) and the merge-triggered
+  // effect would skip the re-land. Splitting the responsibilities
+  // means the final landing depends ONLY on data signals
+  // (freshFeedLoaded + unreadLoaded + DOM), not on a side-effected
+  // ref the browser hadn't refreshed yet.
+  const finalLandingPendingRef = useRef(true);
+
+  // Cancel listener: a real user wheel/touchmove before final landing
+  // → consume the pending flag so we don't yank them. Programmatic
+  // scrolls (window.scrollTo / scrollIntoView) don't fire these, so
+  // self-cancel is impossible.
   useEffect(() => {
-    if (!firstScrollRef.current) return;
+    if (!finalLandingPendingRef.current) return;
     const cancel = () => {
-      firstScrollRef.current = false;
+      finalLandingPendingRef.current = false;
     };
     document.addEventListener("wheel", cancel, { passive: true, once: true });
     document.addEventListener("touchmove", cancel, {
@@ -2396,26 +2437,21 @@ function FeedList({
     };
   }, []);
 
-  // Detect "Load older" prepends so we can skip the auto-scroll while
-  // the layout effect restores the pre-prepend scroll position.
-  //
-  // The earlier heuristic — "more than one message was added in a
-  // single render" — false-positively triggered on the cache→bootstrap
-  // merge path: a fresh fetch that merged 2+ newer messages after
-  // cache-based initial landing was treated as a prepend, suppressing
-  // a legitimate "re-land at the now-true latest" scroll.
-  //
-  // The structural signal we actually want is: the FIRST message id
-  // changed AND length grew. That's true for Load Older (older items
-  // pushed onto the front, length up) and false for both bootstrap
-  // append-merge (first id unchanged) and admin-delete-of-oldest
-  // (first id changes but length shrinks).
+  // Detect "Load older" prepends so the generic scroll effect skips its
+  // own auto-scroll while the layout effect restores the pre-prepend
+  // scroll position. Structural signal: first message id changed AND
+  // length grew. Append-merge (cache→bootstrap) keeps first id
+  // unchanged; admin-delete-of-oldest shrinks length — neither qualifies.
   const prevLengthRef = useRef(0);
   const prevFirstIdRef = useRef<string | null>(null);
   const firstMessageId =
     state.kind === "ready" && state.messages.length > 0
       ? state.messages[0].id
       : null;
+
+  // Generic ongoing scroll effect — handles self-post + realtime-while-
+  // near-bottom ONLY. Defers entirely to the final-landing effect for
+  // the initial scroll.
   useEffect(() => {
     if (messageCount === 0) {
       prevLengthRef.current = 0;
@@ -2428,7 +2464,6 @@ function FeedList({
     prevFirstIdRef.current = firstMessageId;
 
     const wasPrepend =
-      !firstScrollRef.current &&
       prevFirstId !== null &&
       firstMessageId !== prevFirstId &&
       messageCount > prevLength;
@@ -2439,86 +2474,86 @@ function FeedList({
       return;
     }
 
-    // Hold the initial scroll until the unread bootstrap resolves —
-    // otherwise we'd race: render messages → no marker yet → "scroll to
-    // latest" → marker arrives → we'd want to have landed at first
-    // unread instead. firstScrollRef stays true so the next render
-    // (after unreadLoaded flips) picks the correct target.
-    if (firstScrollRef.current && !unreadLoaded) return;
+    // Defer to the dedicated final-landing effect while it's still
+    // pending. This prevents a "scroll to latest twice" glitch when
+    // bootstrap merges arrive and the user happens to already be
+    // near the bottom.
+    if (finalLandingPendingRef.current) return;
 
     const shouldScroll =
-      firstScrollRef.current ||
-      forceScrollRef.current ||
-      nearBottomRef.current;
+      forceScrollRef.current || nearBottomRef.current;
 
-    if (shouldScroll) {
-      // Initial open with unread → land at the FIRST unread message.
-      // Every other case (self-post, realtime-while-near-bottom, or
-      // initial open with everything already read) → land at LATEST.
-      const useFirstUnread =
-        firstScrollRef.current && firstUnreadMessageId !== null;
-      const targetId = useFirstUnread
-        ? firstUnreadMessageId
-        : latestMessageId;
-
-      if (targetId) {
-        // Manual scroll calculation. We used to call scrollIntoView, but
-        // on iPhone PWA the browser clamps scrollTop at scrollTop_max
-        // regardless of scroll-margin-bottom, so the target kept
-        // landing at the composer's edge. Compute the exact target:
-        //
-        //   target = window.scrollY
-        //          + targetRect.bottom                   // viewport y of target bottom
-        //          - composerRect.top                    // bring it up to composer top
-        //          + AUTO_SCROLL_COMFORT_PX              // push further up
-        //
-        // composerRect.top already encodes (nav height + composer height
-        // + env(safe-area-inset-bottom)) via getBoundingClientRect, so
-        // no rem guesses creep in. main's pb-[18rem+safe] gives the
-        // document enough scrollable range to actually reach this
-        // target — without that headroom, scrollTo would clamp the same
-        // way scrollIntoView did.
-        const messageEl = document.getElementById(
-          `juice-message-${targetId}`,
+    if (shouldScroll && latestMessageId) {
+      const messageEl = document.getElementById(
+        `juice-message-${latestMessageId}`,
+      );
+      const composer = document.getElementById("juice-composer-bar");
+      if (messageEl && composer) {
+        const messageBottom = messageEl.getBoundingClientRect().bottom;
+        const composerTop = composer.getBoundingClientRect().top;
+        const target = Math.max(
+          0,
+          window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
         );
-        const composer = document.getElementById("juice-composer-bar");
-        if (messageEl && composer) {
-          const messageBottom = messageEl.getBoundingClientRect().bottom;
-          const composerTop = composer.getBoundingClientRect().top;
-          const target = Math.max(
-            0,
-            window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
-          );
-          window.scrollTo({
-            top: target,
-            behavior: firstScrollRef.current ? "auto" : "smooth",
-          });
-        }
+        window.scrollTo({ top: target, behavior: "smooth" });
       }
-
-      // Mark-read only fires when we land at the LATEST content. Landing
-      // at the first unread means newer unreads are still hidden below /
-      // behind the composer — those should stay "unread" until the user
-      // scrolls down into them. The window scroll listener takes over
-      // from here: once they reach the near-bottom band, it fires
-      // onNearBottom and the unread count clears.
-      if (!useFirstUnread) {
-        onNearBottomRef.current();
-      }
+      onNearBottomRef.current();
     }
 
-    firstScrollRef.current = false;
     // Consume the one-shot self-post signal whether or not it fired the
     // scroll — once handled, future inbound messages go back to the
     // "near-bottom only" rule.
     forceScrollRef.current = false;
+  }, [messageCount, latestMessageId, firstMessageId, forceScrollRef]);
+
+  // ─── Final-landing effect ─────────────────────────────────────────────
+  // Fires AT MOST ONCE per mount. Waits for the bootstrap fetch to
+  // settle AND the unread bootstrap to resolve AND messages to be
+  // rendered, then picks the target:
+  //   * firstUnread if any unread exists,
+  //   * latest otherwise.
+  //
+  // Independent of nearBottomRef so the cache→bootstrap race is gone:
+  // the scroll fires based on data readiness alone, not on a stale
+  // scroll-listener reading.
+  useEffect(() => {
+    if (!finalLandingPendingRef.current) return;
+    if (!freshFeedLoaded) return;
+    if (!unreadLoaded) return;
+    if (messageCount === 0) return;
+
+    const targetId = firstUnreadMessageId ?? latestMessageId;
+    if (!targetId) return;
+
+    const messageEl = document.getElementById(`juice-message-${targetId}`);
+    const composer = document.getElementById("juice-composer-bar");
+    // DOM might not be painted on this exact render (rare). Don't
+    // consume the flag — the next dep change (or messageCount tick)
+    // will retry.
+    if (!messageEl || !composer) return;
+
+    const messageBottom = messageEl.getBoundingClientRect().bottom;
+    const composerTop = composer.getBoundingClientRect().top;
+    const target = Math.max(
+      0,
+      window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
+    );
+    window.scrollTo({ top: target, behavior: "auto" });
+
+    finalLandingPendingRef.current = false;
+
+    // Mark-read only on "land at latest." Landing at first unread
+    // leaves newer unreads hidden below the composer — those should
+    // stay unread until the user scrolls into them.
+    if (firstUnreadMessageId === null) {
+      onNearBottomRef.current();
+    }
   }, [
-    messageCount,
-    latestMessageId,
-    firstUnreadMessageId,
-    firstMessageId,
-    forceScrollRef,
+    freshFeedLoaded,
     unreadLoaded,
+    messageCount,
+    firstUnreadMessageId,
+    latestMessageId,
   ]);
 
   if (state.kind === "loading") {
