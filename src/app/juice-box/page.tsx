@@ -1622,27 +1622,34 @@ function FeedList({
       {/*
         Auto-scroll target. `scroll-margin-bottom` controls where this
         element lands inside the viewport when scrolled into view via
-        scrollIntoView({block:"end"}). We push the landing position up by
-        (nav 5rem) + (composer ~7rem) + (iOS safe area) + (~1.5rem
-        comfort) so the LATEST message's bottom edge sits cleanly above
-        the fixed bottom composer after every auto-scroll.
+        scrollIntoView({block:"end"}).
 
-        scroll-margin only affects programmatic scrolling, NOT user
+        The value is intentionally large — significantly more than just
+        (nav + composer + safe-area). The fixed bottom composer visually
+        overlays the feed, so landing the newest message merely at the
+        composer's top edge reads as "the message is tucked under the
+        composer." Instead we push the landing position up to roughly the
+        lower-middle of the visible feed:
+          nav (5rem) + composer (~7rem) + iOS safe area
+          + a generous ~9rem of resting headroom = 21rem + safe-area.
+
+        scroll-margin only affects PROGRAMMATIC scrolling, not user
         gestures — so manual scrolling can still send older messages
-        behind the composer, which is the desired "feed scrolls behind
-        composer" effect. The reserved 12rem + safe-area on the main
-        wrapper covers the manual scroll-to-end case.
+        behind the composer (the desired "feed scrolls behind composer"
+        effect). The reserved 12rem + safe-area on the main wrapper
+        covers the manual scroll-to-end case.
 
         Older messages can extend behind the composer during animated
         auto-scroll on long unread runs — we only guarantee the NEWEST
-        message lands above the composer, per the product rule.
+        message lands comfortably above the composer, per the product
+        rule.
       */}
       <div
         ref={bottomRef}
         aria-hidden="true"
         style={{
           scrollMarginBottom:
-            "calc(13.5rem + env(safe-area-inset-bottom))",
+            "calc(21rem + env(safe-area-inset-bottom))",
         }}
       />
     </section>
