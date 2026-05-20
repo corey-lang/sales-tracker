@@ -193,10 +193,19 @@ async function sendOne(
 
 /**
  * Sends `payload` as a Web Push notification to every Juice Box-
- * eligible salesperson's subscriptions except the sender's own. Safe
- * to fire-and-forget — internal errors are swallowed.
+ * eligible salesperson's subscriptions except the sender's own.
+ * Internal errors are swallowed — per-send failures don't bubble up.
  *
- * DIAGNOSTICS (Pass 6 troubleshooting)
+ * CALL CONVENTION — Vercel serverless
+ *   Callers MUST `await` this. Detached promises are killed when the
+ *   serverless function freezes after its response is flushed, which
+ *   on Vercel happens within milliseconds of the handler returning.
+ *   The diagnostic logs added in Pass 6 confirmed this: the
+ *   synchronous start line appeared but everything past the first
+ *   `await supabase…` was dropped. Awaiting keeps the function alive
+ *   through the full fan-out (~300–500 ms typical).
+ *
+ * DIAGNOSTICS (Pass 6)
  *   Every step emits a `[juice-box-push] …` log line on Vercel
  *   function logs so we can prove the send was attempted, what the
  *   push service responded, and how long the whole fan-out took.

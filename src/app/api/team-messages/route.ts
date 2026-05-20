@@ -513,14 +513,24 @@ export async function POST(req: Request) {
       reactions: [],
     };
 
-    // Fire-and-forget Web Push fan-out to every Juice Box-eligible
-    // subscription except the sender's own devices. The promise is
-    // intentionally NOT awaited — push sends each take ~100-300 ms and
-    // we want POST latency to stay snappy for the composer. Errors
-    // (5xx, network) are swallowed inside fanOutJuiceBoxPush; dead
-    // 404/410 subscriptions are GC'd from the DB inside as well.
-    // No-op when VAPID env is unset, so the route stays functional
-    // before push is configured.
+    // Web Push fan-out to every Juice Box-eligible subscription
+    // except the sender's own devices. Errors (5xx, network) are
+    // swallowed inside fanOutJuiceBoxPush; dead 404/410 subscriptions
+    // are GC'd from the DB inside as well. No-op when VAPID env is
+    // unset, so the route stays functional before push is configured.
+    //
+    // EXECUTION MODEL — Vercel serverless
+    //   This is `await`-ed, NOT fire-and-forget. On Vercel's Node.js
+    //   functions, the runtime freezes the V8 isolate as soon as the
+    //   response is flushed; any Promise that hadn't already completed
+    //   its first await gets killed mid-flight. Earlier diagnostics
+    //   proved this: the synchronous `fan-out start` log appeared but
+    //   everything after the first `await supabase…` never did.
+    //   Awaiting keeps the function alive until fan-out finishes.
+    //
+    //   Latency cost: typically +300–500 ms (parallel sends to ~10
+    //   subscriptions). Acceptable for a "Post" action; the composer
+    //   already shows a "Posting…" state during the request.
     //
     // Diagnostics: a kickoff line is logged here so the trace begins
     // immediately after the insert resolves; fanOutJuiceBoxPush
@@ -528,18 +538,24 @@ export async function POST(req: Request) {
     console.log(
       `[team-messages] firing push fan-out sender=${me.id} message_id=${(res.data as { id: string }).id}`,
     );
-    void fanOutJuiceBoxPush({
-      excludeSalespersonId: me.id,
-      payload: {
-        title: "Elevate AE",
-        body: "New Juice Box post 🍊",
-        url: "/juice-box",
-      },
-    }).catch((err: unknown) => {
+    try {
+      await fanOutJuiceBoxPush({
+        excludeSalespersonId: me.id,
+        payload: {
+          title: "Elevate AE",
+          body: "New Juice Box post 🍊",
+          url: "/juice-box",
+        },
+      });
+    } catch (err: unknown) {
+      // fanOutJuiceBoxPush swallows per-send failures internally; an
+      // exception here is unexpected (DB pool issue, etc.). Log and
+      // proceed — the post itself is already saved, and starving
+      // notifications shouldn't fail the user's POST.
       console.error(
-        `[team-messages] fan-out unhandled-rejection sender=${me.id} err=${String(err)}`,
+        `[team-messages] fan-out error sender=${me.id} err=${String(err)}`,
       );
-    });
+    }
 
     return Response.json({ message }, { status: 201 });
   } catch (err) {
