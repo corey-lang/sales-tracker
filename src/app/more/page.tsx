@@ -7,9 +7,14 @@ import { LogOut, ShieldCheck } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
-import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
+import {
+  BottomNav,
+  BOTTOM_NAV_SPACER,
+  canSeeJuiceBox,
+} from "@/components/bottom-nav";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { NotificationOptIn } from "@/components/notification-opt-in";
 
 // "More" tab — a minimal account/links page so the bottom nav has a sensible
 // fourth destination. Intentionally lightweight: profile summary, an Admin
@@ -65,6 +70,23 @@ export default function MorePage() {
             </p>
           </CardContent>
         </Card>
+
+        {/* Notifications opt-in. Only rendered for Juice Box-eligible
+            users so a regular AE doesn't see a setting they can't act
+            on yet. The matching server gate is in
+            /api/juice-box/push/subscribe (requireJuiceBoxAccess), so a
+            crafted POST from a non-eligible session would 403 even if
+            the card somehow rendered. */}
+        {canSeeJuiceBox(salesperson) && (
+          <Card>
+            <CardContent className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                Notifications
+              </p>
+              <NotificationOptIn />
+            </CardContent>
+          </Card>
+        )}
 
         <div className="flex flex-col gap-2">
           {salesperson.is_admin && (

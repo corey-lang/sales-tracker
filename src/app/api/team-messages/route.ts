@@ -4,6 +4,7 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
 import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
 import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
+import { fanOutJuiceBoxPush } from "@/lib/server/push";
 import {
   FEED_PAGE_SIZE,
   MESSAGE_MAX_LENGTH,
@@ -511,6 +512,23 @@ export async function POST(req: Request) {
       ...(res.data as TeamMessage),
       reactions: [],
     };
+
+    // Fire-and-forget Web Push fan-out to every Juice Box-eligible
+    // subscription except the sender's own devices. The promise is
+    // intentionally NOT awaited — push sends each take ~100-300 ms and
+    // we want POST latency to stay snappy for the composer. Errors
+    // (5xx, network) are swallowed inside fanOutJuiceBoxPush; dead
+    // 404/410 subscriptions are GC'd from the DB inside as well.
+    // No-op when VAPID env is unset, so the route stays functional
+    // before push is configured.
+    void fanOutJuiceBoxPush({
+      excludeSalespersonId: me.id,
+      payload: {
+        title: "Elevate AE",
+        body: "New Juice Box post 🍊",
+        url: "/juice-box",
+      },
+    }).catch(() => undefined);
 
     return Response.json({ message }, { status: 201 });
   } catch (err) {
