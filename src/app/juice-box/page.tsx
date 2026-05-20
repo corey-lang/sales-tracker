@@ -31,6 +31,16 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
+// "New messages" divider grace timing. After mark-read clears the unread
+// count, the divider stays put for DIVIDER_GRACE_MS so the user has a
+// moment to orient to what was new, then fades out over the last
+// DIVIDER_FADE_DURATION_MS before unmounting. The unread badge and
+// server-side last_read_at are NOT delayed by these — only the divider's
+// in-feed visual is held back. Tuned to 6 s total, with the last 1 s as
+// a CSS opacity fade.
+const DIVIDER_GRACE_MS = 6000;
+const DIVIDER_FADE_DURATION_MS = 1000;
+
 // Trailing-edge debounce. Returned trigger schedules `fn` to fire `delay`
 // ms after the most recent call; rapid re-invocations only fire once at
 // the end. Used to coalesce mark-read pings as messages stream in.
@@ -463,18 +473,63 @@ function FeedList({
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
 
-  // The index of the first message whose created_at is strictly after the
-  // user's live last_read_at — where the "New messages" divider renders.
-  // -1 = no divider. Recomputed every time lastReadAt moves, so a
-  // successful markAllRead (which advances lastReadAt to NOW()) hides the
-  // divider in the same render — no stale anchor, no refresh required.
+  // Divider grace state.
+  //   dividerAnchor lags `lastReadAt` so the "New messages" marker stays
+  //   visible for DIVIDER_GRACE_MS after the user catches up. The unread
+  //   badge and server marker are unaffected — only the in-feed divider
+  //   takes its position from this lagging value.
+  //
+  //   undefined = not yet synced (first paint, divider hidden)
+  //   null      = never read (every message is "new")
+  //   string    = anchor ISO timestamp
+  const [dividerAnchor, setDividerAnchor] = useState<
+    string | null | undefined
+  >(undefined);
+  // Toggled true for the last DIVIDER_FADE_DURATION_MS of the grace window
+  // so the divider opacity-transitions to 0 before being unmounted.
+  const [dividerFading, setDividerFading] = useState(false);
+
+  useEffect(() => {
+    if (!unreadLoaded) return;
+    // No-op when the lagging anchor is already in sync with the live value.
+    if (dividerAnchor === lastReadAt) return;
+
+    if (dividerAnchor === undefined) {
+      // First sync after the unread bootstrap resolves — adopt the live
+      // marker immediately so we don't briefly flash a divider in the
+      // wrong place. Single setState, no cascade.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDividerAnchor(lastReadAt);
+      return;
+    }
+
+    // lastReadAt moved forward (mark-read happened). Hold the existing
+    // anchor for the grace window, fade for the final second, then
+    // catch up so the divider unmounts cleanly.
+    const fadeStart = setTimeout(
+      () => setDividerFading(true),
+      DIVIDER_GRACE_MS - DIVIDER_FADE_DURATION_MS,
+    );
+    const advance = setTimeout(() => {
+      setDividerAnchor(lastReadAt);
+      setDividerFading(false);
+    }, DIVIDER_GRACE_MS);
+    return () => {
+      clearTimeout(fadeStart);
+      clearTimeout(advance);
+    };
+  }, [lastReadAt, dividerAnchor, unreadLoaded]);
+
+  // Position the divider against the lagging anchor — not the live
+  // lastReadAt — so a successful markAllRead doesn't snap it away.
+  // -1 = no divider (anchor not yet synced, or every message is read).
   const dividerIndex = useMemo(() => {
     if (state.kind !== "ready") return -1;
     if (state.messages.length === 0) return -1;
-    if (!unreadLoaded) return -1;
-    if (lastReadAt === null) return 0;
-    return state.messages.findIndex((m) => m.created_at > lastReadAt);
-  }, [state, unreadLoaded, lastReadAt]);
+    if (dividerAnchor === undefined) return -1;
+    if (dividerAnchor === null) return 0;
+    return state.messages.findIndex((m) => m.created_at > dividerAnchor);
+  }, [state, dividerAnchor]);
 
   // Keep `onNearBottom` reachable from the scroll listener (which is set up
   // once on mount) without restarting the listener every time the upstream
@@ -575,7 +630,9 @@ function FeedList({
           const isFresh = initialIds !== null && !initialIds.has(m.id);
           return (
             <Fragment key={m.id}>
-              {i === dividerIndex && <NewMessagesDivider />}
+              {i === dividerIndex && (
+                <NewMessagesDivider fading={dividerFading} />
+              )}
               <FeedCard
                 message={m}
                 isMine={m.salesperson_id === currentUserId}
@@ -784,12 +841,23 @@ function FeedCardMenu({
  * "New messages" separator slotted in between the last read post and the
  * first unread one. Visually a thin orange hairline + a small pill label —
  * tasteful enough to read as a marker, not a banner.
+ *
+ * `fading` toggles a CSS opacity transition just before the divider is
+ * unmounted by FeedList's grace timer. The component itself stays in the
+ * DOM during the transition so the fade has a starting frame to animate
+ * from — FeedList drops it from the tree the moment the timer expires.
  */
-function NewMessagesDivider() {
+function NewMessagesDivider({ fading }: { fading: boolean }) {
   return (
     <div
       aria-label="New messages below"
-      className="flex items-center gap-2 px-0.5 py-0.5"
+      className={cn(
+        "flex items-center gap-2 px-0.5 py-0.5 ease-out",
+        // Duration must match DIVIDER_FADE_DURATION_MS so the visual fade
+        // finishes right as the parent's advance timer unmounts the node.
+        "transition-opacity duration-1000",
+        fading ? "opacity-0" : "opacity-100",
+      )}
     >
       <span className="h-px flex-1 bg-primary/30" />
       <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary ring-1 ring-primary/20">
