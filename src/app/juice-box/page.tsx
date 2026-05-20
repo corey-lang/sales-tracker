@@ -14,7 +14,6 @@ import { MoreVertical, Send, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
-import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { cn } from "@/lib/utils";
 import {
   BottomNav,
@@ -52,7 +51,9 @@ import { Button } from "@/components/ui/button";
 export default function JuiceBoxPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
-  useScrollToTop();
+  // useScrollToTop is intentionally NOT called here. The feed's own scroll
+  // effect lands the viewport on the most recent post once initial data
+  // resolves — see FeedList. Calling useScrollToTop would race with that.
 
   // Two gates, one effect: not signed in -> /, ineligible -> /dashboard.
   useEffect(() => {
@@ -136,6 +137,14 @@ function JuiceBoxFeed({
   // React batches it with the `state` setState in the same tick.
   const [initialIds, setInitialIds] = useState<Set<string> | null>(null);
 
+  // One-shot signal flipped on by handleSelfPosted and consumed by the
+  // FeedList scroll effect. When the local user pressed Post (vs. a
+  // teammate's realtime INSERT), we always scroll to the bottom even if
+  // they were reading older posts — they expect to see what they wrote.
+  // Other inbound messages honor the "only stick to bottom if already
+  // near bottom" rule.
+  const forceScrollRef = useRef(false);
+
   // Merges an incoming message into the visible feed. Used by both the
   // optimistic post path and the realtime INSERT handler — id-dedup keeps
   // the two from doubling up.
@@ -161,6 +170,14 @@ function JuiceBoxFeed({
       return { kind: "ready", messages: next };
     });
   }, []);
+
+  const handleSelfPosted = useCallback(
+    (m: TeamMessage) => {
+      forceScrollRef.current = true;
+      upsertMessage(m);
+    },
+    [upsertMessage],
+  );
 
   const removeMessage = useCallback((id: string) => {
     setState((prev) => {
@@ -241,13 +258,27 @@ function JuiceBoxFeed({
 
   return (
     <>
-      <Composer onPosted={upsertMessage} />
+      {/*
+        Sticky composer. -mx-4 px-4 lets the translucent backdrop bleed to
+        main's horizontal edges while the inner Card stays in the padded
+        column. top-0 + a 30 z-index keeps it above scrolling feed content
+        (incl. the open 3-dot menu at z-20) and below the bottom nav (z-40).
+        env(safe-area-inset-top) keeps it clear of the notch when the app
+        is installed as a PWA.
+      */}
+      <div
+        className="sticky top-0 z-30 -mx-4 bg-background/85 px-4 pb-2 backdrop-blur supports-[backdrop-filter]:bg-background/70"
+        style={{ paddingTop: "calc(0.5rem + env(safe-area-inset-top))" }}
+      >
+        <Composer onPosted={handleSelfPosted} />
+      </div>
       <FeedList
         state={state}
         currentUserId={currentUserId}
         isAdmin={isAdmin}
         onDeleted={removeMessage}
         initialIds={initialIds}
+        forceScrollRef={forceScrollRef}
       />
     </>
   );
@@ -354,28 +385,66 @@ function FeedList({
   isAdmin,
   onDeleted,
   initialIds,
+  forceScrollRef,
 }: {
   state: FeedState;
   currentUserId: string;
   isAdmin: boolean;
   onDeleted: (id: string) => void;
   initialIds: Set<string> | null;
+  forceScrollRef: React.RefObject<boolean>;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
 
-  // Keep the feed pinned to the bottom as new posts arrive. Smooth on
-  // realtime updates, instant on initial load.
+  // Scroll-position discipline:
+  //   * On the very first arrival of messages, snap to the bottom (latest
+  //     post) so the page lands where chat-style feeds always land.
+  //   * For each subsequent message, only auto-scroll if either
+  //       (a) the user just hit Post themselves (forceScrollRef), or
+  //       (b) they are currently within NEAR_BOTTOM_PX of the bottom.
+  //     Otherwise — they have scrolled up to read older posts — leave them
+  //     alone. No yanking the viewport while they're reading.
+  const NEAR_BOTTOM_PX = 200;
   const firstScrollRef = useRef(true);
+  const nearBottomRef = useRef(true);
+
+  useEffect(() => {
+    const update = () => {
+      const doc = document.documentElement;
+      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
+      nearBottomRef.current = remaining < NEAR_BOTTOM_PX;
+    };
+    // Seed once in case the user never scrolls; passive listener avoids
+    // blocking the scroll thread.
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+
   useEffect(() => {
     if (messageCount === 0) return;
-    bottomRef.current?.scrollIntoView({
-      behavior: firstScrollRef.current ? "auto" : "smooth",
-      block: "end",
-    });
+    const shouldScroll =
+      firstScrollRef.current ||
+      forceScrollRef.current ||
+      nearBottomRef.current;
+    if (shouldScroll) {
+      bottomRef.current?.scrollIntoView({
+        behavior: firstScrollRef.current ? "auto" : "smooth",
+        block: "end",
+      });
+    }
     firstScrollRef.current = false;
-  }, [messageCount]);
+    // Consume the one-shot self-post signal whether or not it fired the
+    // scroll — once handled, future inbound messages go back to the
+    // "near-bottom only" rule.
+    forceScrollRef.current = false;
+  }, [messageCount, forceScrollRef]);
 
   if (state.kind === "loading") {
     return (
@@ -418,6 +487,13 @@ function FeedList({
           );
         })
       )}
+      {/*
+        Comfort gap above the bottom-nav clearance (BOTTOM_NAV_SPACER on main
+        already reserves space for the nav + iOS safe area). This extra slice
+        keeps the most recent post visually clear of the nav even on shorter
+        viewports and after a quick smooth-scroll.
+      */}
+      <div aria-hidden="true" className="h-4" />
       <div ref={bottomRef} aria-hidden="true" />
     </section>
   );
