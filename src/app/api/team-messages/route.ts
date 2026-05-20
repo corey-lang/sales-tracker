@@ -4,7 +4,7 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
 import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
 import {
-  FEED_LIMIT,
+  FEED_PAGE_SIZE,
   MESSAGE_MAX_LENGTH,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_TABLE,
@@ -12,12 +12,23 @@ import {
   type TeamMessage,
   type TeamMessageReaction,
   type TeamMessageReactionRow,
+  type TeamMessageReactor,
 } from "@/lib/team-messages";
 
 // Juice Box live team feed — list + create.
-//   GET  /api/team-messages   -> { messages: (TeamMessage & { reactions })[] }
-//                                oldest -> newest
-//   POST /api/team-messages   -> { message: TeamMessage & { reactions: [] } }
+//   GET  /api/team-messages[?before=ISO&limit=N]
+//                              -> { messages: …[], hasMore: boolean }
+//                                 oldest -> newest within the page
+//   POST /api/team-messages    -> { message: TeamMessage & { reactions: [] } }
+//
+// PAGINATION
+//   The feed is paginated backwards. The initial load fetches the most
+//   recent FEED_PAGE_SIZE messages. The client supplies `?before=<ISO>`
+//   (the created_at of the oldest currently-loaded message) on subsequent
+//   "Load older" calls; the route returns up to `limit` messages older
+//   than that timestamp. `hasMore` is true when the page returned exactly
+//   `limit` rows — a heuristic that resolves to false on the empty page
+//   the next click produces.
 //
 // ACCESS
 //   Both verbs require the caller to be an admin OR the test account
@@ -32,6 +43,12 @@ import {
 //   reply_to_salesperson_name and reply_to_message_preview are derived
 //   server-side from the parent row — clients send only reply_to_message_id.
 //   That way a teammate can't spoof "in reply to X" with arbitrary text.
+//
+// REACTION REACTORS (Pass 4 polish)
+//   Each aggregated reaction now ships with the list of reactor names so
+//   the "who reacted" detail popover can render without a second
+//   round-trip per chip. Names are denormalized on team_message_reactions
+//   at insert time, so this is just an extra column in the SELECT below.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,19 +71,27 @@ export type TeamMessageWithReactions = TeamMessage & {
 };
 
 /**
- * Aggregates raw reaction rows into the per-message UI shape. Counts are
- * grouped by emoji; `reacted` is true if the caller has a row in that
- * (message, emoji) bucket. Emoji order within each message follows the
- * order the user first encounters in the data — UI sorts deterministically.
+ * Aggregates raw reaction rows into the per-message UI shape. Reactors are
+ * grouped by message → emoji → name list. `reacted` is true if the caller
+ * has a row in that (message, emoji) bucket. The route returns reactors
+ * sorted by created_at (the SELECT below applies that order) so the chip-
+ * detail popover lists names in the order people reacted.
  */
 function aggregateReactions(
-  rows: TeamMessageReactionRow[],
+  rows: (TeamMessageReactionRow & { created_at?: string })[],
   callerId: string,
 ): Map<string, TeamMessageReaction[]> {
-  // messageId -> emoji -> { count, reacted }
+  // messageId -> emoji -> { count, reacted, reactors }
   const grouped = new Map<
     string,
-    Map<string, { count: number; reacted: boolean }>
+    Map<
+      string,
+      {
+        count: number;
+        reacted: boolean;
+        reactors: TeamMessageReactor[];
+      }
+    >
   >();
 
   for (const row of rows) {
@@ -75,14 +100,20 @@ function aggregateReactions(
       perMessage = new Map();
       grouped.set(row.message_id, perMessage);
     }
+    const reactor: TeamMessageReactor = {
+      salesperson_id: row.salesperson_id,
+      salesperson_name: row.salesperson_name,
+    };
     const existing = perMessage.get(row.emoji);
     if (existing) {
       existing.count += 1;
+      existing.reactors.push(reactor);
       if (row.salesperson_id === callerId) existing.reacted = true;
     } else {
       perMessage.set(row.emoji, {
         count: 1,
         reacted: row.salesperson_id === callerId,
+        reactors: [reactor],
       });
     }
   }
@@ -91,9 +122,14 @@ function aggregateReactions(
   for (const [messageId, perMessage] of grouped) {
     const arr: TeamMessageReaction[] = [];
     for (const [emoji, agg] of perMessage) {
-      arr.push({ emoji, count: agg.count, reacted: agg.reacted });
+      arr.push({
+        emoji,
+        count: agg.count,
+        reacted: agg.reacted,
+        reactors: agg.reactors,
+      });
     }
-    // Sort by count desc, then emoji asc for stable, predictable ordering.
+    // Stable chip ordering: count desc, emoji asc.
     arr.sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
     result.set(messageId, arr);
   }
@@ -105,30 +141,52 @@ export async function GET(req: Request) {
     const me = await requireJuiceBoxAccess(req);
     const supabase = getServerSupabase();
 
-    // Fetch the most recent FEED_LIMIT live (non-deleted) messages with DESC
-    // order so the cap reliably keeps the newest window, then reverse before
-    // returning so the client renders oldest -> newest (chat/feed style).
-    const res = await supabase
+    // Pagination — accept `?before=<ISO>&limit=N`. Both optional; the
+    // initial page omits `before` and the route returns the most recent
+    // FEED_PAGE_SIZE messages. `limit` is clamped to [1, 100] to keep a
+    // single page bounded.
+    const url = new URL(req.url);
+    const beforeStr = url.searchParams.get("before");
+    const limitStr = url.searchParams.get("limit");
+
+    const parsedLimit = limitStr ? Number.parseInt(limitStr, 10) : NaN;
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.max(1, Math.min(100, parsedLimit))
+      : FEED_PAGE_SIZE;
+
+    if (beforeStr && Number.isNaN(Date.parse(beforeStr))) {
+      throw badRequest("Invalid 'before' query parameter.");
+    }
+
+    let query = supabase
       .from(TEAM_MESSAGES_TABLE)
       .select(MESSAGE_COLUMNS)
       .eq("is_deleted", false)
       .order("created_at", { ascending: false })
-      .limit(FEED_LIMIT);
+      .limit(limit);
 
+    if (beforeStr) {
+      query = query.lt("created_at", beforeStr);
+    }
+
+    const res = await query;
     if (res.error) {
       throw new Error(`Failed to load messages: ${res.error.message}`);
     }
 
     const messages = ((res.data ?? []) as TeamMessage[]).slice().reverse();
 
-    // Hydrate reactions for the loaded window in one round-trip.
+    // Hydrate reactions for this page in one round-trip. Order by
+    // created_at ASC so the aggregate's reactor list reads chronologically
+    // — first to react appears first.
     let reactionsByMessage: Map<string, TeamMessageReaction[]> = new Map();
     if (messages.length > 0) {
       const ids = messages.map((m) => m.id);
       const reactionsRes = await supabase
         .from(TEAM_MESSAGE_REACTIONS_TABLE)
-        .select("message_id, salesperson_id, emoji")
-        .in("message_id", ids);
+        .select("message_id, salesperson_id, salesperson_name, emoji, created_at")
+        .in("message_id", ids)
+        .order("created_at", { ascending: true });
 
       if (reactionsRes.error) {
         throw new Error(
@@ -137,7 +195,9 @@ export async function GET(req: Request) {
       }
 
       reactionsByMessage = aggregateReactions(
-        (reactionsRes.data ?? []) as TeamMessageReactionRow[],
+        (reactionsRes.data ?? []) as (TeamMessageReactionRow & {
+          created_at: string;
+        })[],
         me.id,
       );
     }
@@ -147,7 +207,13 @@ export async function GET(req: Request) {
       reactions: reactionsByMessage.get(m.id) ?? [],
     }));
 
-    return Response.json({ messages: hydrated });
+    return Response.json({
+      messages: hydrated,
+      // Heuristic — when a full page came back, assume there's another
+      // older page behind it. The next call returns either more rows or
+      // nothing, which is when the client flips hasMore false.
+      hasMore: hydrated.length === limit,
+    });
   } catch (err) {
     return handleApiError(err);
   }

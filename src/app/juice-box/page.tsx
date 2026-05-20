@@ -4,6 +4,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -23,14 +24,11 @@ import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { cn } from "@/lib/utils";
-import {
-  BottomNav,
-  BOTTOM_NAV_SPACER,
-  canSeeJuiceBox,
-} from "@/components/bottom-nav";
+import { BottomNav, canSeeJuiceBox } from "@/components/bottom-nav";
 import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 import {
   ALLOWED_REACTIONS,
+  FEED_PAGE_SIZE,
   MESSAGE_MAX_LENGTH,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_CHANNEL,
@@ -41,6 +39,7 @@ import {
   type TeamMessage,
   type TeamMessageReaction,
   type TeamMessageReactionRow,
+  type TeamMessageReactor,
 } from "@/lib/team-messages";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -52,21 +51,22 @@ import { Button } from "@/components/ui/button";
 const LONG_PRESS_MS = 500;
 
 /**
- * Reactions state — one entry per (message, emoji). `reactors` is the set
- * of salesperson_ids we've observed reacting (used for idempotency against
- * the realtime echo of the user's own optimistic toggle). `count` and
- * `reacted` are what the UI actually renders.
+ * Reactions state — one entry per (message, emoji). `reactors` is a map
+ * from salesperson_id to salesperson_name for everyone we've observed
+ * reacting; the keys also drive idempotency for the realtime echo of the
+ * user's own optimistic toggle. `count` and `reacted` are what the chip
+ * row renders; the values of `reactors` feed the chip-detail popover.
  *
- * The initial bootstrap aggregate (from GET /api/team-messages) only tells
- * us "the current user reacted" — not the ids of other reactors — so
- * `reactors` is seeded with just the current user when reacted=true.
- * Realtime DELETE events for previously-anonymous reactors fall through
- * to a `count--` fallback in `applyRemove`.
+ * The initial bootstrap aggregate ships reactor names alongside counts,
+ * so unlike the prior set-of-ids design we know every reactor's name from
+ * the first paint. Realtime INSERT/UPDATE/DELETE events carry the full
+ * row (including salesperson_name) thanks to REPLICA IDENTITY FULL, so
+ * the map stays current as reactions stream in.
  */
 type ReactionEntry = {
   count: number;
   reacted: boolean;
-  reactors: Set<string>;
+  reactors: Map<string, string>;
 };
 type ReactionsByEmoji = Map<string, ReactionEntry>;
 type ReactionsState = Map<string, ReactionsByEmoji>;
@@ -126,24 +126,25 @@ function cloneReactionsAtMessage(
 }
 
 /**
- * Records that `userId` reacted with `emoji` to message `messageId`. Idempotent
- * against duplicate dispatch — if `userId` is already in the entry's reactors
- * set, no change. This is what dedupes the realtime echo of the user's own
- * optimistic toggle: the optimistic apply adds the current user; the echoed
- * INSERT hits the same path and short-circuits.
+ * Records that `userId` (`userName`) reacted with `emoji` to message
+ * `messageId`. Idempotent — if the user is already in the entry's
+ * reactors map, no change. This dedupes the realtime echo of the user's
+ * own optimistic toggle: the optimistic apply adds the current user; the
+ * echoed INSERT hits the same path and short-circuits.
  */
 function applyReactionAdd(
   prev: ReactionsState,
   messageId: string,
   emoji: string,
   userId: string,
+  userName: string,
   currentUserId: string,
 ): ReactionsState {
   const { next, perMsg } = cloneReactionsAtMessage(prev, messageId);
   const existing = perMsg.get(emoji);
   if (existing && existing.reactors.has(userId)) return prev;
-  const reactors = new Set(existing?.reactors ?? []);
-  reactors.add(userId);
+  const reactors = new Map(existing?.reactors ?? []);
+  reactors.set(userId, userName);
   perMsg.set(emoji, {
     count: (existing?.count ?? 0) + 1,
     reacted:
@@ -155,13 +156,12 @@ function applyReactionAdd(
 
 /**
  * Removes a reaction by `userId` on `messageId`/`emoji`. Two cases:
- *   1. `userId` is in the entry's reactors set (we've seen them react) —
- *      remove them and decrement count.
- *   2. `userId` is NOT in the set (a pre-bootstrap "anonymous" reactor that
- *      was only counted in aggregate) — trust the realtime event and just
- *      decrement count. The exception is the CURRENT user: if we don't have
- *      them in the set, it means our optimistic remove already ran, and the
- *      realtime echo is idempotent.
+ *   1. `userId` is in the entry's reactors map — remove them and
+ *      decrement count.
+ *   2. `userId` is NOT in the map. If it's the CURRENT user, the
+ *      optimistic remove already ran and the realtime echo is a no-op.
+ *      Otherwise trust the event and decrement count anyway (defensive
+ *      against stale state during a reconnect).
  */
 function applyReactionRemove(
   prev: ReactionsState,
@@ -174,7 +174,7 @@ function applyReactionRemove(
   if (!existing) return prev;
 
   const { next, perMsg } = cloneReactionsAtMessage(prev, messageId);
-  const reactors = new Set(existing.reactors);
+  const reactors = new Map(existing.reactors);
 
   if (reactors.has(userId)) {
     reactors.delete(userId);
@@ -192,11 +192,13 @@ function applyReactionRemove(
     return next;
   }
 
-  // Not in our reactors set. If it's the current user, the optimistic
-  // remove already applied — the realtime echo is a no-op.
+  // Not in our reactors map. Current user → echo already applied.
   if (userId === currentUserId) return prev;
 
-  // Pre-bootstrap anonymous reactor — trust the event, decrement count.
+  // Defensive fallback for any other user who isn't in our map — decrement
+  // count anyway. With name-bearing aggregates we shouldn't hit this in
+  // practice, but it keeps the count truthful if a realtime event arrives
+  // before bootstrap or for a row we somehow missed.
   const count = Math.max(0, existing.count - 1);
   if (count === 0) {
     perMsg.delete(emoji);
@@ -212,23 +214,22 @@ function applyReactionRemove(
 }
 
 /**
- * Builds the initial reactions state from a server-side aggregate. We don't
- * have other reactors' ids in the aggregate (privacy isn't the concern; the
- * payload just doesn't ship that detail) — `reactors` holds only the current
- * user when reacted=true. `applyReactionRemove`'s pre-bootstrap fallback
- * keeps the count truthful when other users later un-react.
+ * Builds the initial reactions state from a server-side aggregate. The
+ * aggregate now ships every reactor's name (denormalized on the join
+ * row), so the in-memory map matches the server one-to-one.
  */
 function buildInitialReactions(
   aggregates: Map<string, TeamMessageReaction[]>,
-  currentUserId: string,
 ): ReactionsState {
   const root: ReactionsState = new Map();
   for (const [messageId, items] of aggregates) {
     if (items.length === 0) continue;
     const perMsg: ReactionsByEmoji = new Map();
     for (const r of items) {
-      const reactors = new Set<string>();
-      if (r.reacted) reactors.add(currentUserId);
+      const reactors = new Map<string, string>();
+      for (const rt of r.reactors) {
+        reactors.set(rt.salesperson_id, rt.salesperson_name);
+      }
       perMsg.set(r.emoji, { count: r.count, reacted: r.reacted, reactors });
     }
     root.set(messageId, perMsg);
@@ -237,10 +238,38 @@ function buildInitialReactions(
 }
 
 /**
+ * Merges newly-fetched aggregates into existing state without overwriting
+ * messages we already track. Used by the "Load older posts" path — older
+ * messages are strictly disjoint from what we have, so this is just a
+ * per-key insert.
+ */
+function mergeReactions(
+  prev: ReactionsState,
+  aggregates: Map<string, TeamMessageReaction[]>,
+): ReactionsState {
+  if (aggregates.size === 0) return prev;
+  const next = new Map(prev);
+  for (const [messageId, items] of aggregates) {
+    if (next.has(messageId)) continue;
+    if (items.length === 0) continue;
+    const perMsg: ReactionsByEmoji = new Map();
+    for (const r of items) {
+      const reactors = new Map<string, string>();
+      for (const rt of r.reactors) {
+        reactors.set(rt.salesperson_id, rt.salesperson_name);
+      }
+      perMsg.set(r.emoji, { count: r.count, reacted: r.reacted, reactors });
+    }
+    next.set(messageId, perMsg);
+  }
+  return next;
+}
+
+/**
  * Renders the reactions Map for a single message into the sorted array the
- * UI expects: count desc, emoji asc as the stable tiebreaker. Returns the
- * empty array when the message has no reactions so consumers can render
- * without a guard.
+ * UI expects: count desc, emoji asc as the stable tiebreaker. Each
+ * aggregate ships the full reactor list so the chip-detail popover can
+ * read names without consulting the store again.
  */
 function renderReactions(
   perMsg: ReactionsByEmoji | undefined,
@@ -249,7 +278,16 @@ function renderReactions(
   const arr: TeamMessageReaction[] = [];
   for (const [emoji, entry] of perMsg) {
     if (entry.count <= 0) continue;
-    arr.push({ emoji, count: entry.count, reacted: entry.reacted });
+    const reactors: TeamMessageReactor[] = [];
+    for (const [salesperson_id, salesperson_name] of entry.reactors) {
+      reactors.push({ salesperson_id, salesperson_name });
+    }
+    arr.push({
+      emoji,
+      count: entry.count,
+      reacted: entry.reacted,
+      reactors,
+    });
   }
   arr.sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
   return arr;
@@ -283,7 +321,10 @@ function getCurrentUserEmoji(
  *   from=X,    to=Y      -> switch in place
  *   from=to              -> no-op
  * Composes `applyReactionRemove` + `applyReactionAdd`, which each remain
- * idempotent against realtime echoes via the reactors-Set membership check.
+ * idempotent against realtime echoes via the reactors-Map key check.
+ *
+ * `userName` is only needed for the add side. For pure removes (toEmoji
+ * null) callers may pass an empty string; we never read it.
  */
 function applyReactionTransition(
   state: ReactionsState,
@@ -291,6 +332,7 @@ function applyReactionTransition(
   fromEmoji: string | null,
   toEmoji: string | null,
   userId: string,
+  userName: string,
   currentUserId: string,
 ): ReactionsState {
   if (fromEmoji === toEmoji) return state;
@@ -310,6 +352,7 @@ function applyReactionTransition(
       messageId,
       toEmoji,
       userId,
+      userName,
       currentUserId,
     );
   }
@@ -320,7 +363,7 @@ function applyReactionTransition(
  * Smooth-scrolls to a message DOM node by id and applies a short highlight
  * pulse via `data-juice-highlight`. The CSS for the pulse lives in
  * globals.css (or is handled inline below). No-op if the message isn't in
- * the loaded window — it may be older than FEED_LIMIT.
+ * the loaded window — it may be older than the loaded pages.
  */
 function scrollToMessage(messageId: string) {
   const el = document.getElementById(`juice-message-${messageId}`);
@@ -379,13 +422,19 @@ export default function JuiceBoxPage() {
   return (
     <>
       <main
-        className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}
+        // This page has TWO pieces of fixed bottom chrome — the BottomNav
+        // and the new fixed Composer below it — so the shared
+        // BOTTOM_NAV_SPACER (~5rem + safe area) isn't enough. Reserve
+        // ~12rem to clear nav (5rem) + composer (~7rem) and keep the last
+        // message visible above the composer when the user scrolls all
+        // the way down.
+        className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(12rem+env(safe-area-inset-bottom))]"
       >
-        <header className="space-y-1 pt-1">
+        <header className="space-y-0.5 pt-1 text-center">
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
             Juice Box 🍊
           </h1>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-center gap-2">
             <p className="text-sm text-muted-foreground">Live team feed</p>
             <LiveBadge />
           </div>
@@ -393,6 +442,7 @@ export default function JuiceBoxPage() {
 
         <JuiceBoxFeed
           currentUserId={salesperson.id}
+          currentUserName={salesperson.first_name}
           isAdmin={salesperson.is_admin}
         />
       </main>
@@ -425,9 +475,14 @@ type FeedState =
 
 function JuiceBoxFeed({
   currentUserId,
+  currentUserName,
   isAdmin,
 }: {
   currentUserId: string;
+  /** The current user's first_name. Passed through to optimistic reaction
+   *  applies so the local reactors map carries the right display name
+   *  before the realtime echo arrives. */
+  currentUserName: string;
   isAdmin: boolean;
 }) {
   const [state, setState] = useState<FeedState>({ kind: "loading" });
@@ -524,13 +579,53 @@ function JuiceBoxFeed({
   const [replyTo, setReplyTo] = useState<TeamMessage | null>(null);
   const clearReply = useCallback(() => setReplyTo(null), []);
 
-  // Initial fetch.
+  // Reaction detail popover state — keyed by (messageId, emoji). Tapping
+  // an existing chip opens a small sheet listing the reactor names; null
+  // when no chip detail is open.
+  const [reactionDetails, setReactionDetails] = useState<
+    { messageId: string; emoji: string } | null
+  >(null);
+  const closeReactionDetails = useCallback(
+    () => setReactionDetails(null),
+    [],
+  );
+
+  // Pagination state. `hasMore` defaults to true so the "Load older" button
+  // is available until the first server response tells us otherwise (or
+  // the page returns fewer than the requested limit). `loadingMore`
+  // disables the button while the fetch is in flight.
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // Scroll-anchor restoration for "Load older". When the user prepends
+  // older posts, we want their CURRENT top message to stay at the same
+  // viewport y-coordinate so the page doesn't yank under them. The ref
+  // captures `{ anchorId, anchorTopBefore }` before the prepend; a
+  // useLayoutEffect compares the post-prepend position and corrects.
+  const restoreAnchorRef = useRef<{
+    anchorId: string;
+    anchorTopBefore: number;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const pending = restoreAnchorRef.current;
+    if (!pending) return;
+    restoreAnchorRef.current = null;
+    const el = document.getElementById(`juice-message-${pending.anchorId}`);
+    if (!el) return;
+    const anchorTopAfter = el.getBoundingClientRect().top;
+    const delta = anchorTopAfter - pending.anchorTopBefore;
+    if (delta !== 0) window.scrollBy(0, delta);
+  });
+
+  // Initial fetch — pulls the most-recent FEED_PAGE_SIZE messages. Older
+  // pages are paged in on demand via `handleLoadOlder` below.
   useEffect(() => {
     let cancelled = false;
-    apiFetch("/api/team-messages")
+    apiFetch(`/api/team-messages?limit=${FEED_PAGE_SIZE}`)
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as {
           messages?: (TeamMessage & { reactions?: TeamMessageReaction[] })[];
+          hasMore?: boolean;
           error?: string;
         } | null;
         if (cancelled) return;
@@ -555,7 +650,8 @@ function JuiceBoxFeed({
           return rest;
         });
         setInitialIds(new Set(messages.map((m) => m.id)));
-        setReactions(buildInitialReactions(aggregates, currentUserId));
+        setReactions(buildInitialReactions(aggregates));
+        setHasMore(body?.hasMore === true);
         setState({ kind: "ready", messages });
       })
       .catch((err: unknown) => {
@@ -570,6 +666,91 @@ function JuiceBoxFeed({
       cancelled = true;
     };
   }, [currentUserId]);
+
+  /**
+   * Prepend an older page of messages. Triggered by the "Load older posts"
+   * button at the top of the feed. Captures the current top message's
+   * y-position BEFORE the state update so the layout effect can correct
+   * the scroll offset after React commits — without this, prepending
+   * would visually slam the viewport to the top of the page.
+   */
+  const handleLoadOlder = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    if (state.kind !== "ready") return;
+    const topMessage = state.messages[0];
+    if (!topMessage) return;
+
+    // Snapshot anchor BEFORE setState so the layout effect has a stable
+    // pre-prepend y-coordinate to restore against.
+    const anchorEl = document.getElementById(
+      `juice-message-${topMessage.id}`,
+    );
+    if (anchorEl) {
+      restoreAnchorRef.current = {
+        anchorId: topMessage.id,
+        anchorTopBefore: anchorEl.getBoundingClientRect().top,
+      };
+    }
+
+    setLoadingMore(true);
+    try {
+      const beforeParam = encodeURIComponent(topMessage.created_at);
+      const res = await apiFetch(
+        `/api/team-messages?before=${beforeParam}&limit=${FEED_PAGE_SIZE}`,
+      );
+      const body = (await res.json().catch(() => null)) as {
+        messages?: (TeamMessage & { reactions?: TeamMessageReaction[] })[];
+        hasMore?: boolean;
+      } | null;
+      if (!res.ok || !body?.messages) {
+        setLoadingMore(false);
+        // Drop the anchor snapshot so the layout effect doesn't try to
+        // correct against a render that never happened.
+        restoreAnchorRef.current = null;
+        return;
+      }
+
+      const aggregates = new Map<string, TeamMessageReaction[]>();
+      const older: TeamMessage[] = body.messages.map((m) => {
+        if (m.reactions && m.reactions.length > 0) {
+          aggregates.set(m.id, m.reactions);
+        }
+        const { reactions: _unused, ...rest } = m;
+        void _unused;
+        return rest;
+      });
+
+      if (older.length === 0) {
+        setHasMore(false);
+        setLoadingMore(false);
+        restoreAnchorRef.current = null;
+        return;
+      }
+
+      // Older messages are strictly disjoint from current — merge their
+      // reactions into the existing map without overwriting newer ones.
+      setReactions((prev) => mergeReactions(prev, aggregates));
+      setState((prev) =>
+        prev.kind === "ready"
+          ? { kind: "ready", messages: [...older, ...prev.messages] }
+          : prev,
+      );
+      // Mark every older id as part of the "initial" set so newly-prepended
+      // posts don't run the fresh-message slide-in animation.
+      setInitialIds((prev) => {
+        if (!prev) return prev;
+        const next = new Set(prev);
+        for (const m of older) next.add(m.id);
+        return next;
+      });
+      setHasMore(body.hasMore === true);
+    } catch {
+      // Network error — leave state untouched, drop the anchor.
+      restoreAnchorRef.current = null;
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [hasMore, loadingMore, state]);
 
   // Realtime subscription — team_messages. One channel per page mount;
   // cleaned up on unmount so navigating away closes the websocket cleanly.
@@ -622,13 +803,21 @@ function JuiceBoxFeed({
         },
         (payload) => {
           const row = payload.new as TeamMessageReactionRow;
-          if (!row?.message_id || !row?.emoji || !row?.salesperson_id) return;
+          if (
+            !row?.message_id ||
+            !row?.emoji ||
+            !row?.salesperson_id ||
+            !row?.salesperson_name
+          ) {
+            return;
+          }
           setReactions((prev) =>
             applyReactionAdd(
               prev,
               row.message_id,
               row.emoji,
               row.salesperson_id,
+              row.salesperson_name,
               currentUserId,
             ),
           );
@@ -652,6 +841,7 @@ function JuiceBoxFeed({
             !newRow?.message_id ||
             !newRow?.emoji ||
             !newRow?.salesperson_id ||
+            !newRow?.salesperson_name ||
             !oldRow?.emoji
           ) {
             return;
@@ -663,6 +853,7 @@ function JuiceBoxFeed({
               oldRow.emoji ?? null,
               newRow.emoji,
               newRow.salesperson_id,
+              newRow.salesperson_name,
               currentUserId,
             ),
           );
@@ -738,6 +929,7 @@ function JuiceBoxFeed({
           prevEmoji,
           optimisticEmoji,
           currentUserId,
+          currentUserName,
           currentUserId,
         ),
       );
@@ -759,6 +951,7 @@ function JuiceBoxFeed({
             optimisticEmoji,
             prevEmoji,
             currentUserId,
+            currentUserName,
             currentUserId,
           );
         });
@@ -773,29 +966,41 @@ function JuiceBoxFeed({
         })
         .catch(() => revert());
     },
-    [currentUserId],
+    [currentUserId, currentUserName],
   );
 
   const handleReply = useCallback((message: TeamMessage) => {
     setReplyTo(message);
   }, []);
 
+  // For the reaction-detail sheet: pluck the live aggregate for the chip
+  // the user tapped so the popover renders fresh reactor names even when
+  // the underlying reaction state changes mid-view (e.g., someone reacts
+  // while the sheet is open).
+  const reactionDetailAggregate = useMemo(() => {
+    if (!reactionDetails) return null;
+    const perMsg = reactions.get(reactionDetails.messageId);
+    const entry = perMsg?.get(reactionDetails.emoji);
+    if (!entry || entry.count === 0) return null;
+    const reactors: TeamMessageReactor[] = [];
+    for (const [salesperson_id, salesperson_name] of entry.reactors) {
+      reactors.push({ salesperson_id, salesperson_name });
+    }
+    return {
+      emoji: reactionDetails.emoji,
+      count: entry.count,
+      reactors,
+    };
+  }, [reactionDetails, reactions]);
+
+  // The sheet is rendered only when BOTH `reactionDetails` and a live
+  // aggregate are present, so if the chip's last reactor un-reacts while
+  // the sheet is open it naturally disappears without a setState-in-effect
+  // ping-pong. The stale `reactionDetails` lingers in state until the
+  // user opens another chip or dismisses; harmless and quiet.
+
   return (
     <>
-      {/*
-        Sticky composer. -mx-4 px-4 lets the translucent backdrop bleed to
-        main's horizontal edges while the inner Card stays in the padded
-        column. top-0 + a 30 z-index keeps it above scrolling feed content
-        (incl. the open 3-dot menu at z-20) and below the bottom nav (z-40).
-        env(safe-area-inset-top) keeps it clear of the notch when the app
-        is installed as a PWA.
-      */}
-      <div
-        className="sticky top-0 z-30 -mx-4 bg-background/85 px-4 pb-2 backdrop-blur supports-[backdrop-filter]:bg-background/70"
-        style={{ paddingTop: "calc(0.5rem + env(safe-area-inset-top))" }}
-      >
-        <Composer onPosted={handleSelfPosted} />
-      </div>
       <FeedList
         state={state}
         currentUserId={currentUserId}
@@ -804,17 +1009,47 @@ function JuiceBoxFeed({
         onReply={handleReply}
         reactions={reactions}
         onToggleReaction={toggleReaction}
+        onShowReactionDetails={(messageId, emoji) =>
+          setReactionDetails({ messageId, emoji })
+        }
         initialIds={initialIds}
         forceScrollRef={forceScrollRef}
         lastReadAt={lastReadAt}
         unreadLoaded={unreadLoaded}
         onNearBottom={markAllReadDebounced}
+        onLoadOlder={handleLoadOlder}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
       />
+      {/*
+        Composer moved to a FIXED position above the BottomNav for messaging-
+        app feel. z-30 sits between feed content (default) and the nav
+        (z-40); the ReplyModal at z-50 still covers both. Bottom offset
+        clears the nav (~5rem) plus its iOS safe-area inset. Border-top +
+        backdrop blur give the visual separation from feed scroll content.
+      */}
+      <div
+        className="fixed inset-x-0 z-30 border-t border-border bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70"
+        style={{ bottom: "calc(5rem + env(safe-area-inset-bottom))" }}
+      >
+        <div className="mx-auto w-full max-w-2xl px-3 py-2">
+          <Composer onPosted={handleSelfPosted} />
+        </div>
+      </div>
       {replyTo && (
         <ReplyModal
           replyTo={replyTo}
           onPosted={handleSelfPosted}
           onClose={clearReply}
+        />
+      )}
+      {reactionDetails && reactionDetailAggregate && (
+        <ReactionDetailSheet
+          emoji={reactionDetailAggregate.emoji}
+          count={reactionDetailAggregate.count}
+          reactors={reactionDetailAggregate.reactors}
+          currentUserId={currentUserId}
+          onClose={closeReactionDetails}
         />
       )}
     </>
@@ -1128,11 +1363,15 @@ function FeedList({
   onReply,
   reactions,
   onToggleReaction,
+  onShowReactionDetails,
   initialIds,
   forceScrollRef,
   lastReadAt,
   unreadLoaded,
   onNearBottom,
+  onLoadOlder,
+  hasMore,
+  loadingMore,
 }: {
   state: FeedState;
   currentUserId: string;
@@ -1145,6 +1384,8 @@ function FeedList({
   reactions: ReactionsState;
   /** Tap handler for individual reaction chips + the inline emoji bar. */
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
+  /** Fired when the user taps a chip — opens the reactor-list popover. */
+  onShowReactionDetails: (messageId: string, emoji: string) => void;
   initialIds: Set<string> | null;
   forceScrollRef: React.RefObject<boolean>;
   /** Live server-confirmed last_read_at for the current user; positions
@@ -1158,6 +1399,14 @@ function FeedList({
    *  bottom of the feed — initial snap, scroll-back-down, or auto-scroll
    *  after an inbound message arrived while already near bottom. */
   onNearBottom: () => void;
+  /** Triggers a paginate-back fetch for older posts. The button at the
+   *  top of the feed wires straight into this. */
+  onLoadOlder: () => void;
+  /** True while more pages exist behind what's already loaded. Hides the
+   *  button when we've reached the start of the history. */
+  hasMore: boolean;
+  /** True while a Load Older fetch is in flight; disables the button. */
+  loadingMore: boolean;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageCount =
@@ -1266,8 +1515,28 @@ function FeedList({
     };
   }, []);
 
+  // Detect "Load older" prepends: a single render that adds more than one
+  // message to the front. Realtime INSERTs always grow by one; only the
+  // pagination path adds many at once. When this happens, skip the auto-
+  // scroll — the user explicitly asked to read older posts, and the
+  // layout effect in the parent is restoring their pre-prepend offset.
+  const prevLengthRef = useRef(0);
   useEffect(() => {
-    if (messageCount === 0) return;
+    if (messageCount === 0) {
+      prevLengthRef.current = 0;
+      return;
+    }
+    const prevLength = prevLengthRef.current;
+    prevLengthRef.current = messageCount;
+    const delta = messageCount - prevLength;
+    const wasPrepend = !firstScrollRef.current && delta > 1;
+
+    if (wasPrepend) {
+      // Layout effect upstream is correcting scroll position.
+      forceScrollRef.current = false;
+      return;
+    }
+
     const shouldScroll =
       firstScrollRef.current ||
       forceScrollRef.current ||
@@ -1306,9 +1575,21 @@ function FeedList({
 
   return (
     <section className="space-y-2">
-      <h2 className="px-0.5 text-xs font-medium text-muted-foreground/70">
-        Recent posts
-      </h2>
+      {/* "Load older posts" sits at the top of the feed so the user has
+          a clear, scroll-to-find affordance for pagination. Hidden once
+          the server tells us we've reached the start of history. */}
+      {hasMore && state.messages.length > 0 && (
+        <div className="flex justify-center pt-1">
+          <button
+            type="button"
+            onClick={onLoadOlder}
+            disabled={loadingMore}
+            className="rounded-full bg-muted/60 px-3 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loadingMore ? "Loading…" : "Load older posts"}
+          </button>
+        </div>
+      )}
       {state.messages.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
@@ -1332,6 +1613,7 @@ function FeedList({
                 onReply={onReply}
                 reactions={renderReactions(reactions.get(m.id))}
                 onToggleReaction={onToggleReaction}
+                onShowReactionDetails={onShowReactionDetails}
               />
             </Fragment>
           );
@@ -1361,6 +1643,7 @@ function FeedCard({
   onReply,
   reactions,
   onToggleReaction,
+  onShowReactionDetails,
 }: {
   message: TeamMessage;
   isMine: boolean;
@@ -1370,6 +1653,7 @@ function FeedCard({
   onReply: (message: TeamMessage) => void;
   reactions: TeamMessageReaction[];
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
+  onShowReactionDetails: (messageId: string, emoji: string) => void;
 }) {
   const timeAgo = useMemo(
     () => formatDistanceToNow(new Date(message.created_at), { addSuffix: true }),
@@ -1491,11 +1775,11 @@ function FeedCard({
       onPointerLeave={cancelLongPress}
       onPointerMove={moveLongPress}
     >
-      <CardContent className="space-y-1.5 px-3">
+      <CardContent className="space-y-1 px-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2.5">
             <Avatar name={message.salesperson_name} />
-            <p className="min-w-0 truncate text-sm leading-tight">
+            <p className="min-w-0 truncate text-[15px] leading-tight">
               <span className="font-semibold">{message.salesperson_name}</span>
               {isMine && (
                 <span className="ml-1.5 text-xs font-normal text-muted-foreground">
@@ -1523,7 +1807,7 @@ function FeedCard({
             preview={message.reply_to_message_preview!}
           />
         )}
-        <p className="whitespace-pre-wrap pl-[2.625rem] text-sm leading-relaxed">
+        <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] leading-snug">
           {message.message}
         </p>
         {error && (
@@ -1532,7 +1816,7 @@ function FeedCard({
         <ReactionsRow
           messageId={message.id}
           reactions={reactions}
-          onToggle={onToggleReaction}
+          onShowDetails={onShowReactionDetails}
           onOpenBar={() => setReactionBarOpen(true)}
           hasAny={hasReactions}
         />
@@ -1555,7 +1839,7 @@ function FeedCard({
 /**
  * Compact quoted block above the message body on a reply. Tapping it
  * smooth-scrolls to the original post and applies a short highlight pulse.
- * If the original is older than FEED_LIMIT and not in the loaded window,
+ * If the original is older than the loaded pages and not in the loaded window,
  * the tap is a no-op — by design (no lazy loading older posts in Pass 4).
  */
 function QuotedReply({
@@ -1592,32 +1876,39 @@ function QuotedReply({
 function ReactionsRow({
   messageId,
   reactions,
-  onToggle,
+  onShowDetails,
   onOpenBar,
   hasAny,
 }: {
   messageId: string;
   reactions: TeamMessageReaction[];
-  onToggle: (messageId: string, emoji: ReactionEmoji) => void;
+  /** Tapping a chip opens the reactor-name popover. Toggling a reaction
+   *  is handled exclusively by the + react bar (one entry point per
+   *  intent — taps on chips never accidentally remove your reaction). */
+  onShowDetails: (messageId: string, emoji: string) => void;
   onOpenBar: () => void;
   hasAny: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 pl-[2.625rem]">
+    // Indent halved (was pl-[2.625rem] aligned to message body). Sits
+    // closer to the card's left edge so the reaction row reads as a
+    // tight footer, not a second body column. Smaller gap between chips,
+    // less vertical padding inside each chip.
+    <div className="flex flex-wrap items-center gap-1 pl-[1.25rem]">
       {reactions.map((r) => (
         <button
           key={r.emoji}
           type="button"
-          onClick={() => onToggle(messageId, r.emoji as ReactionEmoji)}
-          aria-pressed={r.reacted}
+          onClick={() => onShowDetails(messageId, r.emoji)}
+          aria-label={`${r.count} reacted with ${r.emoji} — tap to see who`}
           className={cn(
-            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+            "inline-flex h-5 items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
             r.reacted
               ? "bg-primary/15 text-primary ring-1 ring-primary/40"
               : "bg-muted/60 text-foreground/80 ring-1 ring-border hover:bg-muted",
           )}
         >
-          <span className="text-sm leading-none">{r.emoji}</span>
+          <span className="text-[13px] leading-none">{r.emoji}</span>
           <span className="tabular-nums">{r.count}</span>
         </button>
       ))}
@@ -1626,13 +1917,13 @@ function ReactionsRow({
         onClick={onOpenBar}
         aria-label="Add reaction"
         className={cn(
-          "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs leading-none text-muted-foreground/80 ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+          "inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[11px] leading-none text-muted-foreground/80 ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
           // De-emphasize when there are reactions; promote when there
           // aren't, so a totally empty row still has a clear affordance.
           !hasAny && "bg-muted/40",
         )}
       >
-        <SmilePlus aria-hidden="true" className="size-3.5" />
+        <SmilePlus aria-hidden="true" className="size-3" />
       </button>
     </div>
   );
@@ -1711,6 +2002,124 @@ function ReactionBar({
       {/* messageId is only here to make the React-key/debug context obvious;
           the toggle handler is already bound by the parent. */}
       <span className="sr-only">Reactions for message {messageId}</span>
+    </div>
+  );
+}
+
+/**
+ * Tap-to-see-who popover. Opens when the user taps an existing reaction
+ * chip; shows the emoji, the count, and the list of reactor names pulled
+ * straight from the live reactions Map. Read-only — the user toggles via
+ * the inline + react bar, so this never doubles as an action surface.
+ *
+ * Mobile-first bottom sheet on phones (centers on `sm:+`). Backdrop tap
+ * and Escape both dismiss. The parent component auto-closes if the chip
+ * loses all reactors while the sheet is open.
+ */
+function ReactionDetailSheet({
+  emoji,
+  count,
+  reactors,
+  currentUserId,
+  onClose,
+}: {
+  emoji: string;
+  count: number;
+  reactors: TeamMessageReactor[];
+  currentUserId: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handle = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handle);
+    return () => document.removeEventListener("keydown", handle);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reaction-details-title"
+      // z-50 over the bottom Composer (z-30) and the BottomNav (z-40).
+      // viewport-fit=cover means env(safe-area-inset-*) is non-zero on
+      // standalone iPhones — pad to keep the card clear of notch/home bar.
+      className="fixed inset-0 z-50 flex items-end justify-center p-3 sm:items-center"
+      style={{
+        paddingTop: "calc(0.75rem + env(safe-area-inset-top))",
+        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+      }}
+    >
+      <button
+        type="button"
+        aria-label="Close reaction details"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm focus:outline-none"
+      />
+      <Card
+        size="sm"
+        className="relative w-full max-w-xs overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150"
+      >
+        <CardContent className="space-y-2 px-3 py-2.5">
+          <header className="flex items-center justify-between gap-2">
+            <h2
+              id="reaction-details-title"
+              className="flex items-center gap-2 text-sm font-semibold"
+            >
+              <span className="text-xl leading-none">{emoji}</span>
+              <span className="text-muted-foreground">
+                {count} {count === 1 ? "reaction" : "reactions"}
+              </span>
+            </h2>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="-mr-1 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </header>
+          {reactors.length === 0 ? (
+            <p className="px-1 text-xs text-muted-foreground">
+              No one yet.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {reactors.map((r) => (
+                <li
+                  key={r.salesperson_id}
+                  className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm"
+                >
+                  <ReactorAvatar name={r.salesperson_name} />
+                  <span className="min-w-0 flex-1 truncate">
+                    {r.salesperson_name}
+                  </span>
+                  {r.salesperson_id === currentUserId && (
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      you
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** Same shape as Avatar, slightly smaller for the reactor list. */
+function ReactorAvatar({ name }: { name: string }) {
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
+  return (
+    <div
+      aria-hidden="true"
+      className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary ring-1 ring-primary/30"
+    >
+      {initial}
     </div>
   );
 }

@@ -1,16 +1,30 @@
 // Shared types + constants for the Juice Box team feed.
 // Pure module — safe to import from server routes and "use client" components.
 
+/** Identity slice of a reactor, denormalized on the reaction row so the
+ *  client can render reactor names in the chip-detail popover without a
+ *  second round-trip per chip. */
+export type TeamMessageReactor = {
+  salesperson_id: string;
+  salesperson_name: string;
+};
+
 /**
  * One aggregate emoji reaction as rendered on a message card: which emoji,
- * how many people reacted with it, and whether the current viewer is one
- * of them. Hydrated server-side from team_message_reactions; updated
- * locally as realtime INSERT/DELETE events arrive.
+ * how many people reacted with it, whether the current viewer is one of
+ * them, and the list of reactor names for the chip-detail popover.
+ * Hydrated server-side from team_message_reactions; updated locally as
+ * realtime INSERT/UPDATE/DELETE events arrive (each carries the full row
+ * with salesperson_name thanks to REPLICA IDENTITY FULL).
  */
 export type TeamMessageReaction = {
   emoji: string;
   count: number;
   reacted: boolean;
+  /** Names of all users who reacted with this emoji on this message.
+   *  Length == count. Ordered by created_at when hydrated from the
+   *  server; new reactors are appended as realtime events arrive. */
+  reactors: TeamMessageReactor[];
 };
 
 export type TeamMessage = {
@@ -34,8 +48,13 @@ export type TeamMessage = {
 /** Maximum number of characters per post. Enforced server-side; mirrored in the UI. */
 export const MESSAGE_MAX_LENGTH = 1000;
 
-/** Most-recent-N rows fetched on initial load. Realtime appends after that. */
-export const FEED_LIMIT = 200;
+/**
+ * Page size for the feed. The initial load fetches the most-recent N
+ * messages; "Load older posts" pages backwards by the same amount using a
+ * `before=<ISO>` query parameter. Kept on the small side because a long
+ * mobile feed is the wrong default for a team chat.
+ */
+export const FEED_PAGE_SIZE = 50;
 
 /**
  * Hard cap on the denormalized reply preview stored on a message. The full
@@ -100,9 +119,13 @@ export type TeamMessageUnreadSummary = {
   last_read_at: string | null;
 };
 
-/** Raw reaction row as it arrives from the DB / realtime payload. */
+/** Raw reaction row as it arrives from the DB / realtime payload. The
+ *  realtime postgres_changes events include salesperson_name (it's a
+ *  column on team_message_reactions, denormalized at insert time), so the
+ *  client can keep its reactor-name map current without a refetch. */
 export type TeamMessageReactionRow = {
   message_id: string;
   salesperson_id: string;
+  salesperson_name: string;
   emoji: string;
 };
