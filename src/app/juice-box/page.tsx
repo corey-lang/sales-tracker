@@ -312,7 +312,14 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
             rows={2}
             maxLength={MESSAGE_MAX_LENGTH}
             disabled={sending}
-            className="min-h-[2.5rem] w-full resize-none rounded-md border border-input bg-background/40 px-3 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
+            // text-base (16px) on EVERY viewport to defeat iOS/WebKit's
+            // "zoom into any focused input < 16px" behavior. A previous fix
+            // bumped only mobile (sm:text-sm restored 14px from 640px up),
+            // but iPhone landscape can exceed that breakpoint and was still
+            // triggering auto-zoom on focus. Keeping 16px everywhere is the
+            // only viewport-agnostic guard; padding/min-height/rows/button
+            // sizing are left alone so the composer stays compact.
+            className="min-h-[2.5rem] w-full resize-none rounded-md border border-input bg-background/40 px-3 py-1.5 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-2">
             <p
