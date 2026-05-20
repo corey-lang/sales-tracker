@@ -20,6 +20,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Logo } from "@/components/logo";
+import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 import { ThisWeekCard } from "@/components/this-week-card";
 import { AeTasksCard } from "@/components/ae-tasks-card";
 import { BusinessCardScanner } from "@/components/business-card-scanner";
@@ -137,22 +138,27 @@ export default function DashboardPage() {
 
   if (salesperson.role === "assistant") {
     return (
-      <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6">
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-                Hi, {salesperson.first_name}
-              </h1>
+      <>
+        <main
+          className={`mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}
+        >
+          <header className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                  Hi, {salesperson.first_name}
+                </h1>
+              </div>
+              <Logo width={180} height={55} priority className="shrink-0" />
             </div>
-            <Logo width={180} height={55} priority className="shrink-0" />
-          </div>
-          <Button variant="outline" size="sm" onClick={handleSwitchUser}>
-            Log out
-          </Button>
-        </header>
-        <VerificationCenter />
-      </main>
+            <Button variant="outline" size="sm" onClick={handleSwitchUser}>
+              Log out
+            </Button>
+          </header>
+          <VerificationCenter />
+        </main>
+        <BottomNav salesperson={salesperson} />
+      </>
     );
   }
 
@@ -217,7 +223,8 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
+    <>
+    <main className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}>
       {/* Compact greeting — the weekly momentum card is the visual hero. */}
       <header className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
@@ -381,5 +388,7 @@ export default function DashboardPage() {
         </p>
       )}
     </main>
+    <BottomNav salesperson={salesperson} />
+    </>
   );
 }

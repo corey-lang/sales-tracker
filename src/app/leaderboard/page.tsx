@@ -18,6 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Logo } from "@/components/logo";
+import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 
 // AE-facing leaderboard. Reps compare by weighted % of weekly goal — raw
 // activity counts and raw goal targets are intentionally NOT shown here.
@@ -98,7 +99,8 @@ export default function LeaderboardPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6">
+    <>
+    <main className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}>
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">
@@ -148,6 +150,8 @@ export default function LeaderboardPage() {
         </CardContent>
       </Card>
     </main>
+    <BottomNav salesperson={salesperson} />
+    </>
   );
 }
 
