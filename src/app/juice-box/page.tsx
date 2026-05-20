@@ -12,6 +12,7 @@ import {
 import { useRouter } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
+  ArrowDown,
   CornerUpLeft,
   ImagePlus,
   Loader2,
@@ -95,6 +96,15 @@ type ReactionsState = Map<string, ReactionsByEmoji>;
 // a CSS opacity fade.
 const DIVIDER_GRACE_MS = 6000;
 const DIVIDER_FADE_DURATION_MS = 1000;
+
+// Generous comfort offset above the composer's TOP edge after auto-
+// scroll. Lands the targeted message in the lower-middle of visible feed
+// rather than just above the composer. ~6rem feels right on phone
+// viewports; main's pb-[18rem+safe] is sized to make this reachable
+// without browser-side scrollTop clamping. Module-scoped so both the
+// FeedList auto-scroll effects and the JuiceBoxFeed Jump-to-latest
+// handler share a single source of truth.
+const AUTO_SCROLL_COMFORT_PX = 96;
 
 // Trailing-edge debounce. Returned trigger schedules `fn` to fire `delay`
 // ms after the most recent call; rapid re-invocations only fire once at
@@ -768,6 +778,16 @@ function JuiceBoxFeed({
   const [lightbox, setLightbox] = useState<TeamMessageMedia | null>(null);
   const closeLightbox = useCallback(() => setLightbox(null), []);
 
+  // "Jump to latest" pill visibility. Mirrors FeedList's nearBottomRef
+  // via onNearBottomChange — the pill renders only when the user is
+  // NOT within NEAR_BOTTOM_PX of the document end. Default false so
+  // the pill doesn't flash on mount; the scroll listener's seed flips
+  // it correctly within a microtask.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const onNearBottomChange = useCallback((nearBottom: boolean) => {
+    setShowJumpToLatest(!nearBottom);
+  }, []);
+
   // Pagination state. `hasMore` defaults to true so the "Load older" button
   // is available until the first server response tells us otherwise (or
   // the page returns fewer than the requested limit). Seeded from the
@@ -1240,6 +1260,30 @@ function JuiceBoxFeed({
     setReplyTo(message);
   }, []);
 
+  /**
+   * Tap handler for the floating "Jump to latest" pill. Uses the same
+   * composer-aware scroll math the final-landing + ongoing-scroll
+   * effects use, so the latest message lands above the composer with
+   * the standard comfort gap regardless of compact / expanded composer
+   * height. Also fires the debounced mark-read since landing at latest
+   * implies the user has seen everything.
+   */
+  const handleJumpToLatest = useCallback(() => {
+    if (state.kind !== "ready" || state.messages.length === 0) return;
+    const latestId = state.messages[state.messages.length - 1].id;
+    const messageEl = document.getElementById(`juice-message-${latestId}`);
+    const composer = document.getElementById("juice-composer-bar");
+    if (!messageEl || !composer) return;
+    const messageBottom = messageEl.getBoundingClientRect().bottom;
+    const composerTop = composer.getBoundingClientRect().top;
+    const target = Math.max(
+      0,
+      window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
+    );
+    window.scrollTo({ top: target, behavior: "smooth" });
+    markAllReadDebounced();
+  }, [state, markAllReadDebounced]);
+
   // For the reaction-detail sheet: pluck the live aggregate for the chip
   // the user tapped so the popover renders fresh reactor names even when
   // the underlying reaction state changes mid-view (e.g., someone reacts
@@ -1285,6 +1329,7 @@ function JuiceBoxFeed({
         lastReadAt={lastReadAt}
         unreadLoaded={unreadLoaded}
         onNearBottom={markAllReadDebounced}
+        onNearBottomChange={onNearBottomChange}
         onLoadOlder={handleLoadOlder}
         hasMore={hasMore}
         loadingMore={loadingMore}
@@ -1307,6 +1352,24 @@ function JuiceBoxFeed({
         className="fixed inset-x-0 z-30 border-t border-border bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70"
         style={{ bottom: "calc(5rem + env(safe-area-inset-bottom))" }}
       >
+        {/* Floating "Jump to latest" pill. Positioned `absolute` above
+            this fixed composer wrapper so its offset automatically
+            adapts to the composer's current height (compact vs
+            expanded). pointer-events-none on the centering wrapper
+            means the empty area on either side of the pill doesn't
+            block feed taps; only the pill itself is interactive. */}
+        {showJumpToLatest && state.kind === "ready" && state.messages.length > 0 && (
+          <div className="pointer-events-none absolute inset-x-0 -top-12 flex justify-center">
+            <button
+              type="button"
+              onClick={handleJumpToLatest}
+              className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-lg shadow-primary/30 ring-1 ring-primary/40 transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 animate-in fade-in-0 slide-in-from-bottom-1 duration-200"
+            >
+              <ArrowDown aria-hidden="true" className="size-3.5" />
+              Jump to latest
+            </button>
+          </div>
+        )}
         <div className="mx-auto w-full max-w-2xl px-3 py-2">
           <Composer onPosted={handleSelfPosted} />
         </div>
@@ -2294,6 +2357,7 @@ function FeedList({
   lastReadAt,
   unreadLoaded,
   onNearBottom,
+  onNearBottomChange,
   onLoadOlder,
   hasMore,
   loadingMore,
@@ -2329,6 +2393,11 @@ function FeedList({
    *  bottom of the feed — initial snap, scroll-back-down, or auto-scroll
    *  after an inbound message arrived while already near bottom. */
   onNearBottom: () => void;
+  /** Edge-triggered callback fired with the new value whenever the
+   *  scroll listener detects nearBottom flipping. Surfaces the state
+   *  to JuiceBoxFeed so the floating "Jump to latest" pill knows when
+   *  to render. */
+  onNearBottomChange?: (nearBottom: boolean) => void;
   /** Triggers a paginate-back fetch for older posts. The button at the
    *  top of the feed wires straight into this. */
   onLoadOlder: () => void;
@@ -2384,12 +2453,6 @@ function FeedList({
     return state.messages[idx].id;
   }, [state, lastReadAt, unreadLoaded]);
 
-  // Generous comfort offset above the composer's TOP edge after auto-
-  // scroll. Lands the targeted message in the lower-middle of visible feed
-  // rather than just above the composer. ~6rem feels right on phone
-  // viewports; main's pb-[18rem+safe] is sized to make this reachable
-  // without browser-side scrollTop clamping.
-  const AUTO_SCROLL_COMFORT_PX = 96;
 
   // Divider grace state.
   //   dividerAnchor lags `lastReadAt` so the "New messages" marker stays
@@ -2471,6 +2534,14 @@ function FeedList({
   const NEAR_BOTTOM_PX = 200;
   const nearBottomRef = useRef(true);
 
+  // Stable callback ref for onNearBottomChange — the listener is bound
+  // once on mount and reads through the ref so a parent-level prop
+  // identity change doesn't require re-binding the listener.
+  const onNearBottomChangeRef = useRef(onNearBottomChange);
+  useEffect(() => {
+    onNearBottomChangeRef.current = onNearBottomChange;
+  }, [onNearBottomChange]);
+
   useEffect(() => {
     const update = () => {
       const wasNear = nearBottomRef.current;
@@ -2484,10 +2555,25 @@ function FeedList({
       if (!wasNear && isNear) {
         onNearBottomRef.current();
       }
+      // Surface the boolean to JuiceBoxFeed so the Jump-to-latest pill
+      // can toggle visibility. Edge-triggered — we only fire the
+      // callback when the value actually changes, not on every scroll
+      // tick, which prevents a re-render storm during smooth scrolls.
+      if (wasNear !== isNear) {
+        onNearBottomChangeRef.current?.(isNear);
+      }
     };
-    // Seed once in case the user never scrolls; passive listener avoids
-    // blocking the scroll thread.
-    update();
+    // Seed via microtask so the initial state surface to the parent
+    // happens AFTER the effect body returns — keeps setState out of
+    // the effect's synchronous path (react-hooks/set-state-in-effect).
+    const seed = () => {
+      const doc = document.documentElement;
+      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
+      const isNear = remaining < NEAR_BOTTOM_PX;
+      nearBottomRef.current = isNear;
+      onNearBottomChangeRef.current?.(isNear);
+    };
+    queueMicrotask(seed);
     window.addEventListener("scroll", update, { passive: true });
     window.addEventListener("resize", update);
     return () => {
