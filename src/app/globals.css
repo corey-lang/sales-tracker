@@ -164,3 +164,14 @@
     padding-top: calc(1rem + env(safe-area-inset-top));
   }
 }
+
+/* Juice Box — short highlight pulse applied when the user taps a reply's
+   quoted preview to jump to the original post. JS sets data-juice-highlight
+   for ~1.6s; the box-shadow transition draws the eye to the now-visible
+   post without anchoring on top of it. */
+[data-juice-highlight="true"] {
+  box-shadow:
+    0 0 0 2px var(--color-primary),
+    0 0 24px -4px color-mix(in oklab, var(--color-primary) 50%, transparent);
+  transition: box-shadow 200ms ease-out;
+}

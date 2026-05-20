@@ -13,7 +13,7 @@ import { TEAM_MESSAGES_TABLE, type TeamMessage } from "@/lib/team-messages";
 export const runtime = "nodejs";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted";
+  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview";
 
 export async function DELETE(
   req: Request,
