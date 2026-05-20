@@ -51,6 +51,11 @@ import {
   type TeamMessageReactor,
   type GifResult,
 } from "@/lib/team-messages";
+import {
+  readCachedFeed,
+  writeCachedFeed,
+  type CachedFeedMessage,
+} from "@/lib/juice-box-cache";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
@@ -383,6 +388,87 @@ function scrollToMessage(messageId: string) {
   window.setTimeout(() => el.removeAttribute("data-juice-highlight"), 1600);
 }
 
+/**
+ * Merges a fresh-from-server window into the current state.messages
+ * without dropping realtime-during-fetch arrivals OR pre-existing
+ * older messages (e.g., from Load Older). Strategy:
+ *   * Everything in `fresh` is authoritative for its time range.
+ *   * State messages OLDER than fresh's oldest are preserved.
+ *   * State messages NEWER than fresh's newest are preserved (these
+ *     are realtime arrivals that fired between the fetch's snapshot
+ *     and its response).
+ *   * State messages WITHIN fresh's range but not in fresh are dropped
+ *     (server says they're not part of the current window — e.g.,
+ *     admin soft-deleted them).
+ */
+function mergeFreshFeed(
+  state: TeamMessage[],
+  fresh: TeamMessage[],
+): TeamMessage[] {
+  if (fresh.length === 0) return state;
+  const freshIds = new Set(fresh.map((m) => m.id));
+  const freshOldest = fresh[0].created_at;
+  const freshNewest = fresh[fresh.length - 1].created_at;
+  const older: TeamMessage[] = [];
+  const newer: TeamMessage[] = [];
+  for (const m of state) {
+    if (freshIds.has(m.id)) continue;
+    if (m.created_at < freshOldest) older.push(m);
+    else if (m.created_at > freshNewest) newer.push(m);
+  }
+  return [...older, ...fresh, ...newer];
+}
+
+/**
+ * Replaces reactions for every id present in `fresh` with the server-
+ * authoritative aggregate. Ids NOT in fresh keep whatever the local
+ * state already has — covers realtime-during-fetch arrivals whose
+ * reactions came in via the realtime subscription. An empty
+ * `reactions` array on a fresh message means "no reactions" and DROPS
+ * any stale cached entry.
+ */
+function mergeFreshReactions(
+  prev: ReactionsState,
+  fresh: Array<TeamMessage & { reactions?: TeamMessageReaction[] }>,
+): ReactionsState {
+  const next = new Map(prev);
+  for (const m of fresh) {
+    if (m.reactions && m.reactions.length > 0) {
+      const perMsg: ReactionsByEmoji = new Map();
+      for (const r of m.reactions) {
+        const reactors = new Map<string, string>();
+        for (const rt of r.reactors) {
+          reactors.set(rt.salesperson_id, rt.salesperson_name);
+        }
+        perMsg.set(r.emoji, {
+          count: r.count,
+          reacted: r.reacted,
+          reactors,
+        });
+      }
+      next.set(m.id, perMsg);
+    } else {
+      next.delete(m.id);
+    }
+  }
+  return next;
+}
+
+/**
+ * Renders the current state back into the cache-on-disk shape so the
+ * visibilitychange handler can persist the latest snapshot, including
+ * realtime additions that arrived after the bootstrap fetch's write.
+ */
+function snapshotForCache(
+  messages: TeamMessage[],
+  reactions: ReactionsState,
+): CachedFeedMessage[] {
+  return messages.map((m) => ({
+    ...m,
+    reactions: renderReactions(reactions.get(m.id)),
+  }));
+}
+
 // Juice Box — live team feed.
 //
 // REALTIME
@@ -517,13 +603,40 @@ function JuiceBoxFeed({
   currentUserName: string;
   isAdmin: boolean;
 }) {
-  const [state, setState] = useState<FeedState>({ kind: "loading" });
+  // Local cache read once at mount. Subsequent state initializers below
+  // pull from this single shared object so we don't hit localStorage
+  // three times (state + reactions + hasMore). Returns null on cache
+  // miss / expired / wrong-version / disabled storage, in which case
+  // every initializer falls back to the previous defaults.
+  //
+  // The seed is wrapped in useState so React holds onto it for the
+  // mount's lifetime — useState's lazy initializer runs exactly once.
+  const [cachedSeed] = useState<{ cached: ReturnType<typeof readCachedFeed> }>(
+    () => ({ cached: readCachedFeed(currentUserId) }),
+  );
+  const cached = cachedSeed.cached;
+
+  const [state, setState] = useState<FeedState>(() => {
+    if (!cached) return { kind: "loading" };
+    // Peel reactions off the cached wire shape so state.messages is a
+    // pure TeamMessage[] — same layout as a fresh fetch produces.
+    const messages: TeamMessage[] = cached.messages.map(
+      ({ reactions: _u, ...rest }) => {
+        void _u;
+        return rest;
+      },
+    );
+    return { kind: "ready", messages };
+  });
 
   // Snapshot of message IDs present at initial load. Anything NOT in this set
   // was added after first render (optimistic post or realtime INSERT) and
-  // therefore animates in. Set exactly once when the initial fetch resolves;
-  // React batches it with the `state` setState in the same tick.
-  const [initialIds, setInitialIds] = useState<Set<string> | null>(null);
+  // therefore animates in. Seeded from the cached message ids so cards
+  // already on screen don't animate as fresh on hydration; the bootstrap
+  // fetch later folds fresh ids into this set too.
+  const [initialIds, setInitialIds] = useState<Set<string> | null>(() =>
+    cached ? new Set(cached.messages.map((m) => m.id)) : null,
+  );
 
   // Unread state from the global provider. lastReadAt is the server-confirmed
   // marker for the current user; markAllRead bumps it to NOW() optimistically.
@@ -601,8 +714,24 @@ function JuiceBoxFeed({
   // Reactions: one map keyed by message_id -> emoji -> { count, reacted, reactors }.
   // Lives at the feed level (not per-card) so the realtime subscription can
   // update any card from one place and the initial bootstrap is hydrated
-  // from the same GET that loaded the messages.
-  const [reactions, setReactions] = useState<ReactionsState>(new Map());
+  // from the same GET that loaded the messages. Seeded from the cached
+  // aggregates so the chip rows render instantly on hydration.
+  const [reactions, setReactions] = useState<ReactionsState>(() => {
+    if (!cached) return new Map();
+    const aggregates = new Map<string, TeamMessageReaction[]>();
+    for (const m of cached.messages) {
+      if (m.reactions && m.reactions.length > 0) {
+        aggregates.set(m.id, m.reactions);
+      }
+    }
+    return buildInitialReactions(aggregates);
+  });
+
+  // True while the bootstrap fetch is in flight AFTER hydrating from
+  // cache — drives the small "Refreshing…" pill above the feed. Lazy-
+  // initialized true on cache hit so we never sync-setState inside the
+  // bootstrap effect (react-hooks/set-state-in-effect).
+  const [refreshing, setRefreshing] = useState<boolean>(() => cached !== null);
 
   // Reply state: when set, ReplyModal opens overlaying the feed. Cleared on
   // successful post or Cancel. The sticky composer is intentionally NOT
@@ -630,9 +759,10 @@ function JuiceBoxFeed({
 
   // Pagination state. `hasMore` defaults to true so the "Load older" button
   // is available until the first server response tells us otherwise (or
-  // the page returns fewer than the requested limit). `loadingMore`
-  // disables the button while the fetch is in flight.
-  const [hasMore, setHasMore] = useState(true);
+  // the page returns fewer than the requested limit). Seeded from the
+  // cached snapshot so the button's state is correct on hydration too.
+  // `loadingMore` disables the button while the fetch is in flight.
+  const [hasMore, setHasMore] = useState<boolean>(() => cached?.hasMore ?? true);
   const [loadingMore, setLoadingMore] = useState(false);
 
   // Scroll-anchor restoration for "Load older". When the user prepends
@@ -655,54 +785,135 @@ function JuiceBoxFeed({
     if (delta !== 0) window.scrollBy(0, delta);
   });
 
-  // Initial fetch — pulls the most-recent FEED_PAGE_SIZE messages. Older
-  // pages are paged in on demand via `handleLoadOlder` below.
+  // Initial fetch — pulls the most-recent FEED_PAGE_SIZE messages and
+  // refreshes whatever the cache hydrated. Older pages are paged in on
+  // demand via `handleLoadOlder` below.
+  //
+  // CACHE-AWARE FLOW
+  //   * If `cached` exists, state.messages already rendered before this
+  //     effect ran. The fetch is a background refresh; on resolve we
+  //     merge fresh into state (preserving realtime arrivals and Load
+  //     Older history) and clear the `refreshing` indicator.
+  //   * If `cached` is null, this is a cold start — state.kind is
+  //     "loading" and we replace it with the fetch result.
+  //   * Network errors after a successful cache hydration are SILENT:
+  //     the user already has a feed, no need to surface "Couldn't load."
+  //     Cold-start errors go to state.kind === "error" as before.
+  //
+  // Every successful response is written back to the cache so the next
+  // open is also instant.
   useEffect(() => {
     let cancelled = false;
     apiFetch(`/api/team-messages?limit=${FEED_PAGE_SIZE}`)
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as {
-          messages?: (TeamMessage & { reactions?: TeamMessageReaction[] })[];
+          messages?: CachedFeedMessage[];
           hasMore?: boolean;
           error?: string;
         } | null;
         if (cancelled) return;
         if (!res.ok) {
-          setState({
-            kind: "error",
-            error: body?.error ?? `Couldn't load feed (${res.status}).`,
-          });
+          if (!cached) {
+            setState({
+              kind: "error",
+              error: body?.error ?? `Couldn't load feed (${res.status}).`,
+            });
+          }
+          // Cached path → swallow; the visible feed stays usable.
           return;
         }
         const hydrated = body?.messages ?? [];
-        // Peel reactions off the wire payload so message state stays a clean
-        // TeamMessage[] (matching the realtime row shape). Aggregates go
-        // into their own map.
-        const aggregates = new Map<string, TeamMessageReaction[]>();
-        const messages: TeamMessage[] = hydrated.map((m) => {
-          if (m.reactions && m.reactions.length > 0) {
-            aggregates.set(m.id, m.reactions);
-          }
-          const { reactions: _unused, ...rest } = m;
-          void _unused;
+        const freshHasMore = body?.hasMore === true;
+        // Peel reactions off the wire payload so message state stays a
+        // clean TeamMessage[] (matching the realtime row shape).
+        const freshMessages: TeamMessage[] = hydrated.map((m) => {
+          const { reactions: _u, ...rest } = m;
+          void _u;
           return rest;
         });
-        setInitialIds(new Set(messages.map((m) => m.id)));
-        setReactions(buildInitialReactions(aggregates));
-        setHasMore(body?.hasMore === true);
-        setState({ kind: "ready", messages });
+
+        // Persist this snapshot for the next open. Trimmed inside
+        // writeCachedFeed if larger than FEED_PAGE_SIZE.
+        writeCachedFeed(currentUserId, hydrated, freshHasMore);
+
+        // Merge into existing state (no-op when state is "loading"; a
+        // real merge when we hydrated from cache + maybe accumulated
+        // realtime arrivals during the fetch).
+        setState((prev) => {
+          if (prev.kind !== "ready") {
+            return { kind: "ready", messages: freshMessages };
+          }
+          return {
+            kind: "ready",
+            messages: mergeFreshFeed(prev.messages, freshMessages),
+          };
+        });
+        // Fold fresh ids into initialIds (don't replace) so realtime
+        // arrivals after this fetch keep their fresh-animation behavior.
+        setInitialIds((prev) => {
+          const next = new Set(prev ?? []);
+          for (const m of freshMessages) next.add(m.id);
+          return next;
+        });
+        setReactions((prev) => mergeFreshReactions(prev, hydrated));
+        setHasMore(freshHasMore);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
+        if (cached) return; // user already has feed; swallow background error
         setState({
           kind: "error",
           error:
             err instanceof Error ? err.message : "Couldn't load feed.",
         });
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
       });
     return () => {
       cancelled = true;
     };
+    // `cached` is stable across renders (useState lazy initializer
+    // runs once on mount), so including it doesn't widen the effect's
+    // re-run cadence — it just satisfies react-hooks/exhaustive-deps.
+  }, [currentUserId, cached]);
+
+  // Mirror the latest state into refs so the visibilitychange handler
+  // can read them without re-binding (the listener is bound once for
+  // the lifetime of the component).
+  const cacheSnapshotRef = useRef<{
+    messages: TeamMessage[];
+    reactions: ReactionsState;
+    hasMore: boolean;
+  }>({ messages: [], reactions: new Map(), hasMore: true });
+  useEffect(() => {
+    cacheSnapshotRef.current = {
+      messages: state.kind === "ready" ? state.messages : [],
+      reactions,
+      hasMore,
+    };
+  }, [state, reactions, hasMore]);
+
+  // Persist the latest snapshot when the user backgrounds the tab so a
+  // subsequent open paints from a near-current cache including realtime
+  // additions that arrived after the bootstrap fetch wrote its
+  // snapshot. visibilitychange → hidden is the canonical "I'm done for
+  // now" signal across iOS Safari, PWA standalone, and desktop.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibility = () => {
+      if (document.visibilityState !== "hidden") return;
+      const snap = cacheSnapshotRef.current;
+      if (snap.messages.length === 0) return;
+      writeCachedFeed(
+        currentUserId,
+        snapshotForCache(snap.messages, snap.reactions),
+        snap.hasMore,
+      );
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisibility);
   }, [currentUserId]);
 
   /**
@@ -1059,6 +1270,7 @@ function JuiceBoxFeed({
         onLoadOlder={handleLoadOlder}
         hasMore={hasMore}
         loadingMore={loadingMore}
+        refreshing={refreshing}
       />
       {/*
         Composer moved to a FIXED position above the BottomNav for messaging-
@@ -1970,6 +2182,7 @@ function FeedList({
   onLoadOlder,
   hasMore,
   loadingMore,
+  refreshing,
 }: {
   state: FeedState;
   currentUserId: string;
@@ -2008,6 +2221,9 @@ function FeedList({
   hasMore: boolean;
   /** True while a Load Older fetch is in flight; disables the button. */
   loadingMore: boolean;
+  /** True while the bootstrap fetch is running AFTER cache hydration —
+   *  drives the subtle "Refreshing…" pill above the feed. */
+  refreshing: boolean;
 }) {
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
@@ -2277,6 +2493,18 @@ function FeedList({
 
   return (
     <section className="space-y-2">
+      {/* Subtle "Refreshing…" pill. Only shows after a cache-hydration
+          first paint while the bootstrap fetch is still in flight — so
+          the user knows the feed is being updated without a full
+          skeleton state. Disappears on fetch resolution. */}
+      {refreshing && (
+        <div className="flex justify-center pt-1">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-muted/40 px-2 py-0.5 text-[11px] font-medium text-muted-foreground ring-1 ring-border">
+            <Loader2 aria-hidden="true" className="size-3 animate-spin" />
+            Refreshing…
+          </span>
+        </div>
+      )}
       {/* "Load older posts" sits at the top of the feed so the user has
           a clear, scroll-to-find affordance for pagination. Hidden once
           the server tells us we've reached the start of history. */}
