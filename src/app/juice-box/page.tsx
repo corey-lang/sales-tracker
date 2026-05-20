@@ -1620,16 +1620,31 @@ function FeedList({
         })
       )}
       {/*
-        Comfort gap above the bottom-nav clearance. BOTTOM_NAV_SPACER on main
-        already reserves space for the nav + iOS safe area, but in practice
-        scrollIntoView({block:"end"}) lands the latest message flush against
-        that reserve, leaving it visually crowded against (and on shorter
-        viewports partially obscured by) the nav. h-20 (5rem / 80px) buys
-        comfortable breathing room without feeling like dead space at the
-        bottom of the feed.
+        Auto-scroll target. `scroll-margin-bottom` controls where this
+        element lands inside the viewport when scrolled into view via
+        scrollIntoView({block:"end"}). We push the landing position up by
+        (nav 5rem) + (composer ~7rem) + (iOS safe area) + (~1.5rem
+        comfort) so the LATEST message's bottom edge sits cleanly above
+        the fixed bottom composer after every auto-scroll.
+
+        scroll-margin only affects programmatic scrolling, NOT user
+        gestures — so manual scrolling can still send older messages
+        behind the composer, which is the desired "feed scrolls behind
+        composer" effect. The reserved 12rem + safe-area on the main
+        wrapper covers the manual scroll-to-end case.
+
+        Older messages can extend behind the composer during animated
+        auto-scroll on long unread runs — we only guarantee the NEWEST
+        message lands above the composer, per the product rule.
       */}
-      <div aria-hidden="true" className="h-20" />
-      <div ref={bottomRef} aria-hidden="true" />
+      <div
+        ref={bottomRef}
+        aria-hidden="true"
+        style={{
+          scrollMarginBottom:
+            "calc(13.5rem + env(safe-area-inset-bottom))",
+        }}
+      />
     </section>
   );
 }
