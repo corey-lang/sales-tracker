@@ -521,6 +521,13 @@ export async function POST(req: Request) {
     // 404/410 subscriptions are GC'd from the DB inside as well.
     // No-op when VAPID env is unset, so the route stays functional
     // before push is configured.
+    //
+    // Diagnostics: a kickoff line is logged here so the trace begins
+    // immediately after the insert resolves; fanOutJuiceBoxPush
+    // continues logging its own lifecycle.
+    console.log(
+      `[team-messages] firing push fan-out sender=${me.id} message_id=${(res.data as { id: string }).id}`,
+    );
     void fanOutJuiceBoxPush({
       excludeSalespersonId: me.id,
       payload: {
@@ -528,7 +535,11 @@ export async function POST(req: Request) {
         body: "New Juice Box post 🍊",
         url: "/juice-box",
       },
-    }).catch(() => undefined);
+    }).catch((err: unknown) => {
+      console.error(
+        `[team-messages] fan-out unhandled-rejection sender=${me.id} err=${String(err)}`,
+      );
+    });
 
     return Response.json({ message }, { status: 201 });
   } catch (err) {

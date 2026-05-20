@@ -119,14 +119,28 @@ function isJuiceBoxEligible(person: SalespersonRow): boolean {
 }
 
 /**
+ * Returns the hostname portion of a push endpoint URL — used in logs so
+ * we never write the auth-bearing path segment to Vercel function logs.
+ */
+function endpointHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+/**
  * Sends a single Web Push and, on 404/410 from the push service,
- * deletes the subscription row by id. Returns true on success, false
- * on permanent failure (subscription was removed).
+ * deletes the subscription row by id. Logs are tagged
+ * `[juice-box-push]` so they're grep-friendly in Vercel function logs.
+ * Endpoint host is logged; the auth-bearing path is NOT.
  */
 async function sendOne(
   sub: SubscriptionRow,
   payloadJson: string,
-): Promise<void> {
+): Promise<"ok" | "error" | "gc"> {
+  const host = endpointHost(sub.endpoint);
   try {
     await webpush.sendNotification(
       {
@@ -135,24 +149,45 @@ async function sendOne(
       },
       payloadJson,
     );
+    console.log(`[juice-box-push] send host=${host} status=ok`);
+    return "ok";
   } catch (err: unknown) {
     const status = (err as { statusCode?: number })?.statusCode;
+    // web-push attaches the upstream response body on errors; truncate
+    // because some push services return very chatty diagnostic JSON.
+    const body = (err as { body?: string })?.body;
+    const message =
+      typeof body === "string" && body.length > 0
+        ? body.slice(0, 240).replace(/\s+/g, " ")
+        : err instanceof Error
+          ? err.message
+          : "(no message)";
+    console.error(
+      `[juice-box-push] send host=${host} status=error code=${status ?? "?"} body=${message}`,
+    );
     if (status === 404 || status === 410) {
       // Subscription is gone for good (user uninstalled the PWA,
       // revoked permission, browser cleared data, etc.). Drop the row
       // so we don't keep generating dead requests for it.
+      console.log(
+        `[juice-box-push] gc host=${host} reason=${status} subscription_id=${sub.id}`,
+      );
       const supabase = getServerSupabase();
       try {
         await supabase
           .from(PUSH_SUBSCRIPTIONS_TABLE)
           .delete()
           .eq("id", sub.id);
-      } catch {
-        // Best-effort cleanup; don't escalate.
+      } catch (gcErr) {
+        console.error(
+          `[juice-box-push] gc-failed subscription_id=${sub.id} err=${String(gcErr)}`,
+        );
       }
+      return "gc";
     }
     // Other failures (5xx, network) are transient — we don't retry
     // here; the next post will re-attempt naturally.
+    return "error";
   }
 }
 
@@ -160,12 +195,28 @@ async function sendOne(
  * Sends `payload` as a Web Push notification to every Juice Box-
  * eligible salesperson's subscriptions except the sender's own. Safe
  * to fire-and-forget — internal errors are swallowed.
+ *
+ * DIAGNOSTICS (Pass 6 troubleshooting)
+ *   Every step emits a `[juice-box-push] …` log line on Vercel
+ *   function logs so we can prove the send was attempted, what the
+ *   push service responded, and how long the whole fan-out took.
+ *   Endpoint hosts are logged; the auth-bearing path segment is not.
  */
 export async function fanOutJuiceBoxPush(opts: {
   excludeSalespersonId: string;
   payload: FanOutPayload;
 }): Promise<void> {
-  if (!getVapidConfig()) return; // not configured — silently skip
+  const startedAt = Date.now();
+  console.log(
+    `[juice-box-push] fan-out start sender=${opts.excludeSalespersonId}`,
+  );
+
+  if (!getVapidConfig()) {
+    console.warn(
+      "[juice-box-push] vapid-not-configured — skipping fan-out. Set NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT to enable.",
+    );
+    return;
+  }
 
   const supabase = getServerSupabase();
 
@@ -177,8 +228,17 @@ export async function fanOutJuiceBoxPush(opts: {
     .from(PUSH_SUBSCRIPTIONS_TABLE)
     .select("id, endpoint, p256dh, auth, salesperson_id")
     .neq("salesperson_id", opts.excludeSalespersonId);
-  if (subsRes.error || !subsRes.data || subsRes.data.length === 0) return;
-  const subs = subsRes.data as SubscriptionRow[];
+  if (subsRes.error) {
+    console.error(
+      `[juice-box-push] subscriptions-fetch-error: ${subsRes.error.message}`,
+    );
+    return;
+  }
+  const subs = (subsRes.data ?? []) as SubscriptionRow[];
+  console.log(
+    `[juice-box-push] subscriptions-found count=${subs.length} (after sender-exclude)`,
+  );
+  if (subs.length === 0) return;
 
   const peopleRes = await supabase
     .from("salespeople")
@@ -187,7 +247,12 @@ export async function fanOutJuiceBoxPush(opts: {
       "id",
       Array.from(new Set(subs.map((s) => s.salesperson_id))),
     );
-  if (peopleRes.error || !peopleRes.data) return;
+  if (peopleRes.error || !peopleRes.data) {
+    console.error(
+      `[juice-box-push] people-fetch-error: ${peopleRes.error?.message ?? "no data"}`,
+    );
+    return;
+  }
   const peopleById = new Map<string, SalespersonRow>(
     (peopleRes.data as SalespersonRow[]).map((p) => [p.id, p]),
   );
@@ -200,8 +265,39 @@ export async function fanOutJuiceBoxPush(opts: {
     const p = peopleById.get(s.salesperson_id);
     return p ? isJuiceBoxEligible(p) : false;
   });
+  const hostList = Array.from(
+    new Set(eligible.map((s) => endpointHost(s.endpoint))),
+  ).join(",");
+  console.log(
+    `[juice-box-push] eligible count=${eligible.length} hosts=${hostList || "(none)"}`,
+  );
   if (eligible.length === 0) return;
 
   const payloadJson = JSON.stringify(opts.payload);
-  await Promise.allSettled(eligible.map((s) => sendOne(s, payloadJson)));
+  const results = await Promise.allSettled(
+    eligible.map((s) => sendOne(s, payloadJson)),
+  );
+
+  // Aggregate per-status counts so the summary line is grep-able.
+  let ok = 0;
+  let gc = 0;
+  let error = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      if (r.value === "ok") ok++;
+      else if (r.value === "gc") gc++;
+      else error++;
+    } else {
+      // Should be unreachable — sendOne catches internally — but log
+      // defensively so a future change doesn't silently swallow errors.
+      error++;
+      console.error(
+        `[juice-box-push] send unexpected-rejection: ${String(r.reason)}`,
+      );
+    }
+  }
+  const elapsed = Date.now() - startedAt;
+  console.log(
+    `[juice-box-push] fan-out complete sender=${opts.excludeSalespersonId} eligible=${eligible.length} ok=${ok} gc=${gc} error=${error} elapsed_ms=${elapsed}`,
+  );
 }
