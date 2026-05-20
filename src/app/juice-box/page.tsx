@@ -423,12 +423,17 @@ export default function JuiceBoxPage() {
     <>
       <main
         // This page has TWO pieces of fixed bottom chrome — the BottomNav
-        // and the new fixed Composer below it — so the shared
-        // BOTTOM_NAV_SPACER (~5rem + safe area) isn't enough. Reserve
-        // ~12rem to clear nav (5rem) + composer (~7rem) and keep the last
-        // message visible above the composer when the user scrolls all
-        // the way down.
-        className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(12rem+env(safe-area-inset-bottom))]"
+        // (~5rem + safe area) and the fixed Composer above it (~7rem) —
+        // so the shared BOTTOM_NAV_SPACER isn't enough. We also reserve
+        // an extra 6rem of room below the last message so the manual
+        // window.scrollTo computation in FeedList can actually scroll the
+        // latest message to a "lower-middle" landing position above the
+        // composer. Without this headroom, scrollTop is clamped at
+        // scrollTop_max and the latest message lands flush against the
+        // composer regardless of how aggressive the target is.
+        //   nav 5rem + composer 7rem + lower-middle comfort 6rem
+        //   = 18rem + env(safe-area-inset-bottom)
+        className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+env(safe-area-inset-bottom))]"
       >
         <header className="space-y-0.5 pt-1 text-center">
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
@@ -1027,8 +1032,13 @@ function JuiceBoxFeed({
         (z-40); the ReplyModal at z-50 still covers both. Bottom offset
         clears the nav (~5rem) plus its iOS safe-area inset. Border-top +
         backdrop blur give the visual separation from feed scroll content.
+
+        The stable `id` lets FeedList's auto-scroll measure the composer's
+        actual top edge via getBoundingClientRect — that's how the
+        latest-message landing math works without prop-drilling a ref.
       */}
       <div
+        id="juice-composer-bar"
         className="fixed inset-x-0 z-30 border-t border-border bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70"
         style={{ bottom: "calc(5rem + env(safe-area-inset-bottom))" }}
       >
@@ -1408,9 +1418,23 @@ function FeedList({
   /** True while a Load Older fetch is in flight; disables the button. */
   loadingMore: boolean;
 }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
+
+  // Latest-message scroll target id — built off the existing per-card id
+  // pattern. We look the element up via document.getElementById from the
+  // scroll effect; no forwardRef needed on FeedCard.
+  const latestMessageId =
+    state.kind === "ready" && state.messages.length > 0
+      ? state.messages[state.messages.length - 1].id
+      : null;
+
+  // Generous comfort offset above the composer's TOP edge after auto-
+  // scroll. Lands the latest message in the lower-middle of visible feed
+  // rather than just above the composer. ~6rem feels right on phone
+  // viewports; main's pb-[18rem+safe] is sized to make this reachable
+  // without browser-side scrollTop clamping.
+  const AUTO_SCROLL_COMFORT_PX = 96;
 
   // Divider grace state.
   //   dividerAnchor lags `lastReadAt` so the "New messages" marker stays
@@ -1541,11 +1565,40 @@ function FeedList({
       firstScrollRef.current ||
       forceScrollRef.current ||
       nearBottomRef.current;
-    if (shouldScroll) {
-      bottomRef.current?.scrollIntoView({
-        behavior: firstScrollRef.current ? "auto" : "smooth",
-        block: "end",
-      });
+
+    if (shouldScroll && latestMessageId) {
+      // Manual scroll calculation. We computed `bottomRef.scrollIntoView`
+      // previously, but on iPhone PWA the browser clamps scrollTop at
+      // scrollTop_max regardless of scroll-margin-bottom, so the latest
+      // message kept landing at the composer's edge. Compute the exact
+      // target ourselves:
+      //
+      //   target = window.scrollY
+      //          + latestRect.bottom                    // current viewport y of last msg bottom
+      //          - composerRect.top                     // bring it up to composer top
+      //          + AUTO_SCROLL_COMFORT_PX               // push it further up
+      //
+      // composerRect.top already encodes (nav height + composer height +
+      // env(safe-area-inset-bottom)) via getBoundingClientRect, so no rem
+      // guesses creep in. main's pb-[18rem+safe] gives the document
+      // enough scrollable range to actually reach this target — without
+      // that headroom, scrollTo would clamp the same way scrollIntoView did.
+      const messageEl = document.getElementById(
+        `juice-message-${latestMessageId}`,
+      );
+      const composer = document.getElementById("juice-composer-bar");
+      if (messageEl && composer) {
+        const messageBottom = messageEl.getBoundingClientRect().bottom;
+        const composerTop = composer.getBoundingClientRect().top;
+        const target = Math.max(
+          0,
+          window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
+        );
+        window.scrollTo({
+          top: target,
+          behavior: firstScrollRef.current ? "auto" : "smooth",
+        });
+      }
       // We just landed (or stayed) at the bottom — mark everything as read.
       // Debounced upstream so the initial snap + an inbound realtime hit
       // collapse into one POST.
@@ -1556,7 +1609,7 @@ function FeedList({
     // scroll — once handled, future inbound messages go back to the
     // "near-bottom only" rule.
     forceScrollRef.current = false;
-  }, [messageCount, forceScrollRef]);
+  }, [messageCount, latestMessageId, forceScrollRef]);
 
   if (state.kind === "loading") {
     return (
@@ -1620,38 +1673,12 @@ function FeedList({
         })
       )}
       {/*
-        Auto-scroll target. `scroll-margin-bottom` controls where this
-        element lands inside the viewport when scrolled into view via
-        scrollIntoView({block:"end"}).
-
-        The value is intentionally large — significantly more than just
-        (nav + composer + safe-area). The fixed bottom composer visually
-        overlays the feed, so landing the newest message merely at the
-        composer's top edge reads as "the message is tucked under the
-        composer." Instead we push the landing position up to roughly the
-        lower-middle of the visible feed:
-          nav (5rem) + composer (~7rem) + iOS safe area
-          + a generous ~9rem of resting headroom = 21rem + safe-area.
-
-        scroll-margin only affects PROGRAMMATIC scrolling, not user
-        gestures — so manual scrolling can still send older messages
-        behind the composer (the desired "feed scrolls behind composer"
-        effect). The reserved 12rem + safe-area on the main wrapper
-        covers the manual scroll-to-end case.
-
-        Older messages can extend behind the composer during animated
-        auto-scroll on long unread runs — we only guarantee the NEWEST
-        message lands comfortably above the composer, per the product
-        rule.
+        Auto-scroll is now driven by a manual window.scrollTo() in the
+        scroll effect, which reads the latest message's getBoundingClientRect
+        directly. We rely on main's pb-[18rem+safe] to give the document
+        enough scrollable range for that target to land in the lower-middle
+        of visible feed. No sentinel element here.
       */}
-      <div
-        ref={bottomRef}
-        aria-hidden="true"
-        style={{
-          scrollMarginBottom:
-            "calc(21rem + env(safe-area-inset-bottom))",
-        }}
-      />
     </section>
   );
 }
