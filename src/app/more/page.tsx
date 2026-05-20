@@ -41,7 +41,7 @@ export default function MorePage() {
   return (
     <>
       <main
-        className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-4 p-4 ${BOTTOM_NAV_SPACER}`}
+        className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-4 p-4 ${BOTTOM_NAV_SPACER}`}
       >
         <header className="space-y-1 pt-1">
           <p className="text-sm text-muted-foreground">Account</p>

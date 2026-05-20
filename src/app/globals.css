@@ -143,3 +143,24 @@
     transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }
 }
+
+/* Standalone PWA top safe-area utility — opt-in per major-screen wrapper.
+   When launched from Home Screen with viewport-fit=cover + the
+   black-translucent status bar, iOS draws content under the notch. This
+   class adds `padding-top: env(safe-area-inset-top)` so the screen header
+   clears the status bar.
+
+   Gated to `display-mode: standalone` so it's a no-op in normal browser
+   mode (where the browser chrome already keeps content clear and
+   env(safe-area-inset-top) can be nonzero under viewport-fit=cover —
+   applying it unconditionally would introduce ugly extra spacing).
+
+   Intentionally NOT applied to /juice-box: its sticky composer owns notch
+   clearance via its own `paddingTop: calc(0.5rem + env(safe-area-inset-top))`
+   and adding this class to its <main> would double-pad the initial scroll
+   position. */
+@media (display-mode: standalone) {
+  .pwa-safe-top {
+    padding-top: calc(1rem + env(safe-area-inset-top));
+  }
+}

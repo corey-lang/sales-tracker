@@ -100,7 +100,7 @@ export default function LeaderboardPage() {
 
   return (
     <>
-    <main className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}>
+    <main className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}>
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">

@@ -61,7 +61,7 @@ export default function AdminLayout({
     <>
       <div
         className={cn(
-          "mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 p-4 sm:p-6",
+          "pwa-safe-top mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 p-4 sm:p-6",
           BOTTOM_NAV_SPACER,
         )}
       >

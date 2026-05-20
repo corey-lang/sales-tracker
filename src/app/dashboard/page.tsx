@@ -140,7 +140,7 @@ export default function DashboardPage() {
     return (
       <>
         <main
-          className={`mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}
+          className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}
         >
           <header className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -199,7 +199,7 @@ export default function DashboardPage() {
   // contact review-and-save workflow. Closing the panel restores the dashboard.
   if (isAe && phoneScan) {
     return (
-      <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
+      <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
         <PhoneContactScanner
           salesperson={salesperson}
           file={phoneScan.file}
@@ -224,7 +224,7 @@ export default function DashboardPage() {
 
   return (
     <>
-    <main className={`mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}>
+    <main className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}>
       {/* Compact greeting — the weekly momentum card is the visual hero. */}
       <header className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">

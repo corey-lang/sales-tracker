@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -15,8 +15,23 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sales Tracker",
-  description: "Daily sales activity tracking for the team",
+  title: "Elevate AE",
+  description: "Daily sales activity tracking for the Elevate AE team",
+  applicationName: "Elevate AE",
+  appleWebApp: {
+    capable: true,
+    title: "Elevate",
+    statusBarStyle: "black-translucent",
+  },
+  formatDetection: {
+    telephone: false,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0f1115",
+  colorScheme: "dark",
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
