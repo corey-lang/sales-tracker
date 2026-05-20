@@ -1429,8 +1429,35 @@ function FeedList({
       ? state.messages[state.messages.length - 1].id
       : null;
 
+  // First-unread scroll target id. Used for the INITIAL auto-scroll only
+  // — when the user opens Juice Box with new messages waiting, we land
+  // them at the top of the unread block rather than at the latest.
+  //
+  // Returns null (= "use the latest target instead") when:
+  //   - feed isn't ready yet,
+  //   - unread bootstrap hasn't resolved (we don't know lastReadAt yet),
+  //   - everything is already read,
+  //   - or the first unread IS the latest (the two targets collapse, so
+  //     landing at "first unread" gives no UX benefit and skips the
+  //     mark-read that landing at latest triggers).
+  //
+  // Uses the live lastReadAt prop (not the grace-lagged dividerAnchor)
+  // because we care about the actual unread frontier, not the visual
+  // divider's fade timing.
+  const firstUnreadMessageId = useMemo(() => {
+    if (state.kind !== "ready") return null;
+    if (state.messages.length === 0) return null;
+    if (!unreadLoaded) return null;
+    const idx =
+      lastReadAt === null
+        ? 0
+        : state.messages.findIndex((m) => m.created_at > lastReadAt);
+    if (idx < 0 || idx >= state.messages.length - 1) return null;
+    return state.messages[idx].id;
+  }, [state, lastReadAt, unreadLoaded]);
+
   // Generous comfort offset above the composer's TOP edge after auto-
-  // scroll. Lands the latest message in the lower-middle of visible feed
+  // scroll. Lands the targeted message in the lower-middle of visible feed
   // rather than just above the composer. ~6rem feels right on phone
   // viewports; main's pb-[18rem+safe] is sized to make this reachable
   // without browser-side scrollTop clamping.
@@ -1561,55 +1588,86 @@ function FeedList({
       return;
     }
 
+    // Hold the initial scroll until the unread bootstrap resolves —
+    // otherwise we'd race: render messages → no marker yet → "scroll to
+    // latest" → marker arrives → we'd want to have landed at first
+    // unread instead. firstScrollRef stays true so the next render
+    // (after unreadLoaded flips) picks the correct target.
+    if (firstScrollRef.current && !unreadLoaded) return;
+
     const shouldScroll =
       firstScrollRef.current ||
       forceScrollRef.current ||
       nearBottomRef.current;
 
-    if (shouldScroll && latestMessageId) {
-      // Manual scroll calculation. We computed `bottomRef.scrollIntoView`
-      // previously, but on iPhone PWA the browser clamps scrollTop at
-      // scrollTop_max regardless of scroll-margin-bottom, so the latest
-      // message kept landing at the composer's edge. Compute the exact
-      // target ourselves:
-      //
-      //   target = window.scrollY
-      //          + latestRect.bottom                    // current viewport y of last msg bottom
-      //          - composerRect.top                     // bring it up to composer top
-      //          + AUTO_SCROLL_COMFORT_PX               // push it further up
-      //
-      // composerRect.top already encodes (nav height + composer height +
-      // env(safe-area-inset-bottom)) via getBoundingClientRect, so no rem
-      // guesses creep in. main's pb-[18rem+safe] gives the document
-      // enough scrollable range to actually reach this target — without
-      // that headroom, scrollTo would clamp the same way scrollIntoView did.
-      const messageEl = document.getElementById(
-        `juice-message-${latestMessageId}`,
-      );
-      const composer = document.getElementById("juice-composer-bar");
-      if (messageEl && composer) {
-        const messageBottom = messageEl.getBoundingClientRect().bottom;
-        const composerTop = composer.getBoundingClientRect().top;
-        const target = Math.max(
-          0,
-          window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
+    if (shouldScroll) {
+      // Initial open with unread → land at the FIRST unread message.
+      // Every other case (self-post, realtime-while-near-bottom, or
+      // initial open with everything already read) → land at LATEST.
+      const useFirstUnread =
+        firstScrollRef.current && firstUnreadMessageId !== null;
+      const targetId = useFirstUnread
+        ? firstUnreadMessageId
+        : latestMessageId;
+
+      if (targetId) {
+        // Manual scroll calculation. We used to call scrollIntoView, but
+        // on iPhone PWA the browser clamps scrollTop at scrollTop_max
+        // regardless of scroll-margin-bottom, so the target kept
+        // landing at the composer's edge. Compute the exact target:
+        //
+        //   target = window.scrollY
+        //          + targetRect.bottom                   // viewport y of target bottom
+        //          - composerRect.top                    // bring it up to composer top
+        //          + AUTO_SCROLL_COMFORT_PX              // push further up
+        //
+        // composerRect.top already encodes (nav height + composer height
+        // + env(safe-area-inset-bottom)) via getBoundingClientRect, so
+        // no rem guesses creep in. main's pb-[18rem+safe] gives the
+        // document enough scrollable range to actually reach this
+        // target — without that headroom, scrollTo would clamp the same
+        // way scrollIntoView did.
+        const messageEl = document.getElementById(
+          `juice-message-${targetId}`,
         );
-        window.scrollTo({
-          top: target,
-          behavior: firstScrollRef.current ? "auto" : "smooth",
-        });
+        const composer = document.getElementById("juice-composer-bar");
+        if (messageEl && composer) {
+          const messageBottom = messageEl.getBoundingClientRect().bottom;
+          const composerTop = composer.getBoundingClientRect().top;
+          const target = Math.max(
+            0,
+            window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
+          );
+          window.scrollTo({
+            top: target,
+            behavior: firstScrollRef.current ? "auto" : "smooth",
+          });
+        }
       }
-      // We just landed (or stayed) at the bottom — mark everything as read.
-      // Debounced upstream so the initial snap + an inbound realtime hit
-      // collapse into one POST.
-      onNearBottomRef.current();
+
+      // Mark-read only fires when we land at the LATEST content. Landing
+      // at the first unread means newer unreads are still hidden below /
+      // behind the composer — those should stay "unread" until the user
+      // scrolls down into them. The window scroll listener takes over
+      // from here: once they reach the near-bottom band, it fires
+      // onNearBottom and the unread count clears.
+      if (!useFirstUnread) {
+        onNearBottomRef.current();
+      }
     }
+
     firstScrollRef.current = false;
     // Consume the one-shot self-post signal whether or not it fired the
     // scroll — once handled, future inbound messages go back to the
     // "near-bottom only" rule.
     forceScrollRef.current = false;
-  }, [messageCount, latestMessageId, forceScrollRef]);
+  }, [
+    messageCount,
+    latestMessageId,
+    firstUnreadMessageId,
+    forceScrollRef,
+    unreadLoaded,
+  ]);
 
   if (state.kind === "loading") {
     return (
