@@ -645,12 +645,15 @@ function FeedList({
         })
       )}
       {/*
-        Comfort gap above the bottom-nav clearance (BOTTOM_NAV_SPACER on main
-        already reserves space for the nav + iOS safe area). This extra slice
-        keeps the most recent post visually clear of the nav even on shorter
-        viewports and after a quick smooth-scroll.
+        Comfort gap above the bottom-nav clearance. BOTTOM_NAV_SPACER on main
+        already reserves space for the nav + iOS safe area, but in practice
+        scrollIntoView({block:"end"}) lands the latest message flush against
+        that reserve, leaving it visually crowded against (and on shorter
+        viewports partially obscured by) the nav. h-20 (5rem / 80px) buys
+        comfortable breathing room without feeling like dead space at the
+        bottom of the feed.
       */}
-      <div aria-hidden="true" className="h-4" />
+      <div aria-hidden="true" className="h-20" />
       <div ref={bottomRef} aria-hidden="true" />
     </section>
   );
