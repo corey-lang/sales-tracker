@@ -1392,16 +1392,63 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [media, setMedia] = useState<PendingMedia | null>(null);
   const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  // True while the user is actively composing — drives the compact /
+  // expanded layout swap. Tap or focus the textarea → expanded.
+  // Textarea blur → 150 ms grace period (see handleBlur) → collapse,
+  // unless there's text, media, an active modal, or an error.
+  const [focused, setFocused] = useState(false);
 
   // Hidden <input> for the image picker. On iOS this surfaces the
   // native sheet with Photo Library / Take Photo / Choose Files. No
   // `capture` attribute so the camera isn't forced.
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Pending blur timeout. We DON'T flip `focused` to false the instant
+  // the textarea loses focus — tapping the Image or GIF button briefly
+  // shifts focus off the textarea, and we don't want a fleeting
+  // collapse-then-expand flash when a media attachment lands. 150 ms
+  // is long enough for the new control's click to land + (potentially)
+  // attach media, short enough that a real "click outside" feels prompt.
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+    };
+  }, []);
+
+  const handleTextareaFocus = () => {
+    if (blurTimerRef.current) {
+      clearTimeout(blurTimerRef.current);
+      blurTimerRef.current = null;
+    }
+    setFocused(true);
+  };
+  const handleTextareaBlur = () => {
+    if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+    blurTimerRef.current = setTimeout(() => {
+      blurTimerRef.current = null;
+      setFocused(false);
+    }, 150);
+  };
 
   const trimmed = text.trim();
   // Either text or media is enough to submit (server enforces the same
   // rule); both is fine.
   const canSubmit = (trimmed.length > 0 || media !== null) && !sending;
+
+  // Derived "expand" decision. Composer is expanded whenever there's a
+  // reason for the user to see the full UI (typing, attached media,
+  // posting, error, GIF picker open) — otherwise it sits compact.
+  // Pure derivation = no extra state to keep in sync, and the
+  // transitions are determined entirely by the underlying signals
+  // they react to.
+  const isExpanded =
+    focused ||
+    text.length > 0 ||
+    media !== null ||
+    sending ||
+    error !== null ||
+    gifPickerOpen;
 
   // Revoke any objectURL when the attached image changes or the
   // composer unmounts, so we don't leak blob handles between attaches.
@@ -1608,12 +1655,26 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     onPosted(body.message);
     setText("");
     clearMedia();
+    // Collapse the composer back to its compact resting state.
+    // Cancel any pending blur-grace timer first so it can't fire
+    // later and re-collapse mid-transition.
+    if (blurTimerRef.current) {
+      clearTimeout(blurTimerRef.current);
+      blurTimerRef.current = null;
+    }
+    setFocused(false);
+    // Drop the OS keyboard on mobile by blurring the textarea
+    // explicitly — without this iOS keeps the keyboard up after a
+    // post, which feels stuck.
+    textareaRef.current?.blur();
   };
 
   return (
     <Card size="sm" className="py-2.5">
       <CardContent className="px-3">
         <form onSubmit={handleSubmit} className="space-y-2">
+          {/* Media preview only appears when something is attached
+              (which always implies isExpanded via the derivation). */}
           {media && (
             <MediaAttachmentPreview
               media={media}
@@ -1621,67 +1682,102 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
               onRemove={clearMedia}
             />
           )}
-          <textarea
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              if (error) setError(null);
-            }}
-            placeholder={
-              media
-                ? "Add a caption…"
-                : "Drop some juice... a win, meme, GIF, or shoutout"
-            }
-            rows={2}
-            maxLength={MESSAGE_MAX_LENGTH}
-            disabled={sending}
-            // text-base (16px) on EVERY viewport to defeat iOS/WebKit's
-            // "zoom into any focused input < 16px" behavior.
-            className="min-h-[2.5rem] w-full resize-none rounded-md border border-input bg-background/40 px-3 py-1.5 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
-          />
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                aria-label="Attach an image"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={sending}
-                className="inline-flex size-8 items-center justify-center rounded-md bg-muted/60 text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <ImagePlus aria-hidden="true" className="size-4" />
-              </button>
-              <button
-                type="button"
-                aria-label="Pick a GIF"
-                onClick={() => setGifPickerOpen(true)}
-                disabled={sending}
-                className="inline-flex h-8 items-center rounded-md bg-muted/60 px-2 text-[11px] font-bold tracking-wide text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                GIF
-              </button>
-              <p
-                className={`pl-1 text-[11px] ${
-                  trimmed.length > MESSAGE_MAX_LENGTH - 100
-                    ? "text-muted-foreground"
-                    : "text-muted-foreground/60"
-                }`}
-              >
-                {trimmed.length}/{MESSAGE_MAX_LENGTH}
-              </p>
-            </div>
-            <Button
-              type="submit"
-              size="sm"
-              disabled={!canSubmit}
-              className="h-7 gap-1.5 px-3 text-xs"
-            >
-              {sending ? (
-                <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
-              ) : (
-                <Send aria-hidden="true" className="size-3.5" />
+          {/* Two layouts share the same textarea + buttons-container
+              DOM nodes — only the flex direction + sizing change with
+              isExpanded — so focus is preserved across the transition.
+                * Compact: row layout. Textarea grows (flex-1), buttons
+                  ride along the right. No chars counter, no Post.
+                * Expanded: column layout. Textarea full-width above a
+                  buttons row that includes chars counter and Post. */}
+          <div
+            className={cn(
+              "flex gap-2",
+              isExpanded ? "flex-col" : "items-end",
+            )}
+          >
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onFocus={handleTextareaFocus}
+              onBlur={handleTextareaBlur}
+              onChange={(e) => {
+                setText(e.target.value);
+                if (error) setError(null);
+              }}
+              placeholder={
+                media
+                  ? "Add a caption…"
+                  : "Drop some juice... a win, meme, GIF, or shoutout"
+              }
+              rows={isExpanded ? 2 : 1}
+              maxLength={MESSAGE_MAX_LENGTH}
+              disabled={sending}
+              // text-base (16px) on EVERY viewport to defeat iOS/WebKit's
+              // "zoom into any focused input < 16px" behavior.
+              className={cn(
+                "resize-none rounded-md border border-input bg-background/40 px-3 py-1.5 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
+                isExpanded
+                  ? "w-full min-h-[2.5rem]"
+                  : "min-w-0 flex-1 min-h-[2.25rem]",
               )}
-              {sending ? "Posting…" : "Post"}
-            </Button>
+            />
+            <div
+              className={cn(
+                "flex items-center gap-1",
+                isExpanded ? "justify-between" : "shrink-0",
+              )}
+            >
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  aria-label="Attach an image"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={sending}
+                  className="inline-flex size-8 items-center justify-center rounded-md bg-muted/60 text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ImagePlus aria-hidden="true" className="size-4" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Pick a GIF"
+                  onClick={() => setGifPickerOpen(true)}
+                  disabled={sending}
+                  className="inline-flex h-8 items-center rounded-md bg-muted/60 px-2 text-[11px] font-bold tracking-wide text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  GIF
+                </button>
+                {isExpanded && (
+                  <p
+                    className={cn(
+                      "pl-1 text-[11px]",
+                      trimmed.length > MESSAGE_MAX_LENGTH - 100
+                        ? "text-muted-foreground"
+                        : "text-muted-foreground/60",
+                    )}
+                  >
+                    {trimmed.length}/{MESSAGE_MAX_LENGTH}
+                  </p>
+                )}
+              </div>
+              {isExpanded && (
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={!canSubmit}
+                  className="h-8 gap-1.5 px-3 text-xs"
+                >
+                  {sending ? (
+                    <Loader2
+                      aria-hidden="true"
+                      className="size-3.5 animate-spin"
+                    />
+                  ) : (
+                    <Send aria-hidden="true" className="size-3.5" />
+                  )}
+                  {sending ? "Posting…" : "Post"}
+                </Button>
+              )}
+            </div>
           </div>
           {error && <p className="text-xs text-destructive">{error}</p>}
           <input
