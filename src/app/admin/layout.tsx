@@ -9,6 +9,7 @@ import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
+import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 
 // Shared shell for every /admin/* page. It owns the one admin-role guard, the
 // top bar (logo + log out), and the section navigation — so each admin page
@@ -57,45 +58,53 @@ export default function AdminLayout({
   };
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 p-4 sm:p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm text-muted-foreground">Admin</p>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Hi, {salesperson.first_name}
-          </h1>
-        </div>
-        <Logo width={160} height={49} priority className="shrink-0" />
-        <Button variant="outline" size="sm" onClick={handleLogout}>
-          Log out
-        </Button>
-      </header>
-
-      <nav
-        aria-label="Admin sections"
-        className="flex flex-wrap gap-1.5 rounded-lg border bg-muted/40 p-1.5"
+    <>
+      <div
+        className={cn(
+          "mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-4 p-4 sm:p-6",
+          BOTTOM_NAV_SPACER,
+        )}
       >
-        {ADMIN_NAV.map((item) => {
-          const active = pathname === item.href;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              aria-current={active ? "page" : undefined}
-              className={cn(
-                "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                active
-                  ? "bg-background text-foreground shadow-sm ring-1 ring-border"
-                  : "text-muted-foreground hover:bg-background/70 hover:text-foreground",
-              )}
-            >
-              {item.label}
-            </Link>
-          );
-        })}
-      </nav>
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-muted-foreground">Admin</p>
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              Hi, {salesperson.first_name}
+            </h1>
+          </div>
+          <Logo width={160} height={49} priority className="shrink-0" />
+          <Button variant="outline" size="sm" onClick={handleLogout}>
+            Log out
+          </Button>
+        </header>
 
-      {children}
-    </div>
+        <nav
+          aria-label="Admin sections"
+          className="flex flex-wrap gap-1.5 rounded-lg border bg-muted/40 p-1.5"
+        >
+          {ADMIN_NAV.map((item) => {
+            const active = pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                  active
+                    ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                    : "text-muted-foreground hover:bg-background/70 hover:text-foreground",
+                )}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {children}
+      </div>
+      <BottomNav salesperson={salesperson} />
+    </>
   );
 }
