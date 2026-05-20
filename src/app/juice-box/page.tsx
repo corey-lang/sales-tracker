@@ -13,9 +13,13 @@ import { useRouter } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
   CornerUpLeft,
+  ImagePlus,
+  Loader2,
   MoreVertical,
+  Search,
   Send,
   SmilePlus,
+  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -29,17 +33,23 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 import {
   ALLOWED_REACTIONS,
   FEED_PAGE_SIZE,
+  JUICE_BOX_MEDIA_BUCKET,
+  MEDIA_ALLOWED_IMAGE_MIME_TYPES,
+  MEDIA_MAX_FILE_SIZE_BYTES,
   MESSAGE_MAX_LENGTH,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_CHANNEL,
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_REACTIONS_CHANNEL,
   TEAM_MESSAGE_REACTIONS_TABLE,
+  teamMessageMedia,
   type ReactionEmoji,
   type TeamMessage,
+  type TeamMessageMedia,
   type TeamMessageReaction,
   type TeamMessageReactionRow,
   type TeamMessageReactor,
+  type GifResult,
 } from "@/lib/team-messages";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -595,6 +605,12 @@ function JuiceBoxFeed({
     [],
   );
 
+  // Lightbox state — set when the user taps any inline image/GIF in the
+  // feed. The full TeamMessageMedia slice is passed so the lightbox can
+  // size itself to the asset's intrinsic aspect ratio.
+  const [lightbox, setLightbox] = useState<TeamMessageMedia | null>(null);
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+
   // Pagination state. `hasMore` defaults to true so the "Load older" button
   // is available until the first server response tells us otherwise (or
   // the page returns fewer than the requested limit). `loadingMore`
@@ -1017,6 +1033,7 @@ function JuiceBoxFeed({
         onShowReactionDetails={(messageId, emoji) =>
           setReactionDetails({ messageId, emoji })
         }
+        onOpenMedia={setLightbox}
         initialIds={initialIds}
         forceScrollRef={forceScrollRef}
         lastReadAt={lastReadAt}
@@ -1062,17 +1079,161 @@ function JuiceBoxFeed({
           onClose={closeReactionDetails}
         />
       )}
+      {lightbox && (
+        <MediaLightbox media={lightbox} onClose={closeLightbox} />
+      )}
     </>
   );
 }
+
+/**
+ * Composer state for a pending attachment. Image flow stores the local
+ * File + an objectURL preview until the user hits Post (which triggers
+ * an upload). GIF flow already has the provider id from the picker,
+ * so no upload step — we just stash the picked GifResult for preview
+ * and submit its `id` to the server, which re-fetches the asset.
+ */
+type PendingMedia =
+  | {
+      kind: "image";
+      file: File;
+      previewUrl: string;
+      width: number | null;
+      height: number | null;
+    }
+  | {
+      kind: "gif";
+      gif: GifResult;
+    };
 
 function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [media, setMedia] = useState<PendingMedia | null>(null);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
+
+  // Hidden <input> for the image picker. On iOS this surfaces the
+  // native sheet with Photo Library / Take Photo / Choose Files. No
+  // `capture` attribute so the camera isn't forced.
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const trimmed = text.trim();
-  const canSubmit = trimmed.length > 0 && !sending;
+  // Either text or media is enough to submit (server enforces the same
+  // rule); both is fine.
+  const canSubmit = (trimmed.length > 0 || media !== null) && !sending;
+
+  // Revoke any objectURL when the attached image changes or the
+  // composer unmounts, so we don't leak blob handles between attaches.
+  useEffect(() => {
+    return () => {
+      if (media?.kind === "image") URL.revokeObjectURL(media.previewUrl);
+    };
+  }, [media]);
+
+  /** Local-only validation + preview generation for an image pick. */
+  const attachImageFile = (file: File) => {
+    if (!(MEDIA_ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) {
+      setError("Pick a JPG, PNG, WebP, or GIF image.");
+      return;
+    }
+    if (file.size > MEDIA_MAX_FILE_SIZE_BYTES) {
+      const mb = Math.round(MEDIA_MAX_FILE_SIZE_BYTES / (1024 * 1024));
+      setError(`Image is too large — keep it under ${mb} MB.`);
+      return;
+    }
+    const previewUrl = URL.createObjectURL(file);
+    // Drop any prior pending media (image OR gif). Read intrinsic dims
+    // off an Image() so the inserted record carries width/height.
+    setMedia((prev) => {
+      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
+      return {
+        kind: "image",
+        file,
+        previewUrl,
+        width: null,
+        height: null,
+      };
+    });
+    setError(null);
+    const img = new window.Image();
+    img.onload = () => {
+      setMedia((cur) =>
+        cur?.kind === "image" && cur.previewUrl === previewUrl
+          ? { ...cur, width: img.naturalWidth, height: img.naturalHeight }
+          : cur,
+      );
+    };
+    img.src = previewUrl;
+  };
+
+  const onImageInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset so picking the same file twice re-fires onChange.
+    e.target.value = "";
+    if (file) attachImageFile(file);
+  };
+
+  const clearMedia = () => {
+    setMedia((prev) => {
+      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
+      return null;
+    });
+  };
+
+  const onGifSelected = (gif: GifResult) => {
+    setMedia((prev) => {
+      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
+      return { kind: "gif", gif };
+    });
+    setError(null);
+    setGifPickerOpen(false);
+  };
+
+  /**
+   * Two-phase image upload:
+   *   1. Ask the server for a one-time signed upload URL scoped to a
+   *      <salesperson_id>/<uuid>.<ext> path.
+   *   2. PUT the file via supabase-js's uploadToSignedUrl. Bucket-level
+   *      MIME + size limits enforce the file matches the declared shape.
+   * Returns the public URL of the uploaded object on success.
+   */
+  const uploadImage = async (
+    file: File,
+  ): Promise<{ publicUrl: string }> => {
+    const signRes = await apiFetch("/api/juice-box/media/sign-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content_type: file.type,
+        size: file.size,
+      }),
+    });
+    if (!signRes.ok) {
+      const body = (await signRes.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      throw new Error(body?.error ?? `Couldn't prepare upload (${signRes.status}).`);
+    }
+    const signBody = (await signRes.json()) as {
+      token: string;
+      path: string;
+      public_url: string;
+    };
+    const upload = await supabase.storage
+      .from(JUICE_BOX_MEDIA_BUCKET)
+      .uploadToSignedUrl(signBody.path, signBody.token, file, {
+        contentType: file.type,
+      });
+    if (upload.error) {
+      throw new Error(`Upload failed: ${upload.error.message}`);
+    }
+    // The server-known `path` is intentionally NOT returned to the
+    // caller — the create-message route re-derives it from public_url
+    // and pins it to me.id, so trusting a client-passed path would
+    // re-introduce the spoofing surface we just closed.
+    return { publicUrl: signBody.public_url };
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1080,12 +1241,47 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     setSending(true);
     setError(null);
 
+    // The wire shape is intentionally minimal: for images we send the
+    // public URL + intrinsic dims, for GIFs we send only the provider
+    // id. The server derives every other media_* field (storage_path
+    // from the URL, every GIF field by re-fetching the provider by id)
+    // so a manually-crafted POST can't smuggle in foreign URLs.
+    type ImagePayload = {
+      image_url: string;
+      image_width?: number;
+      image_height?: number;
+      image_alt?: string;
+    };
+    type GifPayload = { gif_id: string };
+    let mediaPayload: ImagePayload | GifPayload | null = null;
+
+    try {
+      if (media?.kind === "image") {
+        const { publicUrl } = await uploadImage(media.file);
+        mediaPayload = {
+          image_url: publicUrl,
+          image_width: media.width ?? undefined,
+          image_height: media.height ?? undefined,
+          image_alt: media.file.name,
+        };
+      } else if (media?.kind === "gif") {
+        mediaPayload = { gif_id: media.gif.id };
+      }
+    } catch (err) {
+      setSending(false);
+      setError(err instanceof Error ? err.message : "Upload failed.");
+      return;
+    }
+
     let res: Response;
     try {
       res = await apiFetch("/api/team-messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({
+          message: trimmed,
+          ...(mediaPayload ?? {}),
+        }),
       });
     } catch (err) {
       setSending(false);
@@ -1109,55 +1305,319 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     // upsertMessage dedups by id so it's a no-op the second time.
     onPosted(body.message);
     setText("");
+    clearMedia();
   };
 
   return (
     <Card size="sm" className="py-2.5">
       <CardContent className="px-3">
         <form onSubmit={handleSubmit} className="space-y-2">
+          {media && (
+            <MediaAttachmentPreview
+              media={media}
+              disabled={sending}
+              onRemove={clearMedia}
+            />
+          )}
           <textarea
             value={text}
             onChange={(e) => {
               setText(e.target.value);
               if (error) setError(null);
             }}
-            placeholder="Share a win, intro, or shoutout…"
+            placeholder={
+              media
+                ? "Add a caption…"
+                : "Share a win, intro, or shoutout…"
+            }
             rows={2}
             maxLength={MESSAGE_MAX_LENGTH}
             disabled={sending}
             // text-base (16px) on EVERY viewport to defeat iOS/WebKit's
-            // "zoom into any focused input < 16px" behavior. A previous fix
-            // bumped only mobile (sm:text-sm restored 14px from 640px up),
-            // but iPhone landscape can exceed that breakpoint and was still
-            // triggering auto-zoom on focus. Keeping 16px everywhere is the
-            // only viewport-agnostic guard; padding/min-height/rows/button
-            // sizing are left alone so the composer stays compact.
+            // "zoom into any focused input < 16px" behavior.
             className="min-h-[2.5rem] w-full resize-none rounded-md border border-input bg-background/40 px-3 py-1.5 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-2">
-            <p
-              className={`text-[11px] ${
-                trimmed.length > MESSAGE_MAX_LENGTH - 100
-                  ? "text-muted-foreground"
-                  : "text-muted-foreground/60"
-              }`}
-            >
-              {trimmed.length}/{MESSAGE_MAX_LENGTH}
-            </p>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                aria-label="Attach an image"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <ImagePlus aria-hidden="true" className="size-4" />
+              </button>
+              <button
+                type="button"
+                aria-label="Pick a GIF"
+                onClick={() => setGifPickerOpen(true)}
+                disabled={sending}
+                className="inline-flex h-7 items-center rounded-md px-1.5 text-[11px] font-semibold text-muted-foreground ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                GIF
+              </button>
+              <p
+                className={`pl-1 text-[11px] ${
+                  trimmed.length > MESSAGE_MAX_LENGTH - 100
+                    ? "text-muted-foreground"
+                    : "text-muted-foreground/60"
+                }`}
+              >
+                {trimmed.length}/{MESSAGE_MAX_LENGTH}
+              </p>
+            </div>
             <Button
               type="submit"
               size="sm"
               disabled={!canSubmit}
               className="h-7 gap-1.5 px-3 text-xs"
             >
-              <Send aria-hidden="true" className="size-3.5" />
+              {sending ? (
+                <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+              ) : (
+                <Send aria-hidden="true" className="size-3.5" />
+              )}
               {sending ? "Posting…" : "Post"}
             </Button>
           </div>
           {error && <p className="text-xs text-destructive">{error}</p>}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={MEDIA_ALLOWED_IMAGE_MIME_TYPES.join(",")}
+            onChange={onImageInputChange}
+            className="sr-only"
+            aria-hidden="true"
+            tabIndex={-1}
+          />
         </form>
       </CardContent>
+      {gifPickerOpen && (
+        <GifPickerSheet
+          onSelect={onGifSelected}
+          onClose={() => setGifPickerOpen(false)}
+        />
+      )}
     </Card>
+  );
+}
+
+/**
+ * Thumbnail strip rendered above the composer textarea when the user has
+ * attached an image OR a GIF. Tight inline preview with an X overlay.
+ */
+function MediaAttachmentPreview({
+  media,
+  disabled,
+  onRemove,
+}: {
+  media: PendingMedia;
+  disabled: boolean;
+  onRemove: () => void;
+}) {
+  const src = media.kind === "image" ? media.previewUrl : media.gif.preview_url;
+  const alt = media.kind === "image" ? media.file.name : media.gif.alt;
+  const label = media.kind === "image" ? "Image" : "GIF";
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 p-1.5">
+      <div className="relative shrink-0">
+        {/* eslint-disable-next-line @next/next/no-img-element -- object URL / CDN host; next/image remotePatterns isn't worth wiring up for a small preview thumb */}
+        <img
+          src={src}
+          alt={alt}
+          className="size-14 rounded-sm object-cover"
+        />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {label} attached
+        </p>
+        <p className="line-clamp-1 text-xs text-foreground/80">{alt}</p>
+      </div>
+      <button
+        type="button"
+        aria-label="Remove attachment"
+        onClick={onRemove}
+        disabled={disabled}
+        className="-mr-0.5 -mt-0.5 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <X aria-hidden="true" className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Bottom-sheet GIF picker backed by /api/juice-box/gifs (which proxies
+ * GIPHY). On open, fetches trending GIFs; a debounced search input
+ * issues new queries. Tapping a result closes the sheet and attaches
+ * the GIF to the composer state.
+ */
+function GifPickerSheet({
+  onSelect,
+  onClose,
+}: {
+  onSelect: (gif: GifResult) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<GifResult[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Esc-to-close — same affordance as the reply / reaction-detail sheets.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Debounced fetch on query changes. Empty query → featured / trending.
+  // setLoading lives inside the timeout so the effect itself stays free
+  // of synchronous state writes (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      if (cancelled) return;
+      setLoading(true);
+      setError(null);
+      const params = new URLSearchParams({ limit: "24" });
+      const trimmed = query.trim();
+      if (trimmed) params.set("q", trimmed);
+      apiFetch(`/api/juice-box/gifs?${params.toString()}`)
+        .then(async (res) => {
+          const body = (await res.json().catch(() => null)) as {
+            configured?: boolean;
+            results?: GifResult[];
+            error?: string;
+          } | null;
+          if (cancelled) return;
+          if (!res.ok || !body) {
+            setError(body?.error ?? `Couldn't load GIFs (${res.status}).`);
+            setResults([]);
+            return;
+          }
+          setConfigured(body.configured !== false);
+          setResults(body.results ?? []);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setError(err instanceof Error ? err.message : "Couldn't load GIFs.");
+          setResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [query]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="gif-picker-title"
+      className="fixed inset-0 z-50 flex items-end justify-center p-3 sm:items-center"
+      style={{
+        paddingTop: "calc(0.75rem + env(safe-area-inset-top))",
+        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+      }}
+    >
+      <button
+        type="button"
+        aria-label="Close GIF picker"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm focus:outline-none"
+      />
+      <Card
+        size="sm"
+        className="relative flex w-full max-w-md flex-col overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150"
+        style={{ maxHeight: "min(70vh, 32rem)" }}
+      >
+        <CardContent className="flex flex-1 flex-col gap-2 overflow-hidden px-3 py-3">
+          <header className="flex items-center justify-between gap-2">
+            <h2
+              id="gif-picker-title"
+              className="flex items-center gap-1.5 text-sm font-semibold"
+            >
+              <Sparkles aria-hidden="true" className="size-4 text-primary" />
+              GIFs
+            </h2>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="-mr-1 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </header>
+          <div className="relative">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+            />
+            <input
+              type="search"
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search GIPHY…"
+              className="w-full rounded-md border border-input bg-background/40 py-2 pl-8 pr-3 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            />
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {configured === false ? (
+              <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                GIF search isn&apos;t configured yet. Ask an admin to set
+                the <code className="font-mono text-xs">GIPHY_API_KEY</code> env var.
+              </p>
+            ) : error ? (
+              <p className="px-1 py-6 text-center text-sm text-destructive">
+                {error}
+              </p>
+            ) : loading ? (
+              <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                Loading GIFs…
+              </p>
+            ) : results.length === 0 ? (
+              <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                No GIFs found.
+              </p>
+            ) : (
+              <div className="grid grid-cols-3 gap-1">
+                {results.map((gif) => (
+                  <button
+                    key={gif.id}
+                    type="button"
+                    onClick={() => onSelect(gif)}
+                    className="overflow-hidden rounded-md ring-1 ring-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element -- external GIPHY CDN host */}
+                    <img
+                      src={gif.preview_url}
+                      alt={gif.alt}
+                      loading="lazy"
+                      className="h-24 w-full object-cover"
+                    />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="text-center text-[10px] text-muted-foreground/70">
+            Powered by GIPHY
+          </p>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -1374,6 +1834,7 @@ function FeedList({
   reactions,
   onToggleReaction,
   onShowReactionDetails,
+  onOpenMedia,
   initialIds,
   forceScrollRef,
   lastReadAt,
@@ -1396,6 +1857,9 @@ function FeedList({
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
   /** Fired when the user taps a chip — opens the reactor-list popover. */
   onShowReactionDetails: (messageId: string, emoji: string) => void;
+  /** Fired when the user taps an inline image/GIF in the feed — opens
+   *  the lightbox at JuiceBoxFeed level. */
+  onOpenMedia: (media: TeamMessageMedia) => void;
   initialIds: Set<string> | null;
   forceScrollRef: React.RefObject<boolean>;
   /** Live server-confirmed last_read_at for the current user; positions
@@ -1725,6 +2189,7 @@ function FeedList({
                 reactions={renderReactions(reactions.get(m.id))}
                 onToggleReaction={onToggleReaction}
                 onShowReactionDetails={onShowReactionDetails}
+                onOpenMedia={onOpenMedia}
               />
             </Fragment>
           );
@@ -1751,6 +2216,7 @@ function FeedCard({
   reactions,
   onToggleReaction,
   onShowReactionDetails,
+  onOpenMedia,
 }: {
   message: TeamMessage;
   isMine: boolean;
@@ -1761,6 +2227,7 @@ function FeedCard({
   reactions: TeamMessageReaction[];
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
   onShowReactionDetails: (messageId: string, emoji: string) => void;
+  onOpenMedia: (media: TeamMessageMedia) => void;
 }) {
   const timeAgo = useMemo(
     () => formatDistanceToNow(new Date(message.created_at), { addSuffix: true }),
@@ -1855,6 +2322,8 @@ function FeedCard({
   const hasReply = Boolean(
     message.reply_to_message_id && message.reply_to_message_preview,
   );
+  const media = teamMessageMedia(message);
+  const hasText = message.message.length > 0;
 
   return (
     <Card
@@ -1914,9 +2383,14 @@ function FeedCard({
             preview={message.reply_to_message_preview!}
           />
         )}
-        <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] leading-snug">
-          {message.message}
-        </p>
+        {hasText && (
+          <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] leading-snug">
+            {message.message}
+          </p>
+        )}
+        {media && (
+          <FeedMedia media={media} onOpen={() => onOpenMedia(media)} />
+        )}
         {error && (
           <p className="pl-[2.625rem] text-xs text-destructive">{error}</p>
         )}
@@ -1971,6 +2445,104 @@ function QuotedReply({
       </p>
       <p className="line-clamp-2 text-xs text-muted-foreground">{preview}</p>
     </button>
+  );
+}
+
+/**
+ * Inline image / GIF rendered below the message text. Width is capped by
+ * the body column; intrinsic `width`/`height` attrs are passed so the
+ * browser can reserve the right aspect-ratio box and avoid CLS. The
+ * card itself is `select-none` on mobile (kills iOS long-press menu),
+ * so we explicitly disable text-selection on the underlying <img> too
+ * and use `draggable={false}` to keep long-press = reply intact.
+ */
+function FeedMedia({
+  media,
+  onOpen,
+}: {
+  media: TeamMessageMedia;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="pl-[2.625rem]">
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open ${media.type === "gif" ? "GIF" : "image"} full screen`}
+        className="block max-w-[min(20rem,100%)] overflow-hidden rounded-md border border-border/60 bg-muted/40 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
+        <img
+          src={media.thumb_url ?? media.url}
+          alt={media.alt ?? ""}
+          width={media.width ?? undefined}
+          height={media.height ?? undefined}
+          loading="lazy"
+          draggable={false}
+          className="h-auto w-full max-h-80 object-contain"
+        />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Fullscreen viewer for an inline image / GIF. Backdrop tap, the X
+ * button, or Escape all close. Scaled to fit the viewport while
+ * respecting iOS safe areas at top/bottom; aspect ratio comes from the
+ * intrinsic width/height attrs on the <img>.
+ */
+function MediaLightbox({
+  media,
+  onClose,
+}: {
+  media: TeamMessageMedia;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={media.type === "gif" ? "GIF preview" : "Image preview"}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{
+        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+        paddingBottom: "calc(1rem + env(safe-area-inset-bottom))",
+      }}
+    >
+      <button
+        type="button"
+        aria-label="Close"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/85 focus:outline-none"
+      />
+      <button
+        type="button"
+        aria-label="Close"
+        onClick={onClose}
+        className="absolute right-3 top-3 z-10 inline-flex size-9 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition-colors hover:bg-black/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        style={{ top: "calc(0.75rem + env(safe-area-inset-top))" }}
+      >
+        <X aria-hidden="true" className="size-5" />
+      </button>
+      {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
+      <img
+        src={media.url}
+        alt={media.alt ?? ""}
+        width={media.width ?? undefined}
+        height={media.height ?? undefined}
+        className="relative max-h-full max-w-full object-contain"
+        draggable={false}
+      />
+    </div>
   );
 }
 

@@ -27,6 +27,27 @@ export type TeamMessageReaction = {
   reactors: TeamMessageReactor[];
 };
 
+/**
+ * Closed set of media kinds Juice Box posts can carry. Mirrors the
+ * team_messages_media_type_allowed CHECK constraint in
+ * juice_box_pass5_media.sql.
+ */
+export type MediaType = "image" | "gif";
+
+export const isMediaType = (s: string | null | undefined): s is MediaType =>
+  s === "image" || s === "gif";
+
+/** UI-facing slice of a post's media. Null when the post is text-only. */
+export type TeamMessageMedia = {
+  type: MediaType;
+  url: string;
+  thumb_url: string | null;
+  width: number | null;
+  height: number | null;
+  alt: string | null;
+  provider: string | null;
+};
+
 export type TeamMessage = {
   id: string;
   created_at: string;
@@ -41,9 +62,77 @@ export type TeamMessage = {
   /** Denormalized author name of the quoted post (captured at write time
    *  so the quoted block keeps rendering even after the parent is removed). */
   reply_to_salesperson_name: string | null;
-  /** Truncated body of the quoted post (REPLY_PREVIEW_MAX_LENGTH chars). */
+  /** Truncated body of the quoted post (REPLY_PREVIEW_MAX_LENGTH chars).
+   *  When the parent had no text (media-only post), the server fills this
+   *  with a localized placeholder like "📷 Image" / "🎬 GIF" so the
+   *  quoted block isn't empty. */
   reply_to_message_preview: string | null;
+  /** Media attachment fields. All null on text-only posts; the two
+   *  required halves (type, url) are CHECK-paired in the DB so the wire
+   *  shape is always consistent. */
+  media_type: MediaType | null;
+  media_url: string | null;
+  media_thumb_url: string | null;
+  media_width: number | null;
+  media_height: number | null;
+  media_alt: string | null;
+  media_provider: string | null;
 };
+
+/** Returns the post's media as a single slice if it has one, else null. */
+export function teamMessageMedia(m: TeamMessage): TeamMessageMedia | null {
+  if (!m.media_type || !m.media_url) return null;
+  return {
+    type: m.media_type,
+    url: m.media_url,
+    thumb_url: m.media_thumb_url,
+    width: m.media_width,
+    height: m.media_height,
+    alt: m.media_alt,
+    provider: m.media_provider,
+  };
+}
+
+/** Max client-accepted file size for image uploads. Mirrors the bucket's
+ *  file_size_limit in juice_box_pass5_media.sql so the client can reject
+ *  oversized files BEFORE round-tripping to the signed-upload route. */
+export const MEDIA_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** Allowed image MIME types. Mirrors the bucket's allowed_mime_types so
+ *  the client can pre-validate and `<input accept="">` matches what the
+ *  server (and Storage) will actually accept. */
+export const MEDIA_ALLOWED_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+] as const;
+
+/** Single GIF search/trending result, normalized for the UI. The server
+ *  proxy flattens the provider's response (currently GIPHY) into a
+ *  provider-neutral shape that fits the composer's grid + composer-
+ *  preview without further unpacking. Renaming or swapping providers
+ *  should stay localized to src/lib/server/<provider>.ts. */
+export type GifResult = {
+  /** Provider id (currently a GIPHY result id). The client posts this
+   *  back as `gif_id` and the server re-fetches by id to derive the
+   *  authoritative media fields — never trusts a client-supplied URL. */
+  id: string;
+  /** Alt text — provider's alt_text/title with a "GIF" fallback. */
+  alt: string;
+  /** Full-size GIF URL for the lightbox view. */
+  full_url: string;
+  /** Smaller URL for the picker grid + in-feed render. Always set so
+   *  the picker doesn't have to fall back to the full URL on a slow
+   *  connection. */
+  preview_url: string;
+  width: number;
+  height: number;
+};
+
+/** Bucket name for Juice Box image uploads — kept in one place so the
+ *  SQL migration, signed-upload route, and client never drift. */
+export const JUICE_BOX_MEDIA_BUCKET = "juice-box-media";
 
 /** Maximum number of characters per post. Enforced server-side; mirrored in the UI. */
 export const MESSAGE_MAX_LENGTH = 1000;

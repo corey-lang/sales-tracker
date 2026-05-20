@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getServerSupabase } from "@/lib/supabase/server";
 import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
 import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
 import {
   FEED_PAGE_SIZE,
   MESSAGE_MAX_LENGTH,
@@ -49,21 +50,141 @@ import {
 //   the "who reacted" detail popover can render without a second
 //   round-trip per chip. Names are denormalized on team_message_reactions
 //   at insert time, so this is just an extra column in the SELECT below.
+//
+// MEDIA POSTS (Pass 5 — hardened in this revision)
+//
+//   Two attachment kinds: image (uploaded to juice-box-media Storage)
+//   and GIF (sourced from GIPHY). The wire shape is intentionally
+//   minimal — the client never supplies media_url/thumb_url/storage_path
+//   directly, because trusting those previously let an eligible user
+//   bypass the picker and hot-link arbitrary assets (Tenor pivot
+//   notwithstanding, same class of bug for any provider).
+//
+//   IMAGE
+//     Client sends `image_url` (the public URL returned by the signed-
+//     upload route) plus intrinsic dimensions read from the file +
+//     optional alt text. Server:
+//       1. Verifies `image_url` starts with our juice-box-media public
+//          prefix (URL host pinned).
+//       2. Parses the path tail and requires it to be
+//             <salesperson_id>/<uuid>.<ext>
+//          AND the leading <salesperson_id> segment to equal the
+//          authenticated caller's me.id — binds the post to its
+//          uploader, prevents claiming someone else's leaked URL.
+//       3. Stores the DERIVED storage path (not anything client-sent).
+//
+//   GIF
+//     Client sends only `gif_id` (the provider id returned by the
+//     picker proxy). Server:
+//       1. Re-fetches that id from GIPHY using our server-only API key.
+//       2. Verifies the upstream-supplied URLs are GIPHY-hosted
+//          (*.giphy.com) — defense in depth in case GIPHY ever returns
+//          something unexpected.
+//       3. Stores DERIVED media_url, media_thumb_url, width, height,
+//          alt straight from the upstream response.
+//
+//   Empty `message` is permitted when media is attached so users can
+//   post images / GIFs without a caption. The DB CHECK constraint pairs
+//   media_type + media_url so the row layout stays consistent.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview";
+  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider";
 
-const CreateMessageSchema = z.object({
-  message: z
-    .string()
-    .trim()
-    .min(1, "Message cannot be empty.")
-    .max(MESSAGE_MAX_LENGTH, `Keep posts under ${MESSAGE_MAX_LENGTH} characters.`),
-  reply_to_message_id: z.uuid().optional(),
-});
+const CreateMessageSchema = z
+  .object({
+    // Trimmed; allow empty when media is attached. Cap stays the same.
+    message: z
+      .string()
+      .trim()
+      .max(MESSAGE_MAX_LENGTH, `Keep posts under ${MESSAGE_MAX_LENGTH} characters.`),
+    reply_to_message_id: z.uuid().optional(),
+    // Image attachment — declared by sending image_url (the public URL
+    // produced by the signed-upload route). Dimensions read by the
+    // client from the file before posting; alt text optional.
+    image_url: z.url().optional(),
+    image_width: z.number().int().positive().max(20000).optional(),
+    image_height: z.number().int().positive().max(20000).optional(),
+    image_alt: z.string().max(500).optional(),
+    // GIF attachment — declared by sending gif_id only. Server re-
+    // fetches the asset from the provider and derives every other
+    // media_* field from that response.
+    gif_id: z.string().min(1).max(128).optional(),
+  })
+  .refine((d) => !(d.image_url && d.gif_id), {
+    message: "A post can't have both an image and a GIF.",
+    path: ["gif_id"],
+  })
+  .refine(
+    (d) => d.message.length > 0 || d.image_url || d.gif_id,
+    {
+      message: "A message or media attachment is required.",
+      path: ["message"],
+    },
+  )
+  .refine(
+    (d) => !d.image_url || (d.image_width && d.image_height),
+    {
+      message: "Image dimensions are required.",
+      path: ["image_width"],
+    },
+  );
+
+// Allowed origin for image URLs — the public path of the juice-box-media
+// bucket. Computed once at module load (NEXT_PUBLIC_SUPABASE_URL is
+// validated in supabase/server.ts so missing env is already a fatal
+// startup error in practice).
+const ALLOWED_IMAGE_PREFIX = (() => {
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, "");
+  if (!base) return null;
+  return `${base}/storage/v1/object/public/juice-box-media/`;
+})();
+
+// Matches the filename the signed-upload route mints:
+//   <uuid (RFC 4122 form)>.{jpg|png|webp|gif}
+// Salesperson_id is treated as opaque (it's also a UUID, but we check
+// it by string-equality against me.id rather than by pattern).
+const IMAGE_FILENAME_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|gif)$/i;
+
+/**
+ * Verifies `imageUrl` was produced by THIS user's signed-upload flow
+ * and returns the derived storage path. Returns null on any mismatch,
+ * which the caller turns into a 400.
+ *
+ * Checks, in order:
+ *   1. URL parses + uses https.
+ *   2. Starts with our juice-box-media public prefix (host + bucket pin).
+ *   3. Has the shape `<salesperson_id>/<filename>` after the prefix.
+ *   4. <salesperson_id> equals the authenticated caller's me.id.
+ *   5. <filename> matches `<uuid>.<jpg|png|webp|gif>`.
+ */
+function deriveImageStoragePath(
+  imageUrl: string,
+  callerId: string,
+): string | null {
+  if (!ALLOWED_IMAGE_PREFIX) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(imageUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  if (!imageUrl.startsWith(ALLOWED_IMAGE_PREFIX)) return null;
+  const path = imageUrl.slice(ALLOWED_IMAGE_PREFIX.length);
+  // Reject deeper nesting (e.g., "a/b/c.jpg") — we only mint one level.
+  const slashIdx = path.indexOf("/");
+  if (slashIdx < 0) return null;
+  const folder = path.slice(0, slashIdx);
+  const filename = path.slice(slashIdx + 1);
+  if (folder !== callerId) return null;
+  if (!IMAGE_FILENAME_RE.test(filename)) return null;
+  if (filename.includes("/")) return null;
+  return path;
+}
 
 /** Wire shape returned by both verbs — DB row plus the aggregated reactions. */
 export type TeamMessageWithReactions = TeamMessage & {
@@ -238,7 +359,7 @@ export async function POST(req: Request) {
     if (body.reply_to_message_id) {
       const parentRes = await supabase
         .from(TEAM_MESSAGES_TABLE)
-        .select("id, salesperson_name, message, is_deleted")
+        .select("id, salesperson_name, message, is_deleted, media_type")
         .eq("id", body.reply_to_message_id)
         .maybeSingle();
 
@@ -253,15 +374,99 @@ export async function POST(req: Request) {
         id: string;
         salesperson_name: string;
         message: string;
+        media_type: "image" | "gif" | null;
       };
+
+      // If the parent had no text (media-only post), substitute a small
+      // placeholder so the quoted block doesn't read as empty. Plain
+      // text takes priority over media-derived placeholder when present.
+      let preview = parent.message.slice(0, REPLY_PREVIEW_MAX_LENGTH);
+      if (preview.length === 0) {
+        if (parent.media_type === "image") preview = "📷 Image";
+        else if (parent.media_type === "gif") preview = "🎬 GIF";
+      }
 
       replyMetadata = {
         reply_to_message_id: parent.id,
         reply_to_salesperson_name: parent.salesperson_name,
-        reply_to_message_preview: parent.message.slice(
-          0,
-          REPLY_PREVIEW_MAX_LENGTH,
-        ),
+        reply_to_message_preview: preview,
+      };
+    }
+
+    // Build media fields server-side. For image posts we DERIVE the
+    // storage path from a validated URL; for GIFs we RE-FETCH the asset
+    // from the provider by id and copy fields directly. The client's
+    // only contributions are `image_url` + intrinsic dims (image) or
+    // `gif_id` (gif) — every other persisted field is server-truth.
+    let mediaFields: {
+      media_type: "image" | "gif" | null;
+      media_url: string | null;
+      media_thumb_url: string | null;
+      media_width: number | null;
+      media_height: number | null;
+      media_alt: string | null;
+      media_provider: string | null;
+      media_storage_path: string | null;
+    } = {
+      media_type: null,
+      media_url: null,
+      media_thumb_url: null,
+      media_width: null,
+      media_height: null,
+      media_alt: null,
+      media_provider: null,
+      media_storage_path: null,
+    };
+
+    if (body.image_url) {
+      const storagePath = deriveImageStoragePath(body.image_url, me.id);
+      if (!storagePath) {
+        // Either the URL isn't ours, isn't shaped like our signed-upload
+        // output, or — most likely — belongs to a DIFFERENT user's
+        // path prefix. All cases produce the same generic message so
+        // we don't leak internal validation details.
+        throw badRequest("Image must be uploaded through this app.");
+      }
+      mediaFields = {
+        media_type: "image",
+        media_url: body.image_url,
+        media_thumb_url: null,
+        media_width: body.image_width ?? null,
+        media_height: body.image_height ?? null,
+        media_alt: body.image_alt ?? null,
+        media_provider: "supabase",
+        media_storage_path: storagePath,
+      };
+    } else if (body.gif_id) {
+      const gif = await fetchGiphyById(body.gif_id);
+      if (!gif) {
+        throw badRequest(
+          "Couldn't verify that GIF. Please pick one from the GIF picker.",
+        );
+      }
+      // Defense in depth — verify the URLs the upstream gave us are
+      // GIPHY-hosted before persisting. Bug in formatGifResult or in
+      // GIPHY's response shape can't smuggle a foreign host through.
+      let fullHost = "";
+      let previewHost = "";
+      try {
+        fullHost = new URL(gif.full_url).hostname;
+        previewHost = new URL(gif.preview_url).hostname;
+      } catch {
+        throw badRequest("Couldn't verify that GIF.");
+      }
+      if (!isGiphyHost(fullHost) || !isGiphyHost(previewHost)) {
+        throw badRequest("GIFs must come from the GIPHY library.");
+      }
+      mediaFields = {
+        media_type: "gif",
+        media_url: gif.full_url,
+        media_thumb_url: gif.preview_url,
+        media_width: gif.width,
+        media_height: gif.height,
+        media_alt: gif.alt,
+        media_provider: "giphy",
+        media_storage_path: null,
       };
     }
 
@@ -272,13 +477,24 @@ export async function POST(req: Request) {
       reply_to_message_id: string | null;
       reply_to_salesperson_name: string | null;
       reply_to_message_preview: string | null;
+      media_type: "image" | "gif" | null;
+      media_url: string | null;
+      media_thumb_url: string | null;
+      media_width: number | null;
+      media_height: number | null;
+      media_alt: string | null;
+      media_provider: string | null;
+      media_storage_path: string | null;
     } = {
       salesperson_id: me.id,
       salesperson_name: me.first_name,
       message: body.message,
       reply_to_message_id: replyMetadata?.reply_to_message_id ?? null,
-      reply_to_salesperson_name: replyMetadata?.reply_to_salesperson_name ?? null,
-      reply_to_message_preview: replyMetadata?.reply_to_message_preview ?? null,
+      reply_to_salesperson_name:
+        replyMetadata?.reply_to_salesperson_name ?? null,
+      reply_to_message_preview:
+        replyMetadata?.reply_to_message_preview ?? null,
+      ...mediaFields,
     };
 
     const res = await supabase
