@@ -443,9 +443,26 @@ export default function JuiceBoxPage() {
         // composer regardless of how aggressive the target is.
         //   nav 5rem + composer 7rem + lower-middle comfort 6rem
         //   = 18rem + env(safe-area-inset-bottom)
-        className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+env(safe-area-inset-bottom))]"
+        // pwa-safe-top is intentionally NOT applied here — the sticky
+        // header below owns top-safe-area padding itself (via the inline
+        // paddingTop on its container) so the translucent backdrop
+        // covers the notch area both at scroll=0 and while stuck.
+        className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+env(safe-area-inset-bottom))]"
       >
-        <header className="space-y-0.5 pt-1 text-center">
+        {/*
+          Sticky header. -mx-4 px-4 lets the translucent backdrop bleed
+          to main's horizontal edges while the centered title/subtitle
+          stay in the padded column. z-20 sits above feed content
+          (default z) and below the fixed bottom composer (z-30) and
+          BottomNav (z-40), so modals at z-50 still cover the header.
+          paddingTop folds env(safe-area-inset-top) into the header's
+          own padding so the backdrop continues into the iOS status-bar
+          area while the visible title text sits below the notch.
+        */}
+        <header
+          className="sticky top-0 z-20 -mx-4 border-b border-border/60 bg-background/85 px-4 pb-2 text-center backdrop-blur supports-[backdrop-filter]:bg-background/70"
+          style={{ paddingTop: "calc(0.5rem + env(safe-area-inset-top))" }}
+        >
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
             Juice Box 🍊
           </h1>
@@ -1106,6 +1123,38 @@ type PendingMedia =
       gif: GifResult;
     };
 
+// ---------------------------------------------------------------------------
+// GIF picker module-level cache
+// ---------------------------------------------------------------------------
+// Persists across mount/unmount of GifPickerSheet so closing and reopening
+// the sheet — or retyping a recently-seen query — is instant. Keys are
+// normalized (`q.trim().toLowerCase()`); "" is the trending bucket.
+// Bounded so a session that types many queries doesn't hold unbounded
+// memory; LRU-ish via Map iteration order on writes.
+
+const GIF_CACHE_MAX = 16;
+const gifCache = new Map<string, GifResult[]>();
+
+function gifCacheKey(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+function readGifCache(key: string): GifResult[] | null {
+  return gifCache.get(key) ?? null;
+}
+
+function writeGifCache(key: string, results: GifResult[]): void {
+  // Re-inserting moves the entry to the most-recent end; evicting from
+  // the start is then a true LRU eviction.
+  gifCache.delete(key);
+  gifCache.set(key, results);
+  while (gifCache.size > GIF_CACHE_MAX) {
+    const oldest = gifCache.keys().next().value;
+    if (oldest === undefined) break;
+    gifCache.delete(oldest);
+  }
+}
+
 function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -1130,6 +1179,28 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
       if (media?.kind === "image") URL.revokeObjectURL(media.previewUrl);
     };
   }, [media]);
+
+  // Prefetch trending GIFs once per Composer mount so opening the GIF
+  // picker for the first time feels instant. Skipped if we've already
+  // warmed the cache earlier this session.
+  useEffect(() => {
+    if (readGifCache("") !== null) return;
+    let cancelled = false;
+    apiFetch("/api/juice-box/gifs?limit=24")
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const body = (await res.json().catch(() => null)) as {
+          results?: GifResult[];
+        } | null;
+        if (!cancelled && body && Array.isArray(body.results)) {
+          writeGifCache("", body.results);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Local-only validation + preview generation for an image pick. */
   const attachImageFile = (file: File) => {
@@ -1328,7 +1399,7 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
             placeholder={
               media
                 ? "Add a caption…"
-                : "Share a win, intro, or shoutout…"
+                : "Drop some juice... a win, meme, GIF, or shoutout"
             }
             rows={2}
             maxLength={MESSAGE_MAX_LENGTH}
@@ -1344,7 +1415,7 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
                 aria-label="Attach an image"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={sending}
-                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex size-8 items-center justify-center rounded-md bg-muted/60 text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <ImagePlus aria-hidden="true" className="size-4" />
               </button>
@@ -1353,7 +1424,7 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
                 aria-label="Pick a GIF"
                 onClick={() => setGifPickerOpen(true)}
                 disabled={sending}
-                className="inline-flex h-7 items-center rounded-md px-1.5 text-[11px] font-semibold text-muted-foreground ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-8 items-center rounded-md bg-muted/60 px-2 text-[11px] font-bold tracking-wide text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 GIF
               </button>
@@ -1462,8 +1533,17 @@ function GifPickerSheet({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<GifResult[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed the visible grid from the module-level cache so the user sees
+  // last session's trending (or whatever was last viewed) the instant
+  // the sheet mounts — no skeleton flash, no flicker.
+  const [results, setResults] = useState<GifResult[]>(
+    () => readGifCache("") ?? [],
+  );
+  // `fetching` is true whenever a network request is in flight; the UI
+  // ONLY shows the skeleton when fetching AND we have nothing to show.
+  // If results are already visible (from cache or a prior query), they
+  // stay visible during the refetch — no clear, no flicker.
+  const [fetching, setFetching] = useState(false);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1476,18 +1556,29 @@ function GifPickerSheet({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Debounced fetch on query changes. Empty query → featured / trending.
-  // setLoading lives inside the timeout so the effect itself stays free
-  // of synchronous state writes (react-hooks/set-state-in-effect).
+  // Debounced fetch on query changes. CACHE HIT shortcuts the debounce
+  // to zero delay and paints cached results in the same task that fires
+  // the network refresh — perceived latency is one frame, well under
+  // the visual threshold. All state writes are scoped inside the
+  // setTimeout body so the effect itself stays free of synchronous
+  // state writes (react-hooks/set-state-in-effect).
+  const queryKey = gifCacheKey(query);
   useEffect(() => {
     let cancelled = false;
+    const cached = readGifCache(queryKey);
+    const delay = cached ? 0 : 250;
+
     const handle = window.setTimeout(() => {
       if (cancelled) return;
-      setLoading(true);
+      if (cached) {
+        // Paint cached results immediately so the user sees them while
+        // the network request below silently refreshes them.
+        setResults(cached);
+      }
+      setFetching(true);
       setError(null);
       const params = new URLSearchParams({ limit: "24" });
-      const trimmed = query.trim();
-      if (trimmed) params.set("q", trimmed);
+      if (queryKey) params.set("q", queryKey);
       apiFetch(`/api/juice-box/gifs?${params.toString()}`)
         .then(async (res) => {
           const body = (await res.json().catch(() => null)) as {
@@ -1497,27 +1588,37 @@ function GifPickerSheet({
           } | null;
           if (cancelled) return;
           if (!res.ok || !body) {
+            // Don't blow away visible results on error — surface the
+            // message but keep the prior grid so the picker doesn't
+            // visually crash mid-typing.
             setError(body?.error ?? `Couldn't load GIFs (${res.status}).`);
-            setResults([]);
             return;
           }
           setConfigured(body.configured !== false);
-          setResults(body.results ?? []);
+          const fresh = body.results ?? [];
+          setResults(fresh);
+          writeGifCache(queryKey, fresh);
         })
         .catch((err: unknown) => {
           if (cancelled) return;
           setError(err instanceof Error ? err.message : "Couldn't load GIFs.");
-          setResults([]);
         })
         .finally(() => {
-          if (!cancelled) setLoading(false);
+          if (!cancelled) setFetching(false);
         });
-    }, 250);
+    }, delay);
     return () => {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [query]);
+  }, [queryKey]);
+
+  // Skeleton applies only when there's literally nothing to show AND a
+  // request is in flight; once results land they stay visible across
+  // all subsequent query changes.
+  const showSkeleton = fetching && results.length === 0;
+  const showEmpty =
+    !fetching && results.length === 0 && error === null && configured !== false;
 
   return (
     <div
@@ -1549,6 +1650,15 @@ function GifPickerSheet({
             >
               <Sparkles aria-hidden="true" className="size-4 text-primary" />
               GIFs
+              {/* Subtle "refreshing" spinner — only appears when a fetch
+                  is in flight AND we already have results visible. The
+                  initial-load skeleton handles the "nothing to show" case. */}
+              {fetching && results.length > 0 && (
+                <Loader2
+                  aria-hidden="true"
+                  className="size-3.5 animate-spin text-muted-foreground/70"
+                />
+              )}
             </h2>
             <button
               type="button"
@@ -1579,15 +1689,13 @@ function GifPickerSheet({
                 GIF search isn&apos;t configured yet. Ask an admin to set
                 the <code className="font-mono text-xs">GIPHY_API_KEY</code> env var.
               </p>
-            ) : error ? (
+            ) : error && results.length === 0 ? (
               <p className="px-1 py-6 text-center text-sm text-destructive">
                 {error}
               </p>
-            ) : loading ? (
-              <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                Loading GIFs…
-              </p>
-            ) : results.length === 0 ? (
+            ) : showSkeleton ? (
+              <GifSkeletonGrid />
+            ) : showEmpty ? (
               <p className="px-1 py-6 text-center text-sm text-muted-foreground">
                 No GIFs found.
               </p>
@@ -1617,6 +1725,25 @@ function GifPickerSheet({
           </p>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+/**
+ * Placeholder grid shown ONLY on first open with no cached results.
+ * Once any results have been visible, subsequent query changes reuse
+ * the prior grid while the new request is in flight — see the cache /
+ * fetching logic in GifPickerSheet.
+ */
+function GifSkeletonGrid() {
+  return (
+    <div className="grid grid-cols-3 gap-1" aria-hidden="true">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <div
+          key={i}
+          className="h-24 w-full animate-pulse rounded-md bg-muted/40"
+        />
+      ))}
     </div>
   );
 }
@@ -2335,7 +2462,11 @@ function FeedCard({
       className={cn(
         // Slightly brighter ring + soft orange glow on hover so adjacent
         // posts read as separate cards without screaming for attention.
-        "py-2.5 ring-foreground/15 transition-shadow hover:shadow-[0_0_0_1px_var(--color-primary)/0.18,0_8px_24px_-12px_color-mix(in_oklab,var(--color-primary)_25%,transparent)]",
+        // border-foreground/15 brightens the resting card edge from the
+        // default --border charcoal — still tasteful, but the cards
+        // read as distinct surfaces on a dark feed instead of melting
+        // into the background. Hover keeps the orange-tinted glow.
+        "py-2.5 border-foreground/15 transition-shadow hover:shadow-[0_0_0_1px_var(--color-primary)/0.18,0_8px_24px_-12px_color-mix(in_oklab,var(--color-primary)_25%,transparent)]",
         // tw-animate-css: short fade + slide for posts that arrived after
         // the initial load. Initial cards do not animate.
         isFresh &&
@@ -2356,7 +2487,7 @@ function FeedCard({
           <div className="flex min-w-0 items-center gap-2.5">
             <Avatar name={message.salesperson_name} />
             <p className="min-w-0 truncate text-[15px] leading-tight">
-              <span className="font-semibold">{message.salesperson_name}</span>
+              <span className="font-bold">{message.salesperson_name}</span>
               {isMine && (
                 <span className="ml-1.5 text-xs font-normal text-muted-foreground">
                   (you)
@@ -2384,7 +2515,7 @@ function FeedCard({
           />
         )}
         {hasText && (
-          <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] leading-snug">
+          <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] font-medium leading-snug text-foreground">
             {message.message}
           </p>
         )}
