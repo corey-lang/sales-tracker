@@ -2373,21 +2373,65 @@ function FeedList({
     };
   }, []);
 
-  // Detect "Load older" prepends: a single render that adds more than one
-  // message to the front. Realtime INSERTs always grow by one; only the
-  // pagination path adds many at once. When this happens, skip the auto-
-  // scroll — the user explicitly asked to read older posts, and the
-  // layout effect in the parent is restoring their pre-prepend offset.
+  // One-shot cancel: if the user scrolls (wheel on desktop, touchmove
+  // on mobile) BEFORE the initial landing has happened, consume
+  // firstScrollRef so we never yank them after the fact. Programmatic
+  // scrolls (our own window.scrollTo, scrollIntoView from reply
+  // previews) don't fire wheel/touchmove, so they don't accidentally
+  // self-cancel. Listeners are { once: true } so each removes itself
+  // on first fire, and the cleanup removes the survivor at unmount.
+  useEffect(() => {
+    if (!firstScrollRef.current) return;
+    const cancel = () => {
+      firstScrollRef.current = false;
+    };
+    document.addEventListener("wheel", cancel, { passive: true, once: true });
+    document.addEventListener("touchmove", cancel, {
+      passive: true,
+      once: true,
+    });
+    return () => {
+      document.removeEventListener("wheel", cancel);
+      document.removeEventListener("touchmove", cancel);
+    };
+  }, []);
+
+  // Detect "Load older" prepends so we can skip the auto-scroll while
+  // the layout effect restores the pre-prepend scroll position.
+  //
+  // The earlier heuristic — "more than one message was added in a
+  // single render" — false-positively triggered on the cache→bootstrap
+  // merge path: a fresh fetch that merged 2+ newer messages after
+  // cache-based initial landing was treated as a prepend, suppressing
+  // a legitimate "re-land at the now-true latest" scroll.
+  //
+  // The structural signal we actually want is: the FIRST message id
+  // changed AND length grew. That's true for Load Older (older items
+  // pushed onto the front, length up) and false for both bootstrap
+  // append-merge (first id unchanged) and admin-delete-of-oldest
+  // (first id changes but length shrinks).
   const prevLengthRef = useRef(0);
+  const prevFirstIdRef = useRef<string | null>(null);
+  const firstMessageId =
+    state.kind === "ready" && state.messages.length > 0
+      ? state.messages[0].id
+      : null;
   useEffect(() => {
     if (messageCount === 0) {
       prevLengthRef.current = 0;
+      prevFirstIdRef.current = null;
       return;
     }
     const prevLength = prevLengthRef.current;
+    const prevFirstId = prevFirstIdRef.current;
     prevLengthRef.current = messageCount;
-    const delta = messageCount - prevLength;
-    const wasPrepend = !firstScrollRef.current && delta > 1;
+    prevFirstIdRef.current = firstMessageId;
+
+    const wasPrepend =
+      !firstScrollRef.current &&
+      prevFirstId !== null &&
+      firstMessageId !== prevFirstId &&
+      messageCount > prevLength;
 
     if (wasPrepend) {
       // Layout effect upstream is correcting scroll position.
@@ -2472,6 +2516,7 @@ function FeedList({
     messageCount,
     latestMessageId,
     firstUnreadMessageId,
+    firstMessageId,
     forceScrollRef,
     unreadLoaded,
   ]);
