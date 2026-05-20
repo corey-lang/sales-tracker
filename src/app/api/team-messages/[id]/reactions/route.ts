@@ -14,16 +14,22 @@ import {
   TEAM_MESSAGE_REACTIONS_TABLE,
 } from "@/lib/team-messages";
 
-// Juice Box — toggle an emoji reaction on a single message.
+// Juice Box — set / switch / clear a user's reaction on a single message.
 //
 //   POST /api/team-messages/:id/reactions   body: { emoji }
-//                                            -> { added: boolean }
+//                                            -> { reacted: string | null }
 //
-// SEMANTICS
-//   Toggle: if the caller already has a (message, emoji) row, the row is
-//   removed and `added: false` is returned; otherwise the row is inserted
-//   and `added: true` is returned. The client does not need to track this
-//   state separately — it can derive `reacted` from realtime echoes.
+// SEMANTICS (one reaction per (message, user))
+//   Each user can have AT MOST ONE reaction on a given message. The route
+//   branches on the user's current row for that message:
+//
+//     no existing row                -> INSERT(emoji)   -> reacted = emoji
+//     existing row, same emoji       -> DELETE(row)     -> reacted = null
+//     existing row, different emoji  -> UPDATE(emoji)   -> reacted = emoji
+//
+//   The DB enforces the half of this rule that matters for integrity
+//   (uq_team_message_reactions_one_per_user); this route enforces the
+//   choice between insert/update/delete.
 //
 // ACCESS
 //   Admin OR test only (requireJuiceBoxAccess). Identity from the signed
@@ -31,8 +37,8 @@ import {
 //
 // EMOJI WHITELIST
 //   isAllowedReaction() is the single source of truth for which emoji are
-//   accepted (Pass 4 picks 😂 🔥 👏 💪 🍊 ❤️ 🧡 ‼️). The route refuses
-//   anything else with a 400; there is no emoji picker yet.
+//   accepted. The route refuses anything else with a 400 before any DB
+//   call.
 //
 // PARENT MESSAGE GATE
 //   Reactions on a soft-deleted message are refused — the message wouldn't
@@ -78,17 +84,16 @@ export async function POST(
       throw notFound("Message not found.");
     }
 
-    // Toggle: try to find an existing row. If present, delete it (= remove
-    // the reaction). If absent, insert it (= add the reaction). Both
-    // branches are idempotent against the realtime echo because INSERT and
-    // DELETE both fire postgres_changes events with full row data
-    // (team_message_reactions has REPLICA IDENTITY FULL).
+    // Lookup the caller's current reaction on this message — at most one
+    // row thanks to uq_team_message_reactions_one_per_user. The realtime
+    // INSERT/UPDATE/DELETE event that follows carries the full row data
+    // (REPLICA IDENTITY FULL), so subscribed clients can reconcile counts
+    // without a refetch regardless of which branch we take.
     const existingRes = await supabase
       .from(TEAM_MESSAGE_REACTIONS_TABLE)
-      .select("id")
+      .select("id, emoji")
       .eq("message_id", messageId)
       .eq("salesperson_id", me.id)
-      .eq("emoji", body.emoji)
       .maybeSingle();
 
     if (existingRes.error) {
@@ -97,40 +102,60 @@ export async function POST(
       );
     }
 
-    if (existingRes.data) {
+    const existing = existingRes.data as
+      | { id: string; emoji: string }
+      | null;
+
+    // --- Branch 1: no prior reaction → INSERT -------------------------------
+    if (!existing) {
+      const insRes = await supabase
+        .from(TEAM_MESSAGE_REACTIONS_TABLE)
+        .insert({
+          message_id: messageId,
+          salesperson_id: me.id,
+          salesperson_name: me.first_name,
+          emoji: body.emoji,
+        });
+
+      if (insRes.error) {
+        // 23505 = unique_violation — a concurrent insert from another tab
+        // beat us. Treat as success: the user ends with a reaction on this
+        // message, which is the intent.
+        if (/duplicate|23505/i.test(insRes.error.message)) {
+          return Response.json({ reacted: body.emoji });
+        }
+        throw new Error(`Failed to add reaction: ${insRes.error.message}`);
+      }
+
+      return Response.json({ reacted: body.emoji }, { status: 201 });
+    }
+
+    // --- Branch 2: tapped the same emoji → DELETE (toggle off) --------------
+    if (existing.emoji === body.emoji) {
       const delRes = await supabase
         .from(TEAM_MESSAGE_REACTIONS_TABLE)
         .delete()
-        .eq("id", (existingRes.data as { id: string }).id);
+        .eq("id", existing.id);
 
       if (delRes.error) {
         throw new Error(
           `Failed to remove reaction: ${delRes.error.message}`,
         );
       }
-      return Response.json({ added: false });
+      return Response.json({ reacted: null });
     }
 
-    const insRes = await supabase
+    // --- Branch 3: tapped a different emoji → UPDATE in place ---------------
+    const updRes = await supabase
       .from(TEAM_MESSAGE_REACTIONS_TABLE)
-      .insert({
-        message_id: messageId,
-        salesperson_id: me.id,
-        salesperson_name: me.first_name,
-        emoji: body.emoji,
-      });
+      .update({ emoji: body.emoji })
+      .eq("id", existing.id);
 
-    if (insRes.error) {
-      // 23505 = unique_violation — a duplicate race between two tabs.
-      // Treat as "already reacted, nothing to do" so the UI stays
-      // truthful instead of flashing an error.
-      if (/duplicate|23505/i.test(insRes.error.message)) {
-        return Response.json({ added: true });
-      }
-      throw new Error(`Failed to add reaction: ${insRes.error.message}`);
+    if (updRes.error) {
+      throw new Error(`Failed to switch reaction: ${updRes.error.message}`);
     }
 
-    return Response.json({ added: true }, { status: 201 });
+    return Response.json({ reacted: body.emoji });
   } catch (err) {
     return handleApiError(err);
   }

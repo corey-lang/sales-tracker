@@ -23,13 +23,26 @@
 --     enforced at the API layer.
 --
 -- REALTIME
---   team_message_reactions is published to supabase_realtime so INSERT and
---   DELETE events stream live. We set REPLICA IDENTITY FULL on the table so
---   DELETE payloads carry the full old row — the client needs message_id,
---   salesperson_id, and emoji to decrement local counts without a refetch.
+--   team_message_reactions is published to supabase_realtime so INSERT,
+--   UPDATE, and DELETE events stream live. We set REPLICA IDENTITY FULL on
+--   the table so UPDATE and DELETE payloads carry the full old row — the
+--   client needs old.emoji to decrement the previous emoji's count when a
+--   user switches their reaction, and old.message_id/old.salesperson_id/
+--   old.emoji on DELETE to decrement without a refetch.
+--
+-- ONE-REACTION-PER-USER (revised in this file)
+--   Originally the uniqueness was (message_id, salesperson_id, emoji) so a
+--   single user could react with multiple different emoji on the same
+--   message. The product rule is now ONE reaction per (message, user):
+--   tapping a second emoji UPDATEs the row in place; tapping the same
+--   emoji DELETEs it. This file de-dupes any pre-existing rows (keeping the
+--   most recent per user/message), drops the old 3-column unique index, and
+--   creates the new 2-column unique index. Rerun-safe.
 --
 -- Idempotent: re-runnable. CREATE TABLE/INDEX IF NOT EXISTS, ADD COLUMN IF
--- NOT EXISTS, DROP POLICY IF EXISTS + CREATE POLICY, guarded publication ADD.
+-- NOT EXISTS, DROP POLICY IF EXISTS + CREATE POLICY, DROP CONSTRAINT IF
+-- EXISTS + ADD CONSTRAINT, guarded publication ADD, dedupe DELETE is a
+-- no-op when there are no duplicate (message_id, salesperson_id) rows.
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
@@ -54,7 +67,8 @@ CREATE TABLE IF NOT EXISTS team_message_reactions (
 -- are blocked by RLS, and service-role calls go through it), but encoding
 -- the closed set in Postgres prevents a future migration or one-off SQL
 -- session from quietly seeding off-list reactions that every client would
--- then render verbatim.
+-- then render verbatim. 👍 was added when the rule changed to one-reaction-
+-- per-user; previously-allowed rows remain valid.
 --
 -- DROP-then-ADD is the idempotent pattern for CHECK constraints: ALTER
 -- TABLE ADD CONSTRAINT IF NOT EXISTS doesn't exist in Postgres, and we
@@ -64,12 +78,34 @@ ALTER TABLE team_message_reactions
   DROP CONSTRAINT IF EXISTS team_message_reactions_emoji_allowed;
 ALTER TABLE team_message_reactions
   ADD CONSTRAINT team_message_reactions_emoji_allowed
-  CHECK (emoji IN ('😂', '🔥', '👏', '💪', '🍊', '❤️', '🧡', '‼️'));
+  CHECK (emoji IN ('😂', '🔥', '👏', '💪', '🍊', '❤️', '🧡', '‼️', '👍'));
 
--- One reaction per (message, user, emoji). Drives the toggle in the API
--- (insert → 23505 unique_violation means "already reacted, delete instead").
-CREATE UNIQUE INDEX IF NOT EXISTS uq_team_message_reactions_unique
-  ON team_message_reactions(message_id, salesperson_id, emoji);
+-- Dedupe pre-existing rows BEFORE adding the new (message, user) unique
+-- index. Earlier deployments may have rows where one user reacted with
+-- multiple emoji on the same message; the new rule keeps exactly one
+-- reaction per (message, user). We keep the most-recent row, breaking
+-- created_at ties on id so this always converges to a single survivor.
+-- No-op when there are no duplicates.
+DELETE FROM team_message_reactions a
+USING team_message_reactions b
+WHERE a.message_id = b.message_id
+  AND a.salesperson_id = b.salesperson_id
+  AND (a.created_at, a.id) < (b.created_at, b.id);
+
+-- Drop the old 3-column unique index (message_id, salesperson_id, emoji)
+-- if it exists from a prior run of this file. The new 2-column index below
+-- replaces it; we deliberately use a new index name so future rereads of
+-- pg_indexes make the schema-evolution intent obvious.
+DROP INDEX IF EXISTS uq_team_message_reactions_unique;
+
+-- One reaction per (message, user). The API's toggle now branches:
+--   no existing row             -> INSERT
+--   existing row, same emoji    -> DELETE
+--   existing row, other emoji   -> UPDATE emoji
+-- The unique index enforces the "at most one" half; the route enforces
+-- the choice between insert/update/delete.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_message_reactions_one_per_user
+  ON team_message_reactions(message_id, salesperson_id);
 
 -- Hot path: GET /api/team-messages hydrates reactions for the most recent
 -- FEED_LIMIT messages with `WHERE message_id IN (...)`.
@@ -139,7 +175,14 @@ ALTER TABLE team_messages
 -- WHERE conrelid = 'team_message_reactions'::regclass
 --   AND contype = 'c';
 --   -- expect one row: team_message_reactions_emoji_allowed
---   -- with definition CHECK (emoji = ANY (ARRAY['😂', '🔥', '👏', '💪', '🍊', '❤️', '🧡', '‼️']))
+--   -- with definition CHECK (emoji = ANY (ARRAY['😂', '🔥', '👏', '💪', '🍊', '❤️', '🧡', '‼️', '👍']))
+--
+-- SELECT indexname, indexdef FROM pg_indexes
+-- WHERE tablename = 'team_message_reactions'
+--   AND indexname LIKE 'uq_team_message_reactions_%';
+--   -- expect one row: uq_team_message_reactions_one_per_user
+--   -- on (message_id, salesperson_id). The older index
+--   -- uq_team_message_reactions_unique should NOT appear.
 --
 -- SELECT tablename FROM pg_publication_tables
 -- WHERE pubname = 'supabase_realtime'

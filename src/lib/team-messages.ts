@@ -48,8 +48,12 @@ export const REPLY_PREVIEW_MAX_LENGTH = 200;
  * The closed set of emoji reactions Juice Box accepts. No emoji picker —
  * tapping any other character is rejected by the API. Order here is also
  * the order they render in the inline emoji bar on a card.
+ *
+ * 👍 was added in the one-reaction-per-user revision; the DB CHECK
+ * constraint in juice_box_pass4_conversations.sql is kept in lockstep.
  */
 export const ALLOWED_REACTIONS = [
+  "👍",
   "😂",
   "🔥",
   "👏",

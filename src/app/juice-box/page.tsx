@@ -256,6 +256,67 @@ function renderReactions(
 }
 
 /**
+ * Returns the emoji the current user has reacted with on `messageId`, or
+ * null when they have no reaction there. Because of the one-reaction-per-
+ * user rule, the answer is unique. Reads `reactors` rather than `reacted`
+ * so it works correctly even for messages we've only seen via realtime
+ * INSERTs (where reactors is the authoritative source).
+ */
+function getCurrentUserEmoji(
+  state: ReactionsState,
+  messageId: string,
+  currentUserId: string,
+): string | null {
+  const perMsg = state.get(messageId);
+  if (!perMsg) return null;
+  for (const [emoji, entry] of perMsg) {
+    if (entry.reactors.has(currentUserId)) return emoji;
+  }
+  return null;
+}
+
+/**
+ * Applies "user transitions from `fromEmoji` to `toEmoji` on `messageId`".
+ * Either may be null:
+ *   from=null, to=X      -> brand-new reaction
+ *   from=X,    to=null   -> toggle off
+ *   from=X,    to=Y      -> switch in place
+ *   from=to              -> no-op
+ * Composes `applyReactionRemove` + `applyReactionAdd`, which each remain
+ * idempotent against realtime echoes via the reactors-Set membership check.
+ */
+function applyReactionTransition(
+  state: ReactionsState,
+  messageId: string,
+  fromEmoji: string | null,
+  toEmoji: string | null,
+  userId: string,
+  currentUserId: string,
+): ReactionsState {
+  if (fromEmoji === toEmoji) return state;
+  let next = state;
+  if (fromEmoji) {
+    next = applyReactionRemove(
+      next,
+      messageId,
+      fromEmoji,
+      userId,
+      currentUserId,
+    );
+  }
+  if (toEmoji) {
+    next = applyReactionAdd(
+      next,
+      messageId,
+      toEmoji,
+      userId,
+      currentUserId,
+    );
+  }
+  return next;
+}
+
+/**
  * Smooth-scrolls to a message DOM node by id and applies a short highlight
  * pulse via `data-juice-highlight`. The CSS for the pulse lives in
  * globals.css (or is handled inline below). No-op if the message isn't in
@@ -456,8 +517,10 @@ function JuiceBoxFeed({
   // from the same GET that loaded the messages.
   const [reactions, setReactions] = useState<ReactionsState>(new Map());
 
-  // Reply state: when set, the composer renders in reply mode and the POST
-  // body includes reply_to_message_id. Cleared on successful post or X.
+  // Reply state: when set, ReplyModal opens overlaying the feed. Cleared on
+  // successful post or Cancel. The sticky composer is intentionally NOT
+  // hijacked into a "reply mode" anymore — that pattern was hard to notice
+  // on mobile once the user scrolled away from the top of the feed.
   const [replyTo, setReplyTo] = useState<TeamMessage | null>(null);
   const clearReply = useCallback(() => setReplyTo(null), []);
 
@@ -543,8 +606,10 @@ function JuiceBoxFeed({
 
   // Realtime subscription — team_message_reactions. Independent channel so
   // it can mount/unmount alongside the messages channel without interference.
-  // DELETE payloads carry the full old row thanks to REPLICA IDENTITY FULL
-  // (see juice_box_pass4_conversations.sql).
+  // UPDATE and DELETE payloads carry the full old row thanks to REPLICA
+  // IDENTITY FULL (see juice_box_pass4_conversations.sql), so the client
+  // can apply the (remove old emoji, add new emoji) delta on a switch
+  // without a refetch.
   useEffect(() => {
     const channel = supabase
       .channel(TEAM_MESSAGE_REACTIONS_CHANNEL)
@@ -564,6 +629,40 @@ function JuiceBoxFeed({
               row.message_id,
               row.emoji,
               row.salesperson_id,
+              currentUserId,
+            ),
+          );
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: TEAM_MESSAGE_REACTIONS_TABLE,
+        },
+        (payload) => {
+          // Switching reactions is the only UPDATE that fires today: the
+          // row's emoji column changed. Apply the delta as (remove old,
+          // add new). Both halves are individually idempotent against the
+          // user's own optimistic update.
+          const oldRow = payload.old as Partial<TeamMessageReactionRow>;
+          const newRow = payload.new as TeamMessageReactionRow;
+          if (
+            !newRow?.message_id ||
+            !newRow?.emoji ||
+            !newRow?.salesperson_id ||
+            !oldRow?.emoji
+          ) {
+            return;
+          }
+          setReactions((prev) =>
+            applyReactionTransition(
+              prev,
+              newRow.message_id,
+              oldRow.emoji ?? null,
+              newRow.emoji,
+              newRow.salesperson_id,
               currentUserId,
             ),
           );
@@ -597,35 +696,72 @@ function JuiceBoxFeed({
     };
   }, [currentUserId]);
 
+  // Mirror `reactions` into a ref so toggleReaction can snapshot the
+  // user's current emoji synchronously, OUTSIDE the setState updater.
+  // Reading state inside the updater and assigning to an outer variable
+  // would be impure (React strict-mode dev re-invokes updaters to catch
+  // exactly that pattern) and would corrupt the snapshot used by revert.
+  const reactionsRef = useRef<ReactionsState>(reactions);
+  useEffect(() => {
+    reactionsRef.current = reactions;
+  }, [reactions]);
+
   /**
-   * Toggle a reaction optimistically. If the network call fails the toggle
-   * is undone by reapplying the same operation — toggling twice from the
-   * original is a no-op, so this reverts cleanly even if the user fired
-   * other reactions in between. The realtime echo of a SUCCESSFUL toggle is
-   * idempotent via the reactors-Set membership check.
+   * Tap an emoji to set/switch/clear the user's reaction on a message.
+   * Mirrors the server's three branches:
+   *   no prior          -> add `emoji`
+   *   prior == emoji    -> clear (toggle off)
+   *   prior != emoji    -> switch from prior to `emoji`
+   *
+   * Optimistic apply runs first; the realtime echo of a successful change
+   * is idempotent via the reactors-Set membership check. On network
+   * failure we revert by transitioning back from the optimistic target to
+   * the snapshotted prior, guarded by a check that the optimistic state
+   * is still the current state — that way a rapid follow-up toggle isn't
+   * clobbered by a delayed revert.
    */
   const toggleReaction = useCallback(
     (messageId: string, emoji: ReactionEmoji) => {
-      const flip = (state: ReactionsState): ReactionsState => {
-        const entry = state.get(messageId)?.get(emoji);
-        const wasReacted = entry?.reactors.has(currentUserId) ?? false;
-        return wasReacted
-          ? applyReactionRemove(
-              state,
-              messageId,
-              emoji,
-              currentUserId,
-              currentUserId,
-            )
-          : applyReactionAdd(
-              state,
-              messageId,
-              emoji,
-              currentUserId,
-              currentUserId,
-            );
-      };
-      setReactions(flip);
+      // Pure read of the user's emoji BEFORE applying the optimistic
+      // transition. The ref reflects the latest committed render.
+      const prevEmoji = getCurrentUserEmoji(
+        reactionsRef.current,
+        messageId,
+        currentUserId,
+      );
+      const optimisticEmoji = prevEmoji === emoji ? null : emoji;
+
+      setReactions((state) =>
+        applyReactionTransition(
+          state,
+          messageId,
+          prevEmoji,
+          optimisticEmoji,
+          currentUserId,
+          currentUserId,
+        ),
+      );
+
+      const revert = () =>
+        setReactions((state) => {
+          // Only revert if the optimistic emoji is still the current emoji.
+          // If the user fired another toggle in the meantime, leave their
+          // newer choice alone — its own success/failure path will reconcile.
+          const current = getCurrentUserEmoji(
+            state,
+            messageId,
+            currentUserId,
+          );
+          if (current !== optimisticEmoji) return state;
+          return applyReactionTransition(
+            state,
+            messageId,
+            optimisticEmoji,
+            prevEmoji,
+            currentUserId,
+            currentUserId,
+          );
+        });
 
       void apiFetch(`/api/team-messages/${messageId}/reactions`, {
         method: "POST",
@@ -633,9 +769,9 @@ function JuiceBoxFeed({
         body: JSON.stringify({ emoji }),
       })
         .then((res) => {
-          if (!res.ok) setReactions(flip);
+          if (!res.ok) revert();
         })
-        .catch(() => setReactions(flip));
+        .catch(() => revert());
     },
     [currentUserId],
   );
@@ -658,11 +794,7 @@ function JuiceBoxFeed({
         className="sticky top-0 z-30 -mx-4 bg-background/85 px-4 pb-2 backdrop-blur supports-[backdrop-filter]:bg-background/70"
         style={{ paddingTop: "calc(0.5rem + env(safe-area-inset-top))" }}
       >
-        <Composer
-          onPosted={handleSelfPosted}
-          replyTo={replyTo}
-          onCancelReply={clearReply}
-        />
+        <Composer onPosted={handleSelfPosted} />
       </div>
       <FeedList
         state={state}
@@ -678,36 +810,21 @@ function JuiceBoxFeed({
         unreadLoaded={unreadLoaded}
         onNearBottom={markAllReadDebounced}
       />
+      {replyTo && (
+        <ReplyModal
+          replyTo={replyTo}
+          onPosted={handleSelfPosted}
+          onClose={clearReply}
+        />
+      )}
     </>
   );
 }
 
-function Composer({
-  onPosted,
-  replyTo,
-  onCancelReply,
-}: {
-  onPosted: (message: TeamMessage) => void;
-  /** Set when the user picked a message to reply to. The post is sent with
-   *  reply_to_message_id and the textarea gains a "Replying to {name}…"
-   *  header above it. null = normal compose mode. */
-  replyTo: TeamMessage | null;
-  /** Tears the user out of reply mode without posting. */
-  onCancelReply: () => void;
-}) {
+function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Focus the textarea when entering reply mode so the user can start typing
-  // immediately. Keying on `replyToId` (not the whole replyTo object) means
-  // re-rendering the composer for unrelated reasons doesn't re-focus, but
-  // switching the reply target does.
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const replyToId = replyTo?.id ?? null;
-  useEffect(() => {
-    if (replyToId) textareaRef.current?.focus();
-  }, [replyToId]);
 
   const trimmed = text.trim();
   const canSubmit = trimmed.length > 0 && !sending;
@@ -718,17 +835,12 @@ function Composer({
     setSending(true);
     setError(null);
 
-    const payload: { message: string; reply_to_message_id?: string } = {
-      message: trimmed,
-    };
-    if (replyTo) payload.reply_to_message_id = replyTo.id;
-
     let res: Response;
     try {
       res = await apiFetch("/api/team-messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ message: trimmed }),
       });
     } catch (err) {
       setSending(false);
@@ -752,28 +864,19 @@ function Composer({
     // upsertMessage dedups by id so it's a no-op the second time.
     onPosted(body.message);
     setText("");
-    onCancelReply();
   };
 
   return (
     <Card size="sm" className="py-2.5">
       <CardContent className="px-3">
         <form onSubmit={handleSubmit} className="space-y-2">
-          {replyTo && (
-            <ReplyHeader replyTo={replyTo} onCancel={onCancelReply} />
-          )}
           <textarea
-            ref={textareaRef}
             value={text}
             onChange={(e) => {
               setText(e.target.value);
               if (error) setError(null);
             }}
-            placeholder={
-              replyTo
-                ? `Reply to ${replyTo.salesperson_name}…`
-                : "Share a win, intro, or shoutout…"
-            }
+            placeholder="Share a win, intro, or shoutout…"
             rows={2}
             maxLength={MESSAGE_MAX_LENGTH}
             disabled={sending}
@@ -814,40 +917,205 @@ function Composer({
 }
 
 /**
- * "Replying to {name}…" banner above the composer textarea. Shows a compact
- * single-line preview of the quoted post + an X to bail out of reply mode.
- * Matches the styling of the quoted block on a reply card so the user sees
- * the same shape before and after posting.
+ * Mobile-friendly modal that opens when the user picks Reply on a message.
+ * Title + original message preview + a dedicated textarea. Replaces the
+ * earlier "reply mode on the sticky top composer" UX, which was hard to
+ * notice on phones once the user scrolled the feed.
+ *
+ * Mounted as `position: fixed` over the whole viewport; backdrop click and
+ * Escape both cancel. The reply post still flows through the same
+ * /api/team-messages POST + reply_to_message_id path, and the optimistic
+ * onPosted hand-off lets the parent's smart-scroll behavior land the new
+ * reply at the bottom of the feed.
  */
-function ReplyHeader({
+function ReplyModal({
   replyTo,
-  onCancel,
+  onPosted,
+  onClose,
 }: {
   replyTo: TeamMessage;
-  onCancel: () => void;
+  onPosted: (message: TeamMessage) => void;
+  onClose: () => void;
 }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Autofocus the textarea when the modal mounts. Deferred to a microtask
+  // so iOS reliably triggers the keyboard (focus during the same frame as
+  // mount sometimes loses the keyboard pop on first paint).
+  useEffect(() => {
+    const id = window.setTimeout(() => textareaRef.current?.focus(), 30);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  // Escape closes — only when not actively sending. Letting Escape cancel
+  // mid-submit would leave a half-finished optimistic post hanging.
+  useEffect(() => {
+    const handle = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !sending) onClose();
+    };
+    document.addEventListener("keydown", handle);
+    return () => document.removeEventListener("keydown", handle);
+  }, [sending, onClose]);
+
+  const trimmed = text.trim();
+  const canSubmit = trimmed.length > 0 && !sending;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSending(true);
+    setError(null);
+
+    let res: Response;
+    try {
+      res = await apiFetch("/api/team-messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: trimmed,
+          reply_to_message_id: replyTo.id,
+        }),
+      });
+    } catch (err) {
+      setSending(false);
+      setError(err instanceof Error ? err.message : "Network error.");
+      return;
+    }
+
+    const body = (await res.json().catch(() => null)) as {
+      message?: TeamMessage;
+      error?: string;
+    } | null;
+
+    if (!res.ok || !body?.message) {
+      setSending(false);
+      setError(body?.error ?? `Couldn't post (${res.status}).`);
+      return;
+    }
+
+    // Hand off to the feed — same optimistic + smart-scroll path the
+    // top composer uses, so the new reply lands at the bottom and the
+    // unread divider clears.
+    onPosted(body.message);
+    onClose();
+  };
+
   const preview = replyTo.message.length > REPLY_PREVIEW_MAX_LENGTH
     ? `${replyTo.message.slice(0, REPLY_PREVIEW_MAX_LENGTH)}…`
     : replyTo.message;
+
   return (
-    <div className="flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted/40 px-2 py-1">
-      <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-1 text-[11px] font-medium text-primary">
-          <CornerUpLeft aria-hidden="true" className="size-3" />
-          Replying to {replyTo.salesperson_name}
-        </p>
-        <p className="line-clamp-1 text-xs text-muted-foreground">
-          {preview}
-        </p>
-      </div>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reply-modal-title"
+      // z-50 sits above the bottom nav (z-40) and sticky composer (z-30).
+      // viewport-fit=cover means env(safe-area-inset-top) is non-zero on
+      // standalone iPhones with a notch — pad both sides so the card never
+      // jams against the status bar / home indicator.
+      className="fixed inset-0 z-50 flex items-end justify-center p-3 sm:items-center"
+      style={{
+        paddingTop: "calc(0.75rem + env(safe-area-inset-top))",
+        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+      }}
+    >
       <button
         type="button"
-        onClick={onCancel}
         aria-label="Cancel reply"
-        className="-mr-1 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        onClick={() => {
+          if (!sending) onClose();
+        }}
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm focus:outline-none"
+      />
+      <Card
+        size="sm"
+        className="relative w-full max-w-md overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150"
       >
-        <X aria-hidden="true" className="size-3.5" />
-      </button>
+        <CardContent className="space-y-3 px-4 py-3">
+          <header className="flex items-start justify-between gap-2">
+            <h2
+              id="reply-modal-title"
+              className="flex items-center gap-1.5 text-sm font-semibold"
+            >
+              <CornerUpLeft aria-hidden="true" className="size-4 text-primary" />
+              Reply to {replyTo.salesperson_name}
+            </h2>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={sending}
+              aria-label="Close"
+              className="-mr-1 -mt-0.5 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </header>
+          <div className="rounded-md border-l-2 border-primary bg-muted/40 px-2.5 py-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Original
+            </p>
+            <p className="line-clamp-3 whitespace-pre-wrap text-xs text-foreground/80">
+              {preview}
+            </p>
+          </div>
+          <form onSubmit={handleSubmit} className="space-y-2">
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onChange={(e) => {
+                setText(e.target.value);
+                if (error) setError(null);
+              }}
+              placeholder={`Reply to ${replyTo.salesperson_name}…`}
+              rows={3}
+              maxLength={MESSAGE_MAX_LENGTH}
+              disabled={sending}
+              // text-base (16px) keeps iOS Safari from auto-zooming when the
+              // textarea focuses — same guard the sticky composer uses.
+              className="min-h-[5rem] w-full resize-none rounded-md border border-input bg-background/40 px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <p
+                className={cn(
+                  "text-[11px]",
+                  trimmed.length > MESSAGE_MAX_LENGTH - 100
+                    ? "text-muted-foreground"
+                    : "text-muted-foreground/60",
+                )}
+              >
+                {trimmed.length}/{MESSAGE_MAX_LENGTH}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={sending}
+                  onClick={onClose}
+                  className="h-8 px-3 text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={!canSubmit}
+                  className="h-8 gap-1.5 px-3 text-xs"
+                >
+                  <Send aria-hidden="true" className="size-3.5" />
+                  {sending ? "Posting…" : "Post Reply"}
+                </Button>
+              </div>
+            </div>
+            {error && (
+              <p className="text-xs text-destructive">{error}</p>
+            )}
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
