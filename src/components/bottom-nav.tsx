@@ -7,6 +7,7 @@ import { Home, Citrus, Trophy, MoreHorizontal, type LucideIcon } from "lucide-re
 import { cn } from "@/lib/utils";
 import { isTestAccount } from "@/lib/permissions";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
+import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 
 // Mobile-first bottom tab bar. Fixed to the viewport bottom, sits on a
 // translucent charcoal surface so it reads cleanly over the premium-dark
@@ -58,6 +59,9 @@ export function BottomNav({
 }) {
   const pathname = usePathname();
   const showJuiceBox = canSeeJuiceBox(salesperson);
+  // Hook is always called (rules-of-hooks); the provider is a no-op for
+  // ineligible users so the value is 0 / null in that case.
+  const { unreadCount } = useJuiceBoxUnread();
 
   const items: NavItem[] = showJuiceBox
     ? [HOME, JUICE_BOX, LEADERBOARD, MORE]
@@ -82,6 +86,8 @@ export function BottomNav({
             pathname === item.href ||
             (item.href !== "/" && pathname?.startsWith(`${item.href}/`));
           const Icon = item.icon;
+          const showBadge =
+            showJuiceBox && item.href === "/juice-box" && unreadCount > 0;
           return (
             <li key={item.href}>
               <Link
@@ -95,13 +101,16 @@ export function BottomNav({
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                <Icon
-                  aria-hidden="true"
-                  className={cn(
-                    "size-5",
-                    active ? "text-primary" : "text-muted-foreground",
-                  )}
-                />
+                <span className="relative">
+                  <Icon
+                    aria-hidden="true"
+                    className={cn(
+                      "size-5",
+                      active ? "text-primary" : "text-muted-foreground",
+                    )}
+                  />
+                  {showBadge && <UnreadBadge count={unreadCount} />}
+                </span>
                 <span>{item.label}</span>
               </Link>
             </li>
@@ -109,5 +118,23 @@ export function BottomNav({
         })}
       </ul>
     </nav>
+  );
+}
+
+/**
+ * Small orange pill sitting on the top-right of the Juice Box icon. Caps
+ * at "99+" so unbounded counts can't blow up the layout. Uses a primary-
+ * foreground/primary pair (orange fill, dark numeral) for max contrast
+ * against the dark backdrop.
+ */
+function UnreadBadge({ count }: { count: number }) {
+  const display = count > 99 ? "99+" : String(count);
+  return (
+    <span
+      aria-label={`${count} unread ${count === 1 ? "message" : "messages"}`}
+      className="absolute -right-2 -top-1.5 inline-flex h-[1.1rem] min-w-[1.1rem] items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground ring-2 ring-background"
+    >
+      {display}
+    </span>
   );
 }

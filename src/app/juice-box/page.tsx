@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -20,6 +21,7 @@ import {
   BOTTOM_NAV_SPACER,
   canSeeJuiceBox,
 } from "@/components/bottom-nav";
+import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 import {
   MESSAGE_MAX_LENGTH,
   TEAM_MESSAGES_CHANNEL,
@@ -28,6 +30,31 @@ import {
 } from "@/lib/team-messages";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+
+// Trailing-edge debounce. Returned trigger schedules `fn` to fire `delay`
+// ms after the most recent call; rapid re-invocations only fire once at
+// the end. Used to coalesce mark-read pings as messages stream in.
+function useDebouncedCallback(fn: () => void, delay: number) {
+  const fnRef = useRef(fn);
+  useEffect(() => {
+    fnRef.current = fn;
+  }, [fn]);
+
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return useCallback(() => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      fnRef.current();
+    }, delay);
+  }, [delay]);
+}
 
 // Juice Box — live team feed.
 //
@@ -137,6 +164,24 @@ function JuiceBoxFeed({
   // React batches it with the `state` setState in the same tick.
   const [initialIds, setInitialIds] = useState<Set<string> | null>(null);
 
+  // Unread state from the global provider. lastReadAt is the server-confirmed
+  // marker for the current user; markAllRead bumps it to NOW() optimistically.
+  // We pass these straight through to FeedList — the divider position derives
+  // directly from the live lastReadAt, so when markAllRead advances it past
+  // every visible message the divider disappears on the next render. Earlier
+  // versions froze a divider anchor for the page lifetime, which kept stale
+  // "New messages" markers visible after the user had already caught up.
+  const {
+    lastReadAt,
+    loaded: unreadLoaded,
+    markAllRead,
+  } = useJuiceBoxUnread();
+
+  // Debounced mark-read — collapses bursts (e.g., the initial scroll snap
+  // plus an inbound realtime message hitting within the same second) into
+  // one POST. 600ms feels snappy without spamming the API.
+  const markAllReadDebounced = useDebouncedCallback(markAllRead, 600);
+
   // One-shot signal flipped on by handleSelfPosted and consumed by the
   // FeedList scroll effect. When the local user pressed Post (vs. a
   // teammate's realtime INSERT), we always scroll to the bottom even if
@@ -175,8 +220,11 @@ function JuiceBoxFeed({
     (m: TeamMessage) => {
       forceScrollRef.current = true;
       upsertMessage(m);
+      // Posting implies "I have seen everything up to and including my own
+      // message" — clear the unread count after the round-trip settles.
+      markAllReadDebounced();
     },
-    [upsertMessage],
+    [upsertMessage, markAllReadDebounced],
   );
 
   const removeMessage = useCallback((id: string) => {
@@ -279,6 +327,9 @@ function JuiceBoxFeed({
         onDeleted={removeMessage}
         initialIds={initialIds}
         forceScrollRef={forceScrollRef}
+        lastReadAt={lastReadAt}
+        unreadLoaded={unreadLoaded}
+        onNearBottom={markAllReadDebounced}
       />
     </>
   );
@@ -386,6 +437,9 @@ function FeedList({
   onDeleted,
   initialIds,
   forceScrollRef,
+  lastReadAt,
+  unreadLoaded,
+  onNearBottom,
 }: {
   state: FeedState;
   currentUserId: string;
@@ -393,10 +447,42 @@ function FeedList({
   onDeleted: (id: string) => void;
   initialIds: Set<string> | null;
   forceScrollRef: React.RefObject<boolean>;
+  /** Live server-confirmed last_read_at for the current user; positions
+   *  the "New messages" divider. null = never-read; string = ISO timestamp. */
+  lastReadAt: string | null;
+  /** True once the unread bootstrap has resolved at least once. The divider
+   *  stays hidden until then so we don't briefly flash a divider above
+   *  every message while we wait for the marker to load. */
+  unreadLoaded: boolean;
+  /** Fired (debounced upstream) every time the viewport is at/near the
+   *  bottom of the feed — initial snap, scroll-back-down, or auto-scroll
+   *  after an inbound message arrived while already near bottom. */
+  onNearBottom: () => void;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageCount =
     state.kind === "ready" ? state.messages.length : 0;
+
+  // The index of the first message whose created_at is strictly after the
+  // user's live last_read_at — where the "New messages" divider renders.
+  // -1 = no divider. Recomputed every time lastReadAt moves, so a
+  // successful markAllRead (which advances lastReadAt to NOW()) hides the
+  // divider in the same render — no stale anchor, no refresh required.
+  const dividerIndex = useMemo(() => {
+    if (state.kind !== "ready") return -1;
+    if (state.messages.length === 0) return -1;
+    if (!unreadLoaded) return -1;
+    if (lastReadAt === null) return 0;
+    return state.messages.findIndex((m) => m.created_at > lastReadAt);
+  }, [state, unreadLoaded, lastReadAt]);
+
+  // Keep `onNearBottom` reachable from the scroll listener (which is set up
+  // once on mount) without restarting the listener every time the upstream
+  // identity changes.
+  const onNearBottomRef = useRef(onNearBottom);
+  useEffect(() => {
+    onNearBottomRef.current = onNearBottom;
+  }, [onNearBottom]);
 
   // Scroll-position discipline:
   //   * On the very first arrival of messages, snap to the bottom (latest
@@ -412,9 +498,17 @@ function FeedList({
 
   useEffect(() => {
     const update = () => {
+      const wasNear = nearBottomRef.current;
       const doc = document.documentElement;
       const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
-      nearBottomRef.current = remaining < NEAR_BOTTOM_PX;
+      const isNear = remaining < NEAR_BOTTOM_PX;
+      nearBottomRef.current = isNear;
+      // Mark-read trigger: the user manually scrolled back into the
+      // near-bottom band. Edge-triggered so simply being near bottom while
+      // scrolling around doesn't fire repeatedly.
+      if (!wasNear && isNear) {
+        onNearBottomRef.current();
+      }
     };
     // Seed once in case the user never scrolls; passive listener avoids
     // blocking the scroll thread.
@@ -438,6 +532,10 @@ function FeedList({
         behavior: firstScrollRef.current ? "auto" : "smooth",
         block: "end",
       });
+      // We just landed (or stayed) at the bottom — mark everything as read.
+      // Debounced upstream so the initial snap + an inbound realtime hit
+      // collapse into one POST.
+      onNearBottomRef.current();
     }
     firstScrollRef.current = false;
     // Consume the one-shot self-post signal whether or not it fired the
@@ -473,17 +571,19 @@ function FeedList({
           </CardContent>
         </Card>
       ) : (
-        state.messages.map((m) => {
+        state.messages.map((m, i) => {
           const isFresh = initialIds !== null && !initialIds.has(m.id);
           return (
-            <FeedCard
-              key={m.id}
-              message={m}
-              isMine={m.salesperson_id === currentUserId}
-              isAdmin={isAdmin}
-              isFresh={isFresh}
-              onDeleted={onDeleted}
-            />
+            <Fragment key={m.id}>
+              {i === dividerIndex && <NewMessagesDivider />}
+              <FeedCard
+                message={m}
+                isMine={m.salesperson_id === currentUserId}
+                isAdmin={isAdmin}
+                isFresh={isFresh}
+                onDeleted={onDeleted}
+              />
+            </Fragment>
           );
         })
       )}
@@ -676,6 +776,26 @@ function FeedCardMenu({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * "New messages" separator slotted in between the last read post and the
+ * first unread one. Visually a thin orange hairline + a small pill label —
+ * tasteful enough to read as a marker, not a banner.
+ */
+function NewMessagesDivider() {
+  return (
+    <div
+      aria-label="New messages below"
+      className="flex items-center gap-2 px-0.5 py-0.5"
+    >
+      <span className="h-px flex-1 bg-primary/30" />
+      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary ring-1 ring-primary/20">
+        New messages
+      </span>
+      <span className="h-px flex-1 bg-primary/30" />
     </div>
   );
 }
