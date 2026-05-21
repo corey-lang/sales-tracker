@@ -11,7 +11,7 @@ import { nextQuote } from "@/lib/quotes";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -40,7 +40,7 @@ import { VerificationCenter } from "@/components/verification-center";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { salesperson, clear, loaded } = useSalesperson();
+  const { salesperson, loaded } = useSalesperson();
   const [entryVersion, setEntryVersion] = useState(0);
   const [quote, setQuote] = useState<string>("");
 
@@ -66,17 +66,20 @@ export default function DashboardPage() {
     );
   }
 
-  const handleSwitchUser = () => {
-    clear();
-    router.push("/");
-  };
-
   if (salesperson.role === "assistant") {
     return (
       <>
         <main
           className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 p-4 sm:p-6 ${BOTTOM_NAV_SPACER}`}
         >
+          {/* Assistant header mirrors the AE header's account chrome: a
+              small Settings gear linking to /more (which hosts the
+              account summary, notification opt-in when Juice Box-
+              eligible, the admin shortcut, and Log out). Without this
+              link, role === "assistant" users had no way to reach /more
+              — the bottom nav also drops it for them. The Admin link
+              is rendered alongside for admin-assistant accounts (e.g.
+              Tonja) so the admin queue stays one tap away. */}
           <header className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div>
@@ -86,9 +89,26 @@ export default function DashboardPage() {
               </div>
               <Logo width={180} height={55} priority className="shrink-0" />
             </div>
-            <Button variant="outline" size="sm" onClick={handleSwitchUser}>
-              Log out
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              {salesperson.is_admin && (
+                <Link
+                  href="/admin"
+                  className={buttonVariants({ variant: "outline", size: "sm" })}
+                >
+                  Admin
+                </Link>
+              )}
+              <Link
+                href="/more"
+                aria-label="Account and notification settings"
+                className={buttonVariants({
+                  variant: "ghost",
+                  size: "icon",
+                })}
+              >
+                <Settings aria-hidden="true" className="size-5" />
+              </Link>
+            </div>
           </header>
           <VerificationCenter />
         </main>
