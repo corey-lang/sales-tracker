@@ -1,17 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
-import {
-  Camera,
-  ImageUp,
-  ListChecks,
-  ScanLine,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import { Settings } from "lucide-react";
 
 import { formatDateMDY } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
@@ -29,175 +22,27 @@ import {
 import { Logo } from "@/components/logo";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 import { ThisWeekCard } from "@/components/this-week-card";
-import { AeTasksCard } from "@/components/ae-tasks-card";
-import { BusinessCardScanner } from "@/components/business-card-scanner";
-import { PhoneContactScanner } from "@/components/phone-contact-scanner";
 import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { EditWeekCard } from "@/components/edit-week-card";
 import { MessagesCard } from "@/components/messages-card";
 import { VerificationCenter } from "@/components/verification-center";
 
-/** A compact, light quick-action button. */
-function QuickAction({
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  icon: LucideIcon;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-center justify-center gap-2 rounded-lg bg-card px-3 py-2.5 text-sm font-medium ring-1 ring-foreground/10 transition-colors hover:bg-muted hover:ring-foreground/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-    >
-      <Icon aria-hidden="true" className="size-4 text-primary" />
-      {label}
-    </button>
-  );
-}
-
-/**
- * A titled pair of sub-actions: Take Photo (rear camera) and Upload Image
- * (photo library / files). Rendered inside the Scan Biz Card sheet, one
- * group per scan flow (admin review vs. phone contacts).
- */
-function ScanPathGroup({
-  title,
-  description,
-  onTakePhoto,
-  onUploadImage,
-}: {
-  title: string;
-  description: string;
-  onTakePhoto: () => void;
-  onUploadImage: () => void;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="px-0.5">
-        <p className="text-sm font-semibold">{title}</p>
-        <p className="text-xs text-muted-foreground">{description}</p>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <QuickAction icon={Camera} label="Take Photo" onClick={onTakePhoto} />
-        <QuickAction icon={ImageUp} label="Upload" onClick={onUploadImage} />
-      </div>
-    </div>
-  );
-}
-
-/**
- * Bottom sheet opened from the "Scan Biz Card" quick action. Surfaces both
- * scan destinations (review queue + phone contacts) with their Take Photo /
- * Upload affordances. Each tap closes the sheet and clicks the matching
- * hidden file input on the dashboard, so the existing capture / extraction
- * / duplicate-detection / contact-save flows are unchanged downstream.
- */
-function ScanBizCardSheet({
-  onClose,
-  onAdminTakePhoto,
-  onAdminUpload,
-  onPhoneTakePhoto,
-  onPhoneUpload,
-}: {
-  onClose: () => void;
-  onAdminTakePhoto: () => void;
-  onAdminUpload: () => void;
-  onPhoneTakePhoto: () => void;
-  onPhoneUpload: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [onClose]);
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Scan business card"
-      onClick={onClose}
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4"
-    >
-      <div
-        onClick={(event) => event.stopPropagation()}
-        className="w-full max-w-md rounded-t-2xl border border-border/60 bg-card p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-2xl sm:pb-4"
-      >
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold">Scan Biz Card</h2>
-            <p className="text-xs text-muted-foreground">
-              Pick where the card should go.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-          >
-            <X aria-hidden="true" className="size-4" />
-          </button>
-        </div>
-        <div className="space-y-4">
-          <ScanPathGroup
-            title="Scan Card"
-            description="Send to the review queue for follow-up."
-            onTakePhoto={onAdminTakePhoto}
-            onUploadImage={onAdminUpload}
-          />
-          <div className="border-t border-border/60" />
-          <ScanPathGroup
-            title="Scan Card and add to Contacts"
-            description="Save the card straight to your phone contacts."
-            onTakePhoto={onPhoneTakePhoto}
-            onUploadImage={onPhoneUpload}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
+// Home dashboard. Slimmer than the pre-nav-rollout version — the To-Do
+// section and the biz-card / log-activity quick actions have moved into
+// dedicated routes reachable from the bottom nav. What remains here is the
+// daily-momentum read (greeting + weekly progress + messages + activity
+// logging + week edit) so Home is the "what's my week look like, what did
+// I just do" view, not a launcher.
+//
+// Account chrome (notifications opt-in, log out, admin link) lives on
+// /more, reachable via the small Settings icon in the header.
 
 export default function DashboardPage() {
   const router = useRouter();
   const { salesperson, clear, loaded } = useSalesperson();
   const [entryVersion, setEntryVersion] = useState(0);
   const [quote, setQuote] = useState<string>("");
-
-  // Business card scanning. The dashboard owns hidden native file inputs; the
-  // sub-action buttons click them directly, so there is no intermediate modal.
-  // Each feature has TWO inputs: a camera input (capture="environment", biases
-  // the rear camera) and an upload input (no capture — Photo Library / Files).
-  // A pick stores { file, key } and renders the matching scanner; `key` bumps
-  // on every pick so re-picking (even the same file) re-processes — that is
-  // also how the in-panel "Scan Another …" buttons work.
-  const adminCameraRef = useRef<HTMLInputElement>(null);
-  const adminUploadRef = useRef<HTMLInputElement>(null);
-  const phoneCameraRef = useRef<HTMLInputElement>(null);
-  const phoneUploadRef = useRef<HTMLInputElement>(null);
-  const scanKeyRef = useRef(0);
-  const [adminScan, setAdminScan] = useState<{
-    file: File;
-    key: number;
-  } | null>(null);
-  const [phoneScan, setPhoneScan] = useState<{
-    file: File;
-    key: number;
-  } | null>(null);
-  const [scanSheetOpen, setScanSheetOpen] = useState(false);
 
   useEffect(() => {
     if (loaded && !salesperson) router.replace("/");
@@ -254,250 +99,83 @@ export default function DashboardPage() {
 
   const now = new Date();
   const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
-  const isAe = salesperson.role === "ae";
-
-  const scrollToLog = () => {
-    document
-      .getElementById("log-activity")
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  /** Records a picked image and opens the matching scanner panel. */
-  const handlePickedFile = (
-    e: React.ChangeEvent<HTMLInputElement>,
-    target: "admin" | "phone",
-  ) => {
-    const file = e.target.files?.[0];
-    // Reset so picking the same file again re-fires onChange.
-    e.target.value = "";
-    if (!file) return;
-    scanKeyRef.current += 1;
-    const pick = { file, key: scanKeyRef.current };
-    // The two flows are mutually exclusive — opening one closes the other.
-    if (target === "admin") {
-      setPhoneScan(null);
-      setAdminScan(pick);
-    } else {
-      setAdminScan(null);
-      setPhoneScan(pick);
-    }
-  };
-
-  // Focused review mode: while the AE is in the "Scan Card & Save Contact"
-  // flow, the rest of the dashboard (momentum/leaderboard, quick actions,
-  // to-do, log activity, …) is hidden so the screen reads as a dedicated
-  // contact review-and-save workflow. Closing the panel restores the dashboard.
-  if (isAe && phoneScan) {
-    return (
-      <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
-        <PhoneContactScanner
-          salesperson={salesperson}
-          file={phoneScan.file}
-          fileKey={phoneScan.key}
-          onScanAnother={() => phoneCameraRef.current?.click()}
-          onClose={() => setPhoneScan(null)}
-        />
-        {/* Kept mounted so "Scan Another Contact" can reopen the camera. */}
-        <input
-          ref={phoneCameraRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          onChange={(e) => handlePickedFile(e, "phone")}
-          className="sr-only"
-          aria-hidden="true"
-          tabIndex={-1}
-        />
-      </main>
-    );
-  }
 
   return (
     <>
-    <main className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}>
-      {/* Compact greeting — the weekly momentum card is the visual hero. */}
-      <header className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          {/* Subtle white brand mark next to the greeting — premium-dark global. */}
-          <Logo width={120} height={37} className="shrink-0 opacity-90" />
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-muted-foreground">{today}</p>
-            <h1 className="truncate text-xl font-bold tracking-tight">
-              Hi, {salesperson.first_name} 👋
-            </h1>
+      <main
+        className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}
+      >
+        {/* Compact greeting — the weekly momentum card is the visual hero.
+            The settings icon on the right links to /more, which hosts
+            notification opt-in, the admin shortcut, and log out. */}
+        <header className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            {/* Subtle white brand mark next to the greeting. */}
+            <Logo width={120} height={37} className="shrink-0 opacity-90" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-muted-foreground">{today}</p>
+              <h1 className="truncate text-xl font-bold tracking-tight">
+                Hi, {salesperson.first_name} 👋
+              </h1>
+            </div>
           </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {salesperson.is_admin && (
+          <div className="flex shrink-0 items-center gap-2">
+            {salesperson.is_admin && (
+              <Link
+                href="/admin"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                Admin
+              </Link>
+            )}
             <Link
-              href="/admin"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+              href="/more"
+              aria-label="Account and notification settings"
+              className={buttonVariants({
+                variant: "ghost",
+                size: "icon",
+              })}
             >
-              Admin
+              <Settings aria-hidden="true" className="size-5" />
             </Link>
-          )}
-          <Button variant="ghost" size="sm" onClick={handleSwitchUser}>
-            Log out
-          </Button>
-        </div>
-      </header>
-
-      {/* 1 — This week: personal momentum + leaderboard context */}
-      <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
-
-      <MessagesCard salespersonId={salesperson.id} />
-
-      {/* 2 — Quick actions */}
-      <section className="space-y-3">
-        <h2 className="px-0.5 text-sm font-medium text-muted-foreground">
-          Quick actions
-        </h2>
-
-        {/* The admin scanner renders here; the action buttons below stay
-            visible so another card can be scanned with a single tap. The
-            phone-contact flow instead takes over the screen in focused mode
-            (see the early return above). */}
-        {isAe && adminScan && (
-          <BusinessCardScanner
-            salesperson={salesperson}
-            file={adminScan.file}
-            fileKey={adminScan.key}
-            onScanAnother={() => adminCameraRef.current?.click()}
-            onClose={() => setAdminScan(null)}
-          />
-        )}
-
-        {/* Single entry-point for both biz-card scan flows. The sheet that
-            opens lets the user pick the destination first (review queue vs.
-            phone contacts), then a capture source (camera vs. upload). */}
-        {isAe && (
-          <div className="grid grid-cols-1 gap-2">
-            <QuickAction
-              icon={ScanLine}
-              label="Scan Biz Card"
-              onClick={() => setScanSheetOpen(true)}
-            />
           </div>
-        )}
+        </header>
 
-        <div className="grid grid-cols-1 gap-2">
-          <QuickAction
-            icon={ListChecks}
-            label="Log activity"
-            onClick={scrollToLog}
-          />
-        </div>
+        <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
 
-        {isAe && scanSheetOpen && (
-          <ScanBizCardSheet
-            onClose={() => setScanSheetOpen(false)}
-            onAdminTakePhoto={() => {
-              setScanSheetOpen(false);
-              adminCameraRef.current?.click();
-            }}
-            onAdminUpload={() => {
-              setScanSheetOpen(false);
-              adminUploadRef.current?.click();
-            }}
-            onPhoneTakePhoto={() => {
-              setScanSheetOpen(false);
-              phoneCameraRef.current?.click();
-            }}
-            onPhoneUpload={() => {
-              setScanSheetOpen(false);
-              phoneUploadRef.current?.click();
-            }}
-          />
-        )}
+        <MessagesCard salespersonId={salesperson.id} />
 
-        {/* Hidden native file inputs — clicked directly by the buttons above,
-            so there is no intermediate modal. "Take Photo" sets
-            capture="environment" to bias the rear camera; "Upload Image"
-            omits capture so the OS offers Photo Library / Files / Camera. */}
-        {isAe && (
-          <>
-            <input
-              ref={adminCameraRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => handlePickedFile(e, "admin")}
-              className="sr-only"
-              aria-hidden="true"
-              tabIndex={-1}
+        <Card id="log-activity" size="sm" className="scroll-mt-4">
+          <CardHeader>
+            <CardTitle>Log activity</CardTitle>
+            <CardDescription>
+              Enter only what you just did — it adds to your weekly total.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <DailyEntryForm
+              salespersonId={salesperson.id}
+              refreshKey={entryVersion}
+              onSaved={() => setEntryVersion((n) => n + 1)}
             />
-            <input
-              ref={adminUploadRef}
-              type="file"
-              accept="image/*"
-              onChange={(e) => handlePickedFile(e, "admin")}
-              className="sr-only"
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-          </>
+          </CardContent>
+        </Card>
+
+        <MyWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
+
+        <EditWeekCard
+          salespersonId={salesperson.id}
+          refreshKey={entryVersion}
+          onSaved={() => setEntryVersion((n) => n + 1)}
+        />
+
+        {quote && (
+          <p className="px-3 pb-1 text-center text-xs italic text-muted-foreground/70">
+            &ldquo;{quote}&rdquo;
+          </p>
         )}
-        {isAe && (
-          <>
-            <input
-              ref={phoneCameraRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => handlePickedFile(e, "phone")}
-              className="sr-only"
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-            <input
-              ref={phoneUploadRef}
-              type="file"
-              accept="image/*"
-              onChange={(e) => handlePickedFile(e, "phone")}
-              className="sr-only"
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-          </>
-        )}
-      </section>
-
-      {/* 3 — To-Do / follow-ups */}
-      <AeTasksCard />
-
-      {/* Daily activity logging — kept, de-prioritized below the dashboard. */}
-      <Card id="log-activity" size="sm" className="scroll-mt-4">
-        <CardHeader>
-          <CardTitle>Log activity</CardTitle>
-          <CardDescription>
-            Enter only what you just did — it adds to your weekly total.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <DailyEntryForm
-            salespersonId={salesperson.id}
-            refreshKey={entryVersion}
-            onSaved={() => setEntryVersion((n) => n + 1)}
-          />
-        </CardContent>
-      </Card>
-
-      <MyWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
-
-      <EditWeekCard
-        salespersonId={salesperson.id}
-        refreshKey={entryVersion}
-        onSaved={() => setEntryVersion((n) => n + 1)}
-      />
-
-      {/* 5 — Motivation, intentionally last and low-weight. */}
-      {quote && (
-        <p className="px-3 pb-1 text-center text-xs italic text-muted-foreground/70">
-          &ldquo;{quote}&rdquo;
-        </p>
-      )}
-    </main>
-    <BottomNav salesperson={salesperson} />
+      </main>
+      <BottomNav salesperson={salesperson} />
     </>
   );
 }

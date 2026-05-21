@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Citrus, Trophy, MoreHorizontal, type LucideIcon } from "lucide-react";
+import {
+  Citrus,
+  Home,
+  ListChecks,
+  ScanLine,
+  Trophy,
+  type LucideIcon,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { isTestAccount } from "@/lib/permissions";
@@ -13,9 +20,13 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 // translucent charcoal surface so it reads cleanly over the premium-dark
 // theme. The active tab is tinted with the orange accent.
 //
-// Role-awareness: the Juice Box tab is gated to admins and test accounts only,
-// matching the same gate enforced inside /juice-box. Everyone else sees a
-// 3-tab bar (Home / Leaderboard / More).
+// Role-awareness:
+//   * Juice Box       — admins + test accounts only (matches the /juice-box
+//                       page gate). Everyone else's nav drops the tab.
+//   * To-Dos          — AE workflow, hidden from assistants.
+//   * Scan Biz Card   — AE workflow, hidden from assistants.
+//   Settings / logout / notifications no longer live in the nav; they're
+//   reachable from the Home header (a small "More" icon links to /more).
 //
 // Spacing: this component is `position: fixed`, so consuming pages add
 // `pb-24` (or similar) to their main wrapper. We expose `BOTTOM_NAV_SPACER`
@@ -38,7 +49,12 @@ const LEADERBOARD: NavItem = {
   label: "Leaderboard",
   icon: Trophy,
 };
-const MORE: NavItem = { href: "/more", label: "More", icon: MoreHorizontal };
+const TODOS: NavItem = { href: "/todos", label: "To-Dos", icon: ListChecks };
+const SCAN_BIZ_CARD: NavItem = {
+  href: "/scan-biz-card",
+  label: "Scan Biz Card",
+  icon: ScanLine,
+};
 
 /** Bottom padding any page using BottomNav should apply to its main wrapper. */
 export const BOTTOM_NAV_SPACER =
@@ -52,6 +68,19 @@ export function canSeeJuiceBox(
   return isTestAccount(salesperson);
 }
 
+function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
+  const items: NavItem[] = [HOME];
+  if (canSeeJuiceBox(salesperson)) items.push(JUICE_BOX);
+  items.push(LEADERBOARD);
+  // AE workflows. Assistants have a restricted dashboard (VerificationCenter
+  // only) and don't use these features, so we hide their tabs to keep the
+  // assistant nav uncluttered.
+  if (salesperson && salesperson.role !== "assistant") {
+    items.push(TODOS, SCAN_BIZ_CARD);
+  }
+  return items;
+}
+
 export function BottomNav({
   salesperson,
 }: {
@@ -63,9 +92,18 @@ export function BottomNav({
   // ineligible users so the value is 0 / null in that case.
   const { unreadCount } = useJuiceBoxUnread();
 
-  const items: NavItem[] = showJuiceBox
-    ? [HOME, JUICE_BOX, LEADERBOARD, MORE]
-    : [HOME, LEADERBOARD, MORE];
+  const items = buildNavItems(salesperson);
+
+  // Grid columns map 1:1 to the active item count so the tabs share width
+  // evenly regardless of which role-gated items are present.
+  const gridClass =
+    items.length === 5
+      ? "grid-cols-5"
+      : items.length === 4
+        ? "grid-cols-4"
+        : items.length === 3
+          ? "grid-cols-3"
+          : "grid-cols-2";
 
   return (
     <nav
@@ -75,12 +113,7 @@ export function BottomNav({
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
-      <ul
-        className={cn(
-          "mx-auto grid w-full max-w-2xl",
-          items.length === 4 ? "grid-cols-4" : "grid-cols-3",
-        )}
-      >
+      <ul className={cn("mx-auto grid w-full max-w-2xl", gridClass)}>
         {items.map((item) => {
           const active =
             pathname === item.href ||
@@ -94,7 +127,7 @@ export function BottomNav({
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-0.5 py-2.5 text-[11px] font-medium",
+                  "flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 text-[11px] font-medium",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                   active
                     ? "text-primary"
@@ -111,7 +144,7 @@ export function BottomNav({
                   />
                   {showBadge && <UnreadBadge count={unreadCount} />}
                 </span>
-                <span>{item.label}</span>
+                <span className="max-w-full truncate">{item.label}</span>
               </Link>
             </li>
           );
