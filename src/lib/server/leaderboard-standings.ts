@@ -69,14 +69,17 @@ export async function computeStandings(
   goalAsOf: string,
 ): Promise<{ standings: LeaderboardStanding[]; error: string | null }> {
   const [peopleRes, entriesRes, goalsRes] = await Promise.all([
-    // Admins (is_admin=true), assistants (role='assistant'), and test accounts
-    // (is_test=true) don't compete.
+    // Only true AEs compete. Filtering positively on `role = 'ae'` (vs.
+    // excluding known non-AE roles) keeps juice_box_only guests (Travis,
+    // Rizz, …) off every leaderboard surface and means any future role
+    // can't accidentally leak in. is_admin / is_test are kept in the
+    // predicate as belt-and-suspenders against a misconfigured row.
     supabase
       .from("salespeople")
       .select("id, first_name")
+      .eq("role", "ae")
       .eq("is_admin", false)
-      .eq("is_test", false)
-      .neq("role", "assistant"),
+      .eq("is_test", false),
     supabase
       .from("activity_entries")
       .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
