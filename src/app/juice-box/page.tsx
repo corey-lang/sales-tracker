@@ -2956,7 +2956,15 @@ function FeedCard({
         // default --border charcoal — still tasteful, but the cards
         // read as distinct surfaces on a dark feed instead of melting
         // into the background. Hover keeps the orange-tinted glow.
-        "py-2.5 border-foreground/15 transition-shadow hover:shadow-[0_0_0_1px_var(--color-primary)/0.18,0_8px_24px_-12px_color-mix(in_oklab,var(--color-primary)_25%,transparent)]",
+        "py-2.5 transition-shadow hover:shadow-[0_0_0_1px_var(--color-primary)/0.18,0_8px_24px_-12px_color-mix(in_oklab,var(--color-primary)_25%,transparent)]",
+        // Mine: very subtle warmth. The card background blends ~6% of
+        // the orange primary into --color-card so the charcoal stays
+        // dark but reads warmer, and the resting border picks up a
+        // slightly stronger orange tint. Combined the effect is
+        // recognizable without ever feeling like a chat bubble.
+        isMine
+          ? "bg-[color-mix(in_oklab,var(--color-primary)_6%,var(--color-card))] border-primary/25 ring-1 ring-inset ring-primary/10"
+          : "border-foreground/15",
         // tw-animate-css: short fade + slide for posts that arrived after
         // the initial load. Initial cards do not animate.
         isFresh &&
@@ -2979,8 +2987,8 @@ function FeedCard({
             <p className="min-w-0 truncate text-[15px] leading-tight">
               <span className="font-bold">{message.salesperson_name}</span>
               {isMine && (
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  (you)
+                <span className="ml-1.5 inline-flex items-center rounded-full bg-primary/15 px-1.5 py-px align-[1px] text-[10px] font-semibold uppercase tracking-wide text-primary ring-1 ring-inset ring-primary/25">
+                  You
                 </span>
               )}
               <span className="ml-1.5 text-xs font-normal text-muted-foreground/70">

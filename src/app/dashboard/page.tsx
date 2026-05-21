@@ -4,7 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
-import { Camera, ImageUp, ListChecks, type LucideIcon } from "lucide-react";
+import {
+  Camera,
+  ImageUp,
+  ListChecks,
+  ScanLine,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 import { formatDateMDY } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
@@ -54,29 +61,111 @@ function QuickAction({
 }
 
 /**
- * A business card feature shown as a titled pair of sub-actions: Take Photo
- * (rear camera) and Upload Image (photo library / files). Each button opens a
- * hidden native input owned by the dashboard.
+ * A titled pair of sub-actions: Take Photo (rear camera) and Upload Image
+ * (photo library / files). Rendered inside the Scan Biz Card sheet, one
+ * group per scan flow (admin review vs. phone contacts).
  */
-function ScanFeature({
+function ScanPathGroup({
   title,
+  description,
   onTakePhoto,
   onUploadImage,
 }: {
   title: string;
+  description: string;
   onTakePhoto: () => void;
   onUploadImage: () => void;
 }) {
   return (
-    <div className="space-y-1.5">
-      <p className="px-0.5 text-xs font-medium text-foreground/70">{title}</p>
+    <div className="space-y-2">
+      <div className="px-0.5">
+        <p className="text-sm font-semibold">{title}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
       <div className="grid grid-cols-2 gap-2">
         <QuickAction icon={Camera} label="Take Photo" onClick={onTakePhoto} />
-        <QuickAction
-          icon={ImageUp}
-          label="Upload Image"
-          onClick={onUploadImage}
-        />
+        <QuickAction icon={ImageUp} label="Upload" onClick={onUploadImage} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Bottom sheet opened from the "Scan Biz Card" quick action. Surfaces both
+ * scan destinations (review queue + phone contacts) with their Take Photo /
+ * Upload affordances. Each tap closes the sheet and clicks the matching
+ * hidden file input on the dashboard, so the existing capture / extraction
+ * / duplicate-detection / contact-save flows are unchanged downstream.
+ */
+function ScanBizCardSheet({
+  onClose,
+  onAdminTakePhoto,
+  onAdminUpload,
+  onPhoneTakePhoto,
+  onPhoneUpload,
+}: {
+  onClose: () => void;
+  onAdminTakePhoto: () => void;
+  onAdminUpload: () => void;
+  onPhoneTakePhoto: () => void;
+  onPhoneUpload: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Scan business card"
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        className="w-full max-w-md rounded-t-2xl border border-border/60 bg-card p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-2xl sm:pb-4"
+      >
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold">Scan Biz Card</h2>
+            <p className="text-xs text-muted-foreground">
+              Pick where the card should go.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <X aria-hidden="true" className="size-4" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          <ScanPathGroup
+            title="Scan Card"
+            description="Send to the review queue for follow-up."
+            onTakePhoto={onAdminTakePhoto}
+            onUploadImage={onAdminUpload}
+          />
+          <div className="border-t border-border/60" />
+          <ScanPathGroup
+            title="Scan Card and add to Contacts"
+            description="Save the card straight to your phone contacts."
+            onTakePhoto={onPhoneTakePhoto}
+            onUploadImage={onPhoneUpload}
+          />
+        </div>
       </div>
     </div>
   );
@@ -108,6 +197,7 @@ export default function DashboardPage() {
     file: File;
     key: number;
   } | null>(null);
+  const [scanSheetOpen, setScanSheetOpen] = useState(false);
 
   useEffect(() => {
     if (loaded && !salesperson) router.replace("/");
@@ -277,20 +367,17 @@ export default function DashboardPage() {
           />
         )}
 
-        {/* Each business card feature exposes Take Photo + Upload Image. */}
+        {/* Single entry-point for both biz-card scan flows. The sheet that
+            opens lets the user pick the destination first (review queue vs.
+            phone contacts), then a capture source (camera vs. upload). */}
         {isAe && (
-          <ScanFeature
-            title="Scan Business Card"
-            onTakePhoto={() => adminCameraRef.current?.click()}
-            onUploadImage={() => adminUploadRef.current?.click()}
-          />
-        )}
-        {isAe && (
-          <ScanFeature
-            title="Scan Card & Save Contact"
-            onTakePhoto={() => phoneCameraRef.current?.click()}
-            onUploadImage={() => phoneUploadRef.current?.click()}
-          />
+          <div className="grid grid-cols-1 gap-2">
+            <QuickAction
+              icon={ScanLine}
+              label="Scan Biz Card"
+              onClick={() => setScanSheetOpen(true)}
+            />
+          </div>
         )}
 
         <div className="grid grid-cols-1 gap-2">
@@ -300,6 +387,28 @@ export default function DashboardPage() {
             onClick={scrollToLog}
           />
         </div>
+
+        {isAe && scanSheetOpen && (
+          <ScanBizCardSheet
+            onClose={() => setScanSheetOpen(false)}
+            onAdminTakePhoto={() => {
+              setScanSheetOpen(false);
+              adminCameraRef.current?.click();
+            }}
+            onAdminUpload={() => {
+              setScanSheetOpen(false);
+              adminUploadRef.current?.click();
+            }}
+            onPhoneTakePhoto={() => {
+              setScanSheetOpen(false);
+              phoneCameraRef.current?.click();
+            }}
+            onPhoneUpload={() => {
+              setScanSheetOpen(false);
+              phoneUploadRef.current?.click();
+            }}
+          />
+        )}
 
         {/* Hidden native file inputs — clicked directly by the buttons above,
             so there is no intermediate modal. "Take Photo" sets
