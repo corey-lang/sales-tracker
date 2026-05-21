@@ -9,18 +9,19 @@ import {
 } from "@/lib/server/auth";
 import {
   COMMITMENT_CONTENT_MAX_LENGTH,
-  ONE_ON_ONES_TABLE,
-  ONE_ON_ONE_COMMITMENTS_TABLE,
-  type OneOnOneCommitment,
+  WEEKLY_FOCUS_COMMITMENTS_TABLE,
+  WEEKLY_FOCUS_TABLE,
+  type WeeklyFocusCommitment,
 } from "@/lib/one-on-ones";
 
 // POST /api/admin/one-on-ones/[id]/commitments
 //   body: { content: string, due_date?: YYYY-MM-DD | null }
-//   -> { commitment: OneOnOneCommitment }
+//   -> { commitment: WeeklyFocusCommitment }
 //
-// Admin-only. Adds a single commitment to a specific 1:1. The commitment's
-// `ae_id` is denormalized from the parent meeting so per-AE queries don't
-// have to join through one_on_ones.
+// Admin-only. Adds a single commitment to a specific Weekly Focus row.
+// The commitment's `ae_id` is denormalized from the parent week so per-AE
+// queries don't have to join through the focus table. URL path keeps the
+// legacy `/one-on-ones/` segment for back-compat.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,28 +49,32 @@ export async function POST(
 
     const supabase = getServerSupabase();
     const parent = await supabase
-      .from(ONE_ON_ONES_TABLE)
+      .from(WEEKLY_FOCUS_TABLE)
       .select("id, ae_id")
       .eq("id", id)
       .maybeSingle();
     if (parent.error) throw new Error(parent.error.message);
-    if (!parent.data) throw notFound("1:1 not found.");
+    if (!parent.data) throw notFound("Weekly focus not found.");
     const { ae_id } = parent.data as { id: string; ae_id: string };
 
     const res = await supabase
-      .from(ONE_ON_ONE_COMMITMENTS_TABLE)
+      .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
       .insert({
         one_on_one_id: id,
         ae_id,
         content: body.content,
         due_date: body.due_date ?? null,
+        // Default `status` is set DB-side (DEFAULT 'open'), but we send
+        // it explicitly so a serverless cold start doesn't accidentally
+        // produce NULL on a schema that hasn't picked up the default yet.
+        status: "open",
       })
       .select("*")
       .single();
     if (res.error || !res.data) {
       throw new Error(res.error?.message ?? "Could not create commitment.");
     }
-    return Response.json({ commitment: res.data as OneOnOneCommitment });
+    return Response.json({ commitment: res.data as WeeklyFocusCommitment });
   } catch (err) {
     return handleApiError(err);
   }

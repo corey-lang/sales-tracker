@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
-import { formatDateMDY } from "@/lib/dates";
+import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { fetchActiveGoalForScope } from "@/lib/goals";
 import { useSalesperson } from "@/lib/use-salesperson";
 
@@ -73,8 +73,14 @@ export function GoalsCard({ people }: Props) {
 
   // Form state — every save INSERTs, so no editingId concept.
   const [scope, setScope] = useState<string>(GLOBAL_SCOPE);
+  // Default the "effective from" date to today in the app's business
+  // timezone (America/Denver) — same anchor every other week/day surface
+  // uses (leaderboard, Weekly Focus, activity reports). Otherwise an
+  // admin opening this form from a non-Denver browser around midnight
+  // could save a goal with an effective_from a day off from when it
+  // actually applies on the leaderboard.
   const [effectiveFrom, setEffectiveFrom] = useState<string>(() =>
-    format(new Date(), "yyyy-MM-dd"),
+    format(todayInAppTimezone(), "yyyy-MM-dd"),
   );
   const [values, setValues] = useState<AdminValues>({ ...ZERO_ADMIN });
   const [saving, setSaving] = useState(false);
@@ -141,7 +147,10 @@ export function GoalsCard({ people }: Props) {
     };
   }, [refreshTick]);
 
-  const todayIso = format(new Date(), "yyyy-MM-dd");
+  // Denver business-day cutoff for "which goal row is currently active".
+  // Matches the resolution server-side in fetchActiveGoalFor* and the
+  // leaderboard's effective_from <= today comparison.
+  const todayIso = format(todayInAppTimezone(), "yyyy-MM-dd");
 
   const activeGlobal = useMemo<GoalRow | null>(() => {
     for (const g of allGoals) {
@@ -206,7 +215,8 @@ export function GoalsCard({ people }: Props) {
 
   const resetForm = () => {
     setScope(GLOBAL_SCOPE);
-    setEffectiveFrom(format(new Date(), "yyyy-MM-dd"));
+    // Same Denver-anchored default as the initial form state above.
+    setEffectiveFrom(format(todayInAppTimezone(), "yyyy-MM-dd"));
     setValues({ ...ZERO_ADMIN });
     setSaveError(null);
   };

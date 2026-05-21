@@ -26,6 +26,17 @@ Run these in the Supabase SQL editor, top to bottom:
 | 10 | `business_card_crm_hardening.sql` | CRM prep: `storage_path`, `normalized_email`, `normalized_phone`, `raw_extraction_json`, `extraction_model`, `updated_at` (+ trigger) on `business_card_scans`; `storage_path` / `normalized_email` / `normalized_phone` on `business_card_contacts`. Backfills existing rows. **Must be run before deploying the CRM-hardening app code** — that code writes the new columns, and inserts/updates will fail until they exist. Additive and idempotent, so it is safe to run early. |
 | 11 | `business_card_phone_contact.sql` | "Scan & Add to Phone Contacts" — adds `notes`, `verified_by_ae_at`, `phone_contact_exported_at`, `contact_save_mode` to `business_card_contacts`. **Must be run before deploying the phone-contact app code** — the `/api/business-card/ae-contact` route writes these columns and inserts will fail until they exist. Additive, idempotent, does not touch the admin flow or CSV export. |
 | 12 | `business_card_image_rotation.sql` | Adds `image_rotation_degrees` (INTEGER, default 0) to `business_card_scans` — per-scan display rotation for the Verification Center. **Must be run before deploying the rotation app code** — `/api/business-card/update-rotation` writes this column. Display metadata only; the stored image file is never altered. Additive and idempotent. |
+| 13 | `team_messages.sql` | Team announcements / chat message table for the Juice Box. |
+| 14 | `team_message_reads.sql` | Per-user read state for team messages. |
+| 15 | `juice_box_pass4_conversations.sql` | Juice Box conversation-grouping pass. |
+| 16 | `juice_box_pass5_media.sql` | Juice Box media-upload pass. |
+| 17 | `juice_box_pass6_push.sql` | Juice Box push-notification subscriptions. |
+| 18 | `add_juice_box_only_role.sql` | Adds the `juice_box_only` role to `salespeople.role`. |
+| 19 | `manager_one_on_ones.sql` | Manager coaching foundation: `one_on_ones`, `one_on_one_commitments`, `coaching_relationships`, `training_commitments`. Server-only (RLS on, no policies). **Must run before `weekly_focus.sql` and `weekly_focus_v2.sql`** — they extend tables this migration creates. |
+| 20 | `weekly_focus.sql` | Evolves the 1:1 model into Weekly Focus: adds `week_start`, `notes_training`, `notes_manager` to `one_on_ones`, backfills, consolidates per-week duplicates, enforces one focus row per `(ae_id, week_start)`. **Depends on `manager_one_on_ones.sql`.** |
+| 21 | `weekly_focus_v2.sql` | Weekly Focus durability + privacy hardening: adds commitment `status` lifecycle (open / completed / dropped — replaces hard-delete), `(ae_id, status)` index, `coaching_relationships.archived_at` + normalized dedupe unique index, and splits `notes_manager` off `one_on_ones` into a separate `weekly_focus_private_notes` table so a future AE-facing read can never leak private notes. **Depends on both `manager_one_on_ones.sql` AND `weekly_focus.sql`.** |
+
+> **Coaching migration order is strict.** `manager_one_on_ones.sql` → `weekly_focus.sql` → `weekly_focus_v2.sql`. Each later file extends/renames structure the earlier one creates. Skipping or reordering will leave `one_on_ones` / commitments in a half-migrated state that the API code expects to be fully migrated. All three are idempotent and re-runnable.
 
 ## Staged migrations — DO NOT APPLY YET
 

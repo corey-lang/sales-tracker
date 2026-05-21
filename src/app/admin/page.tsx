@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { addDays, format, startOfWeek } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
+import { todayInAppTimezone } from "@/lib/dates";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
 import { FiltersCard } from "@/components/admin/filters-card";
@@ -24,8 +25,11 @@ export default function AdminDashboardPage() {
 
   useScrollToTop();
 
+  // Anchor "this week" to the Denver business calendar so the default
+  // filter on the admin dashboard agrees with the leaderboard's and
+  // Weekly Focus's notion of the current week.
   const currentBusinessWeekStart = () =>
-    startOfWeek(new Date(), { weekStartsOn: 1 });
+    startOfWeek(todayInAppTimezone(), { weekStartsOn: 1 });
   const [from, setFrom] = useState(() =>
     format(currentBusinessWeekStart(), "yyyy-MM-dd"),
   );

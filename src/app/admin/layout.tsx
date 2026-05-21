@@ -19,7 +19,7 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 /** Admin sections, in nav order. Each is its own route under /admin. */
 const ADMIN_NAV = [
   { href: "/admin", label: "Dashboard" },
-  { href: "/admin/coaching", label: "Coaching" },
+  { href: "/admin/coaching", label: "Weekly Focus" },
   { href: "/admin/business-cards", label: "Business Cards" },
   { href: "/admin/leaderboard", label: "Leaderboard" },
   { href: "/admin/reports/activity", label: "Activity Reports" },

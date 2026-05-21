@@ -1,6 +1,7 @@
 import { format } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { todayInAppTimezone } from "@/lib/dates";
 import { businessWeekToDateRange } from "@/lib/goals";
 import { handleApiError, requireAeToolAccess } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
@@ -43,7 +44,10 @@ export async function GET(req: Request) {
   try {
     await requireAeToolAccess(req);
 
-    const now = new Date();
+    // Anchor to the app business zone (America/Denver) so the
+    // leaderboard's "this week" rolls over at the same instant as the
+    // Weekly Focus surfaces. See src/lib/dates.ts for rationale.
+    const now = todayInAppTimezone();
     const { since, through } = businessWeekToDateRange(now);
     const todayStr = format(now, "yyyy-MM-dd");
 

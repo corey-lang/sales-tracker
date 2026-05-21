@@ -80,7 +80,7 @@ Indexes:
 
 1. `npm install`
 2. Copy `.env.example` → `.env.local` and fill in the two Supabase values.
-3. In the Supabase SQL editor, run `supabase/schema.sql`.
+3. Apply the database migrations **in the order documented in [supabase/README.md](supabase/README.md)** — `schema.sql` is only the base; every later `.sql` file is a layered migration. The coaching/Weekly Focus stack in particular has a strict dependency chain: `manager_one_on_ones.sql` → `weekly_focus.sql` → `weekly_focus_v2.sql`. All three must be applied (in that order) before the coaching APIs will work. All migrations are idempotent and safe to re-run.
 4. `npm run dev` → http://localhost:3000.
 
 ## Open questions / TODO

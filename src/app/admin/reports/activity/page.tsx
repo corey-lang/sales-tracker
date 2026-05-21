@@ -17,7 +17,7 @@ import {
   weeklyTargetsFrom,
   type WeeklyGoal,
 } from "@/lib/goals";
-import { formatDateMDY } from "@/lib/dates";
+import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 
 import {
@@ -118,8 +118,18 @@ export default function ActivityReportPage() {
   const [tab, setTab] = useState<Tab>("progress");
   const [load, setLoad] = useState<Load>({ status: "loading" });
 
-  // The week's reporting end — the Friday, or today for the still-running week.
-  const today = new Date().toISOString().slice(0, 10);
+  // The week's reporting end — the Friday, or today for the still-running
+  // week. "Today" is the Denver business-day, NOT a UTC slice — otherwise
+  // the report's "through" date could disagree with the leaderboard's and
+  // Weekly Focus's by up to a day at the UTC boundary.
+  const today = useMemo(() => {
+    const d = todayInAppTimezone();
+    // YYYY-MM-DD slice of the Denver date that todayInAppTimezone()
+    // already pegs to local midnight, so direct ISO slice is safe.
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate(),
+    ).padStart(2, "0")}`;
+  }, []);
   const through = week.friday < today ? week.friday : today;
 
   useEffect(() => {

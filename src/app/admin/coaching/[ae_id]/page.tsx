@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { format } from "date-fns";
+import { addDays, format, parseISO } from "date-fns";
 import {
+  Archive,
   ArrowLeft,
   Check,
   ChevronDown,
@@ -12,6 +13,7 @@ import {
   Plus,
   Trash2,
   Trophy,
+  Undo2,
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
@@ -20,9 +22,9 @@ import { cn } from "@/lib/utils";
 import type {
   CoachingDetail,
   CoachingRelationship,
-  OneOnOne,
-  OneOnOneCommitment,
   TrainingCommitment,
+  WeeklyFocus,
+  WeeklyFocusCommitment,
 } from "@/lib/one-on-ones";
 
 import { Button } from "@/components/ui/button";
@@ -35,22 +37,24 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-// Admin → Coaching → AE detail. Renders the seven sections defined in the
-// 1:1 spec:
+// Admin → Coaching → AE detail (Weekly Focus model).
 //
-//   A. Snapshot Header              -> SnapshotSection
-//   B. Gold List / Key Relationships -> RelationshipsSection
-//   C. Training Commitments         -> TrainingSection
-//   D. Previous 1:1 Commitments     -> PreviousCommitmentsSection (uses
-//                                      detail.previous_commitments, sourced
-//                                      from the meeting BEFORE the latest)
-//   E. Notes (Wins / Opportunities / Focus) -> NotesSection
-//   F. Commitments Before Next 1:1  -> NextCommitmentsSection
-//   G. Timeline History             -> TimelineSection
+// Layout:
+//   A. Snapshot Header                  -> SnapshotSection
+//   B. This Week                        -> CurrentWeekSection
+//        * Carried Commitments banner   (motivational, NOT punitive)
+//        * Focus / Wins / Blockers panes
+//        * Training Focus / Manager Notes panes
+//        * Commitments (this week)
+//   C. Gold List / Key Relationships    -> RelationshipsSection (persistent)
+//   D. Training Commitments             -> TrainingSection (standing)
+//   E. Past weeks                       -> HistorySection
 //
-// Sections D / E / F operate on the LATEST 1:1 row. The manager creates a
-// new 1:1 with "Start new 1:1" — that fresh row becomes the latest, and
-// the previous becomes the "Previous Commitments" surface.
+// The current Weekly Focus row is auto-created server-side on GET — the
+// UI never asks the manager to "start" a week. Carried commitments come
+// from prior weeks' open items and round-trip to their original week's
+// commitment endpoint, so completing one moves it out of carryover
+// without duplicating history.
 
 type Tone = "good" | "warn" | "bad" | "neutral";
 
@@ -82,6 +86,13 @@ const TONE_CLASS: Record<Tone, string> = {
   bad: "bg-red-500/10 text-red-700 dark:text-red-400",
   neutral: "bg-muted text-muted-foreground",
 };
+
+/** "Week of MMM d" — Mon-Fri range derived from a week_start Monday. */
+function weekLabel(weekStart: string): string {
+  const monday = parseISO(weekStart);
+  const friday = addDays(monday, 4);
+  return `Week of ${format(monday, "MMM d")} – ${format(friday, "MMM d")}`;
+}
 
 export default function CoachingAeDetailPage() {
   const params = useParams<{ ae_id: string }>();
@@ -138,38 +149,34 @@ export default function CoachingAeDetailPage() {
     );
   }
 
-  const latestOneOnOne = detail.one_on_ones[0] ?? null;
-
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <Link
-            href="/admin/coaching"
-            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft aria-hidden="true" className="size-4" />
-            All AEs
-          </Link>
-          <h2 className="mt-1 text-2xl font-semibold tracking-tight">
-            Coaching {detail.ae.first_name}
-          </h2>
-        </div>
-        <StartNewOneOnOneButton aeId={aeId} onCreated={refresh} />
+      <div>
+        <Link
+          href="/admin/coaching"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft aria-hidden="true" className="size-4" />
+          All AEs
+        </Link>
+        <h2 className="mt-1 text-2xl font-semibold tracking-tight">
+          {detail.ae.first_name} · Weekly Focus
+        </h2>
       </div>
 
       <SnapshotSection detail={detail} />
 
-      <CurrentOneOnOneSection
-        aeId={aeId}
-        latest={latestOneOnOne}
-        previousCommitments={detail.previous_commitments}
+      <CurrentWeekSection
+        currentWeek={detail.current_week}
+        managerNotes={detail.manager_notes}
+        carried={detail.carried_commitments}
         onChange={refresh}
       />
 
       <RelationshipsSection
         aeId={aeId}
         relationships={detail.relationships}
+        archived={detail.archived_relationships}
         onChange={refresh}
       />
 
@@ -179,13 +186,13 @@ export default function CoachingAeDetailPage() {
         onChange={refresh}
       />
 
-      <TimelineSection oneOnOnes={detail.one_on_ones} />
+      <HistorySection history={detail.history} />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Section A — Snapshot header
+// Section A — Snapshot header (unchanged from prior coaching page)
 // ---------------------------------------------------------------------------
 
 function SnapshotSection({ detail }: { detail: CoachingDetail }) {
@@ -316,107 +323,51 @@ function TrendStrip({
 }
 
 // ---------------------------------------------------------------------------
-// Sections D + E + F — the current 1:1 (Previous commitments, Notes, Next commitments)
+// Section B — This Week (the auto-created current Weekly Focus row)
 // ---------------------------------------------------------------------------
 
-function StartNewOneOnOneButton({
-  aeId,
-  onCreated,
-}: {
-  aeId: string;
-  onCreated: () => void;
-}) {
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const handle = async () => {
-    if (creating) return;
-    setCreating(true);
-    setError(null);
-    try {
-      const res = await apiFetch(`/api/admin/coaching/${aeId}/one-on-ones`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(body?.error ?? `Could not create (${res.status}).`);
-      }
-      onCreated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create 1:1.");
-    } finally {
-      setCreating(false);
-    }
-  };
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <Button onClick={handle} disabled={creating} className="gap-1.5">
-        <Plus aria-hidden="true" className="size-4" />
-        {creating ? "Starting…" : "Start new 1:1"}
-      </Button>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
-
-function CurrentOneOnOneSection({
-  aeId,
-  latest,
-  previousCommitments,
+function CurrentWeekSection({
+  currentWeek,
+  managerNotes,
+  carried,
   onChange,
 }: {
-  aeId: string;
-  latest: (OneOnOne & { commitments: OneOnOneCommitment[] }) | null;
-  previousCommitments: OneOnOneCommitment[];
+  currentWeek: WeeklyFocus & { commitments: WeeklyFocusCommitment[] };
+  managerNotes: string | null;
+  carried: CoachingDetail["carried_commitments"];
   onChange: () => void;
 }) {
-  if (!latest) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Current 1:1</CardTitle>
-          <CardDescription>
-            No 1:1 yet for {aeId ? "this AE" : "—"}. Tap{" "}
-            <span className="font-medium">Start new 1:1</span> above to begin.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
   return (
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
-            <CardTitle>Current 1:1</CardTitle>
-            <CardDescription>
-              {format(new Date(latest.meeting_date), "EEEE, MMM d, yyyy")}
-            </CardDescription>
+            <CardTitle>This Week</CardTitle>
+            <CardDescription>{weekLabel(currentWeek.week_start)}</CardDescription>
           </div>
           <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-            {latest.visibility === "shared" ? "Shared with AE" : "Manager only"}
+            {currentWeek.visibility === "shared"
+              ? "Shared with AE"
+              : "Manager only"}
           </span>
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
-        {/* D — Previous commitments (from the meeting BEFORE this one) */}
-        {previousCommitments.length > 0 && (
-          <PreviousCommitmentsBlock
-            commitments={previousCommitments}
-            onChange={onChange}
-          />
+        {carried.length > 0 && (
+          <CarryoverBlock items={carried} onChange={onChange} />
         )}
 
-        {/* E — Notes (Wins / Opportunities / Focus) */}
-        <NotesBlock oneOnOne={latest} onChange={onChange} />
+        <FocusNotesBlock weeklyFocus={currentWeek} onChange={onChange} />
 
-        {/* F — Commitments Before Next 1:1 */}
-        <NextCommitmentsBlock
-          oneOnOne={latest}
-          commitments={latest.commitments}
+        <CommitmentsBlock
+          weeklyFocus={currentWeek}
+          commitments={currentWeek.commitments}
+          onChange={onChange}
+        />
+
+        <CoachNotesBlock
+          weeklyFocus={currentWeek}
+          managerNotes={managerNotes}
           onChange={onChange}
         />
       </CardContent>
@@ -424,62 +375,145 @@ function CurrentOneOnOneSection({
   );
 }
 
-function PreviousCommitmentsBlock({
-  commitments,
+/**
+ * Motivational carryover banner — surfaces open commitments from prior
+ * weeks under the current week. The framing is intentionally positive
+ * ("carried over from last week") rather than punitive ("incomplete /
+ * failed"). Completing a carried item PATCHes the ORIGINAL week's
+ * commitment row (not a copy) so history stays clean and the item drops
+ * out of carryover on the next refresh.
+ */
+function CarryoverBlock({
+  items,
   onChange,
 }: {
-  commitments: OneOnOneCommitment[];
+  items: CoachingDetail["carried_commitments"];
   onChange: () => void;
 }) {
+  // Group by source week so the manager can see "from last week" vs.
+  // "from 2 weeks ago" at a glance.
+  const groups = useMemo(() => {
+    const m = new Map<string, CoachingDetail["carried_commitments"]>();
+    for (const c of items) {
+      const bucket = m.get(c.source_week_start) ?? [];
+      bucket.push(c);
+      m.set(c.source_week_start, bucket);
+    }
+    return Array.from(m.entries()); // already newest-first from API
+  }, [items]);
+
   return (
-    <section className="space-y-2">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Previous commitments</h3>
-        <span className="text-xs text-muted-foreground">
-          {commitments.filter((c) => c.completed).length}/{commitments.length}{" "}
-          done
+    <section className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">
+          {items.length} commitment{items.length === 1 ? "" : "s"} carried over
+        </h3>
+        <span className="text-[11px] text-muted-foreground">
+          From previous weeks — finish, edit, or drop.
         </span>
       </div>
-      <ul className="space-y-1.5">
-        {commitments.map((c) => (
-          <CommitmentRow key={c.id} commitment={c} onChange={onChange} />
+      <div className="space-y-2">
+        {groups.map(([weekStart, group]) => (
+          <div key={weekStart} className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              {weekLabel(weekStart)}
+            </p>
+            <ul className="space-y-1.5">
+              {group.map((c) => (
+                <CommitmentRow key={c.id} commitment={c} onChange={onChange} />
+              ))}
+            </ul>
+          </div>
         ))}
-      </ul>
+      </div>
     </section>
   );
 }
 
-function NotesBlock({
-  oneOnOne,
+/**
+ * Top notes block — Focus / Wins / Blockers. The "Need Help / Blockers"
+ * pane writes to the legacy `notes_opportunities` column (relabeled in
+ * UI only — see weekly_focus.sql comments). All three are part of the
+ * shared focus row and remain candidates for visibility='shared' in the
+ * future AE-facing surface (unlike Manager Notes, which is private).
+ */
+function FocusNotesBlock({
+  weeklyFocus,
   onChange,
 }: {
-  oneOnOne: OneOnOne;
+  weeklyFocus: WeeklyFocus;
   onChange: () => void;
 }) {
   return (
     <section className="grid gap-3 md:grid-cols-3">
       <NoteEditor
-        key={`${oneOnOne.id}-wins`}
+        key={`${weeklyFocus.id}-focus`}
+        label="This week focus"
+        placeholder="What matters most this week?"
+        value={weeklyFocus.notes_focus}
+        weeklyFocusId={weeklyFocus.id}
+        field="notes_focus"
+        onChange={onChange}
+      />
+      <NoteEditor
+        key={`${weeklyFocus.id}-wins`}
         label="Wins"
-        value={oneOnOne.notes_wins}
-        oneOnOneId={oneOnOne.id}
+        placeholder="Recent wins to celebrate…"
+        value={weeklyFocus.notes_wins}
+        weeklyFocusId={weeklyFocus.id}
         field="notes_wins"
         onChange={onChange}
       />
       <NoteEditor
-        key={`${oneOnOne.id}-opps`}
-        label="Opportunities"
-        value={oneOnOne.notes_opportunities}
-        oneOnOneId={oneOnOne.id}
+        key={`${weeklyFocus.id}-blockers`}
+        label="Need help / blockers"
+        placeholder="Where are they stuck?"
+        value={weeklyFocus.notes_opportunities}
+        weeklyFocusId={weeklyFocus.id}
         field="notes_opportunities"
         onChange={onChange}
       />
+    </section>
+  );
+}
+
+/**
+ * Lower notes block — Training Focus / Manager Notes. Pulled out from
+ * the top block so the visual rhythm of the page is Focus → Commitments
+ * → Coaching narrative rather than a single wide field grid.
+ *
+ * Manager Notes value is sourced from `detail.manager_notes` (a separate
+ * private-notes table), not from the focus row, so it cannot be served
+ * to a future AE-facing surface by accident.
+ */
+function CoachNotesBlock({
+  weeklyFocus,
+  managerNotes,
+  onChange,
+}: {
+  weeklyFocus: WeeklyFocus;
+  managerNotes: string | null;
+  onChange: () => void;
+}) {
+  return (
+    <section className="grid gap-3 md:grid-cols-2">
       <NoteEditor
-        key={`${oneOnOne.id}-focus`}
-        label="Focus"
-        value={oneOnOne.notes_focus}
-        oneOnOneId={oneOnOne.id}
-        field="notes_focus"
+        key={`${weeklyFocus.id}-training`}
+        label="Training focus"
+        placeholder="Skill, shadow, or rep we're building this week…"
+        value={weeklyFocus.notes_training}
+        weeklyFocusId={weeklyFocus.id}
+        field="notes_training"
+        onChange={onChange}
+      />
+      <NoteEditor
+        key={`${weeklyFocus.id}-manager`}
+        label="Manager notes"
+        privateBadge
+        placeholder="Coaching observations — private to the manager."
+        value={managerNotes}
+        weeklyFocusId={weeklyFocus.id}
+        field="notes_manager"
         onChange={onChange}
       />
     </section>
@@ -488,30 +522,100 @@ function NotesBlock({
 
 type SaveStatus = "idle" | "saving" | "saved" | "failed";
 
+type NoteField =
+  | "notes_focus"
+  | "notes_wins"
+  | "notes_opportunities"
+  | "notes_training"
+  | "notes_manager";
+
+/** Idle delay before an in-progress edit autosaves. */
+const NOTE_AUTOSAVE_MS = 1500;
+
 function NoteEditor({
   label,
+  placeholder,
   value,
-  oneOnOneId,
+  weeklyFocusId,
   field,
   onChange,
+  privateBadge,
 }: {
   label: string;
+  placeholder?: string;
   value: string | null;
-  oneOnOneId: string;
-  field: "notes_wins" | "notes_opportunities" | "notes_focus";
+  weeklyFocusId: string;
+  field: NoteField;
   onChange: () => void;
+  /** Renders a "Private" badge — used for the Manager Notes pane. */
+  privateBadge?: boolean;
 }) {
-  // Local edit state. The editor is keyed on `oneOnOneId` at the call site
-  // (via React's `key` prop) so switching to a different 1:1 remounts it
-  // with a fresh `value`. Same-meeting refreshes after a save don't need
-  // reconciliation — the post-save local text already matches the server.
+  // Local edit state. The editor is keyed on `weeklyFocusId` at the call
+  // site (via React's `key` prop) so switching to a different week
+  // remounts it with a fresh `value`. Same-week refreshes after a save
+  // don't need reconciliation — the post-save local text already matches
+  // the server.
   const initial = value ?? "";
   const [text, setText] = useState(initial);
-  const [savedValue, setSavedValue] = useState(initial);
   const [status, setStatus] = useState<SaveStatus>("idle");
 
-  // Clear "Saved" / "Failed" badges shortly so they don't linger forever.
-  // 1.6 s for "Saved" (long enough to register, short enough to fade);
+  // Refs so the autosave timer (and the unmount flush) see the latest
+  // values without needing the effect to re-run on every keystroke.
+  const savedValueRef = useRef(initial);
+  const textRef = useRef(initial);
+
+  const persist = useCallback(
+    async (next: string) => {
+      if (next === savedValueRef.current) return;
+      setStatus("saving");
+      try {
+        const res = await apiFetch(
+          `/api/admin/one-on-ones/${weeklyFocusId}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ [field]: next || null }),
+          },
+        );
+        if (!res.ok) {
+          setStatus("failed");
+          return;
+        }
+        savedValueRef.current = next;
+        setStatus("saved");
+        onChange();
+      } catch {
+        setStatus("failed");
+      }
+    },
+    [weeklyFocusId, field, onChange],
+  );
+
+  // Debounced autosave: fires NOTE_AUTOSAVE_MS after the user stops
+  // typing, so a closed tab / quick navigation doesn't lose the last
+  // edit. onBlur still triggers an immediate save (no wait).
+  useEffect(() => {
+    if (text === savedValueRef.current) return;
+    const t = window.setTimeout(() => {
+      void persist(text);
+    }, NOTE_AUTOSAVE_MS);
+    return () => window.clearTimeout(t);
+  }, [text, persist]);
+
+  // Best-effort flush on unmount — covers route navigation between AEs.
+  // We can't await an async call in a cleanup, but firing it lets the
+  // browser keep the request alive while the page changes.
+  useEffect(() => {
+    return () => {
+      if (textRef.current !== savedValueRef.current) {
+        void persist(textRef.current);
+      }
+    };
+    // Intentionally only on mount/unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Clear "Saved" badge after a short pause so it doesn't linger.
   // "Failed" sticks until the next save attempt so it can't be missed.
   useEffect(() => {
     if (status !== "saved") return;
@@ -519,44 +623,36 @@ function NoteEditor({
     return () => window.clearTimeout(t);
   }, [status]);
 
-  const save = async () => {
-    if (text === savedValue) return;
-    setStatus("saving");
-    try {
-      const res = await apiFetch(`/api/admin/one-on-ones/${oneOnOneId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [field]: text || null }),
-      });
-      if (!res.ok) {
-        setStatus("failed");
-        return;
-      }
-      setSavedValue(text);
-      setStatus("saved");
-      onChange();
-    } catch {
-      setStatus("failed");
-    }
-  };
-
   return (
     <div>
       <label className="flex items-baseline gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <span>{label}</span>
-        <NoteStatusPill status={status} onRetry={save} />
+        {privateBadge && (
+          <span
+            className="rounded bg-amber-500/15 px-1 py-px text-[9px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400"
+            title="Stored in a manager-only table; never returned to AE-facing reads."
+          >
+            Private
+          </span>
+        )}
+        <NoteStatusPill
+          status={status}
+          onRetry={() => void persist(textRef.current)}
+        />
       </label>
       <textarea
         value={text}
         onChange={(e) => {
-          setText(e.target.value);
+          const next = e.target.value;
+          textRef.current = next;
+          setText(next);
           // The user is editing — drop a lingering "Saved"/"Failed" badge
           // so the indicator only reflects the current attempt.
           if (status !== "saving") setStatus("idle");
         }}
-        onBlur={save}
+        onBlur={() => void persist(textRef.current)}
         rows={4}
-        placeholder={`Capture ${label.toLowerCase()}…`}
+        placeholder={placeholder ?? `Capture ${label.toLowerCase()}…`}
         className="mt-1 w-full resize-y rounded-md border border-border bg-background/40 px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
       />
     </div>
@@ -609,31 +705,35 @@ function NoteStatusPill({
   );
 }
 
-function NextCommitmentsBlock({
-  oneOnOne,
+function CommitmentsBlock({
+  weeklyFocus,
   commitments,
   onChange,
 }: {
-  oneOnOne: OneOnOne;
-  commitments: OneOnOneCommitment[];
+  weeklyFocus: WeeklyFocus;
+  commitments: WeeklyFocusCommitment[];
   onChange: () => void;
 }) {
+  // Active = anything not dropped. Dropped rows stay in `commitments`
+  // so server-side state matches the response payload, but they don't
+  // surface in the active list or counter — they're history, not work.
+  const active = commitments.filter((c) => c.status !== "dropped");
+  const done = active.filter((c) => c.status === "completed").length;
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Commitments before next 1:1</h3>
+        <h3 className="text-sm font-semibold">Commitments</h3>
         <span className="text-xs text-muted-foreground">
-          {commitments.filter((c) => c.completed).length}/{commitments.length}{" "}
-          done
+          {done}/{active.length} done
         </span>
       </div>
       <AddCommitmentForm
-        path={`/api/admin/one-on-ones/${oneOnOne.id}/commitments`}
-        placeholder="Add a commitment for next 1:1…"
+        path={`/api/admin/one-on-ones/${weeklyFocus.id}/commitments`}
+        placeholder="Add a commitment for this week…"
         onCreated={onChange}
       />
       <ul className="space-y-1.5">
-        {commitments.map((c) => (
+        {active.map((c) => (
           <CommitmentRow key={c.id} commitment={c} onChange={onChange} />
         ))}
       </ul>
@@ -645,7 +745,7 @@ function CommitmentRow({
   commitment,
   onChange,
 }: {
-  commitment: OneOnOneCommitment;
+  commitment: WeeklyFocusCommitment;
   onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -659,15 +759,21 @@ function CommitmentRow({
     if (!ok) setFailed(true);
     setBusy(false);
   };
+  const isCompleted = commitment.status === "completed";
   const toggle = () =>
     run(() =>
       apiFetch(path, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ completed: !commitment.completed }),
+        body: JSON.stringify({
+          status: isCompleted ? "open" : "completed",
+        }),
       }),
     );
-  const remove = () => run(() => apiFetch(path, { method: "DELETE" }));
+  // DELETE → server-side soft-drop. UI affordance reads as "Drop"
+  // ("remove from active focus"), not "Delete" — the historical row
+  // remains for coaching history.
+  const drop = () => run(() => apiFetch(path, { method: "DELETE" }));
   return (
     <li
       className={cn(
@@ -679,24 +785,20 @@ function CommitmentRow({
         type="button"
         onClick={toggle}
         disabled={busy}
-        aria-label={
-          commitment.completed ? "Mark not completed" : "Mark completed"
-        }
+        aria-label={isCompleted ? "Mark not completed" : "Mark completed"}
         className={cn(
           "inline-flex size-5 shrink-0 items-center justify-center rounded border transition-colors",
-          commitment.completed
+          isCompleted
             ? "border-primary bg-primary text-primary-foreground"
             : "border-border bg-background hover:border-primary/40",
         )}
       >
-        {commitment.completed && (
-          <Check aria-hidden="true" className="size-3.5" />
-        )}
+        {isCompleted && <Check aria-hidden="true" className="size-3.5" />}
       </button>
       <p
         className={cn(
           "flex-1 text-sm",
-          commitment.completed && "text-muted-foreground line-through",
+          isCompleted && "text-muted-foreground line-through",
         )}
       >
         {commitment.content}
@@ -709,10 +811,11 @@ function CommitmentRow({
       )}
       <button
         type="button"
-        onClick={remove}
+        onClick={drop}
         disabled={busy}
-        aria-label="Delete commitment"
-        className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+        title="Drop — remove from active focus, keep history"
+        aria-label="Drop commitment"
+        className="rounded p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       >
         <Trash2 aria-hidden="true" className="size-3.5" />
       </button>
@@ -724,7 +827,7 @@ function CommitmentRow({
  * Inline, low-volume "save failed" marker for row-level mutations.
  * Sits between the row content and trailing affordances; tells the
  * manager something went wrong without bouncing or modaling them out
- * of the 1:1 flow. Auto-clears when the next attempt starts.
+ * of the coaching flow. Auto-clears when the next attempt starts.
  */
 function MutationFailedHint() {
   return (
@@ -801,16 +904,18 @@ function AddCommitmentForm({
 }
 
 // ---------------------------------------------------------------------------
-// Section B — Gold List / Key Relationships
+// Section C — Gold List / Key Relationships (persistent across weeks)
 // ---------------------------------------------------------------------------
 
 function RelationshipsSection({
   aeId,
   relationships,
+  archived,
   onChange,
 }: {
   aeId: string;
   relationships: CoachingRelationship[];
+  archived: CoachingRelationship[];
   onChange: () => void;
 }) {
   const [adding, setAdding] = useState(false);
@@ -820,34 +925,44 @@ function RelationshipsSection({
     if (!draft.contact_name.trim() || adding) return;
     setAdding(true);
     setAddError(null);
-    const ok = await runMutation(
-      () =>
-        apiFetch(`/api/admin/coaching/${aeId}/relationships`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contact_name: draft.contact_name.trim(),
-            company: draft.company.trim() || null,
-          }),
+    try {
+      const res = await apiFetch(`/api/admin/coaching/${aeId}/relationships`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contact_name: draft.contact_name.trim(),
+          company: draft.company.trim() || null,
         }),
-      () => {
-        // Only clear the draft on a real success — otherwise the manager
-        // would type the contact again from scratch when the request
-        // silently failed mid-1:1.
-        setDraft({ contact_name: "", company: "" });
-        onChange();
-      },
-    );
-    if (!ok) setAddError("Couldn't add — please retry.");
-    setAdding(false);
+      });
+      if (!res.ok) {
+        // 409 = active dedupe conflict from the unique index. Preserve
+        // the typed values so the manager can edit them rather than
+        // retype from scratch.
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        const message =
+          res.status === 409
+            ? body?.error ?? "Already on this AE's Gold List."
+            : body?.error ?? `Couldn't add (${res.status}).`;
+        setAddError(message);
+        return;
+      }
+      setDraft({ contact_name: "", company: "" });
+      onChange();
+    } catch {
+      setAddError("Couldn't add — please retry.");
+    } finally {
+      setAdding(false);
+    }
   };
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Key relationships</CardTitle>
+        <CardTitle>Gold list relationships</CardTitle>
         <CardDescription>
-          People we&apos;re building with — manager view, separate from the AE&apos;s
-          personal gold list.
+          Strategic relationships we&apos;re building — persistent across weeks,
+          not the AE&apos;s personal gold-list touch log.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -903,8 +1018,52 @@ function RelationshipsSection({
             ))}
           </ul>
         )}
+        <ArchivedRelationships
+          aeId={aeId}
+          archived={archived}
+          onChange={onChange}
+        />
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Collapsed "Archived" disclosure under the active Gold List.
+ *
+ * Archived rows are kept queryable so the longitudinal relationship
+ * history isn't lost when a contact cools or rolls off the focus list.
+ * Rendering them in a `<details>` keeps the active card clean while
+ * still putting the Restore affordance one tap away — without this, the
+ * relationship endpoint's `archived: false` toggle would be unreachable
+ * from the UI.
+ */
+function ArchivedRelationships({
+  aeId,
+  archived,
+  onChange,
+}: {
+  aeId: string;
+  archived: CoachingRelationship[];
+  onChange: () => void;
+}) {
+  if (archived.length === 0) return null;
+  return (
+    <details className="rounded-md border border-border/60 bg-muted/10">
+      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Archived ({archived.length})
+      </summary>
+      <ul className="space-y-2 border-t border-border/60 p-3">
+        {archived.map((r) => (
+          <RelationshipRow
+            key={r.id}
+            aeId={aeId}
+            relationship={r}
+            onChange={onChange}
+          />
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -919,7 +1078,7 @@ function RelationshipRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [edit, setEdit] = useState({
     title: relationship.title ?? "",
     status: relationship.status ?? "",
@@ -927,28 +1086,74 @@ function RelationshipRow({
     notes: relationship.notes ?? "",
   });
   const path = `/api/admin/coaching/${aeId}/relationships/${relationship.id}`;
-  const run = async (request: () => Promise<Response>) => {
+
+  const send = async (
+    payload: Record<string, unknown>,
+    fallback: string,
+  ) => {
     if (busy) return;
     setBusy(true);
-    setFailed(false);
-    const ok = await runMutation(request, onChange);
-    if (!ok) setFailed(true);
-    setBusy(false);
-  };
-  const save = () =>
-    run(() =>
-      apiFetch(path, {
+    setError(null);
+    try {
+      const res = await apiFetch(path, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: edit.title || null,
-          status: edit.status || null,
-          next_step: edit.next_step || null,
-          notes: edit.notes || null,
-        }),
-      }),
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setError(body?.error ?? fallback);
+        return;
+      }
+      onChange();
+    } catch {
+      setError(fallback);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = () =>
+    send(
+      {
+        title: edit.title || null,
+        status: edit.status || null,
+        next_step: edit.next_step || null,
+        notes: edit.notes || null,
+      },
+      "Couldn't save — please retry.",
     );
-  const remove = () => run(() => apiFetch(path, { method: "DELETE" }));
+
+  // DELETE soft-archives server-side; using the explicit `archived` flag
+  // keeps the affordance reversible from the same endpoint via Restore.
+  const archive = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch(path, { method: "DELETE" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setError(body?.error ?? "Couldn't archive — please retry.");
+        return;
+      }
+      onChange();
+    } catch {
+      setError("Couldn't archive — please retry.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restore = () =>
+    send({ archived: false }, "Couldn't restore — please retry.");
+
+  const archived = relationship.archived_at !== null;
+
   return (
     <li className="rounded-md border border-border/60 bg-muted/10">
       <button
@@ -967,7 +1172,12 @@ function RelationshipRow({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {relationship.status && (
+          {archived && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Archived
+            </span>
+          )}
+          {!archived && relationship.status && (
             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
               {relationship.status}
             </span>
@@ -992,7 +1202,7 @@ function RelationshipRow({
             <Input
               value={edit.status}
               onChange={(e) => setEdit({ ...edit, status: e.target.value })}
-              placeholder="Status (cold, warm, closing…)"
+              placeholder="Status (new, warming up, strong, advocate, cooling off…)"
               disabled={busy}
               maxLength={200}
             />
@@ -1014,24 +1224,39 @@ function RelationshipRow({
             className="w-full resize-y rounded-md border border-border bg-background/40 px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
           />
           <div className="flex items-center justify-between gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={remove}
-              disabled={busy}
-              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              <Trash2 aria-hidden="true" className="size-3.5" />
-              Remove
-            </Button>
+            {archived ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={restore}
+                disabled={busy}
+                className="text-primary hover:bg-primary/10"
+              >
+                <Undo2 aria-hidden="true" className="size-3.5" />
+                Restore
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={archive}
+                disabled={busy}
+                title="Archive — keep the longitudinal history, hide from active list"
+                className="text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              >
+                <Archive aria-hidden="true" className="size-3.5" />
+                Archive
+              </Button>
+            )}
             <div className="flex items-center gap-2">
-              {failed && (
+              {error && (
                 <span
                   role="alert"
                   className="text-[10px] font-semibold uppercase tracking-wide text-destructive"
                 >
-                  Failed — retry
+                  {error}
                 </span>
               )}
               <Button
@@ -1051,7 +1276,7 @@ function RelationshipRow({
 }
 
 // ---------------------------------------------------------------------------
-// Section C — Training Commitments
+// Section D — Training Commitments (standing per-AE, not weekly)
 // ---------------------------------------------------------------------------
 
 function TrainingSection({
@@ -1172,30 +1397,32 @@ function TrainingRow({
 }
 
 // ---------------------------------------------------------------------------
-// Section G — Timeline History
+// Section E — Past weeks (history timeline)
 // ---------------------------------------------------------------------------
 
-function TimelineSection({
-  oneOnOnes,
+function HistorySection({
+  history,
 }: {
-  oneOnOnes: Array<OneOnOne & { commitments: OneOnOneCommitment[] }>;
+  history: Array<WeeklyFocus & { commitments: WeeklyFocusCommitment[] }>;
 }) {
-  // Skip the most recent meeting — it's already rendered as "Current 1:1".
-  const history = useMemo(() => oneOnOnes.slice(1), [oneOnOnes]);
-  if (history.length === 0) {
-    return null;
-  }
+  if (history.length === 0) return null;
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Timeline</CardTitle>
-        <CardDescription>Past 1:1s, newest first.</CardDescription>
+        <CardTitle>Past weeks</CardTitle>
+        <CardDescription>Newest first.</CardDescription>
       </CardHeader>
       <CardContent>
         <ol className="space-y-3">
           {history.map((m) => {
-            const done = m.commitments.filter((c) => c.completed).length;
-            const total = m.commitments.length;
+            const done = m.commitments.filter(
+              (c) => c.status === "completed",
+            ).length;
+            // Dropped items don't add to the displayed total — they're
+            // archived from active focus, not "incomplete".
+            const total = m.commitments.filter(
+              (c) => c.status !== "dropped",
+            ).length;
             return (
               <li
                 key={m.id}
@@ -1203,7 +1430,7 @@ function TimelineSection({
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <p className="text-sm font-semibold">
-                    {format(new Date(m.meeting_date), "EEEE, MMM d, yyyy")}
+                    {weekLabel(m.week_start)}
                   </p>
                   <span className="text-xs text-muted-foreground">
                     {total > 0

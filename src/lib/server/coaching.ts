@@ -1,16 +1,18 @@
 import { addDays, format } from "date-fns";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { businessWeekToDateRange } from "@/lib/goals";
+import { appTimezoneMidnightUtc, todayInAppTimezone } from "@/lib/dates";
+import { businessWeekToDateRange, mondayOfWeek } from "@/lib/goals";
 import { ApiError, notFound } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 import type {
   CoachingAeSummary,
   CoachingSnapshot,
+  WeeklyFocus,
 } from "@/lib/one-on-ones";
 import {
-  ONE_ON_ONES_TABLE,
-  ONE_ON_ONE_COMMITMENTS_TABLE,
+  WEEKLY_FOCUS_TABLE,
+  WEEKLY_FOCUS_COMMITMENTS_TABLE,
 } from "@/lib/one-on-ones";
 
 /**
@@ -24,6 +26,77 @@ import {
  * `buildAeSummaries` or `requireCoachableAe`.
  */
 const COACHABLE_ROLE = "ae" as const;
+
+/**
+ * Ensures a Weekly Focus row exists for `aeId` and the current business
+ * week, returning the row (existing or freshly created). Idempotent — a
+ * second call in the same week is a no-op insert that hits the unique
+ * `(ae_id, week_start)` constraint and falls through to a SELECT.
+ *
+ * This replaces the manual "Start new 1:1" flow: the manager simply opens
+ * the AE's coaching surface, and the GET route calls this to guarantee a
+ * current-week row is present for the UI to render against.
+ *
+ * The optional `managerId` is stamped on the FIRST creation only — we
+ * never overwrite an existing row's manager (rotations preserve
+ * provenance). The legacy `meeting_date` column is set to today on first
+ * create so the existing history index continues to render a date label.
+ */
+export async function ensureCurrentWeeklyFocus(
+  supabase: SupabaseClient,
+  aeId: string,
+  managerId: string | null = null,
+  asOf: Date = todayInAppTimezone(),
+): Promise<WeeklyFocus> {
+  const weekStart = mondayOfWeek(asOf);
+  const today = format(asOf, "yyyy-MM-dd");
+
+  // Try to insert; ON CONFLICT means a row already exists for this week.
+  // We can't use Postgres `RETURNING` semantics through PostgREST in a
+  // single call cleanly, so we attempt insert then read.
+  const insertRes = await supabase
+    .from(WEEKLY_FOCUS_TABLE)
+    .insert({
+      ae_id: aeId,
+      manager_id: managerId,
+      week_start: weekStart,
+      meeting_date: today,
+    })
+    .select("*")
+    .maybeSingle();
+
+  if (insertRes.data) return insertRes.data as WeeklyFocus;
+
+  // Insert failed — almost certainly the unique constraint (row already
+  // exists for this week). Fall through to a select. If the failure was
+  // something else (permissions, network), the select will surface its
+  // own error. We deliberately do not pre-check existence to keep this
+  // single-roundtrip on the common new-week path.
+  const selectRes = await supabase
+    .from(WEEKLY_FOCUS_TABLE)
+    .select("*")
+    .eq("ae_id", aeId)
+    .eq("week_start", weekStart)
+    .maybeSingle();
+
+  if (selectRes.error) {
+    throw new ApiError(
+      500,
+      `Could not load this week's focus: ${selectRes.error.message}`,
+    );
+  }
+  if (!selectRes.data) {
+    // We couldn't insert AND nothing exists. The original insert error is
+    // the most informative thing to surface.
+    throw new ApiError(
+      500,
+      `Could not open this week's focus: ${
+        insertRes.error?.message ?? "unknown error"
+      }`,
+    );
+  }
+  return selectRes.data as WeeklyFocus;
+}
 
 /**
  * Resolves a salesperson by id and asserts they are a coachable AE
@@ -82,7 +155,7 @@ export const TREND_WEEKS = 4;
  *                        label, also as goalAsOf for that week)
  */
 export function recentWeekRanges(
-  asOf = new Date(),
+  asOf: Date = todayInAppTimezone(),
   weeks = TREND_WEEKS,
 ): Array<{
   since: string;
@@ -125,11 +198,19 @@ export async function businessCardCountsByAe(
   through: string,
 ): Promise<Map<string, number>> {
   if (aeIds.length === 0) return new Map();
-  // Use Mon 00:00:00 ... Fri 23:59:59 in the server's tz. created_at is
-  // a timestamptz so the bound needs to be a timestamp, not a DATE — we
-  // pass the start of Monday and the start of the day AFTER Friday.
-  const startStamp = `${since}T00:00:00Z`;
-  const endStamp = `${format(addDays(new Date(through), 1), "yyyy-MM-dd")}T00:00:00Z`;
+  // Build half-open [Mon-00:00, NextMon-00:00) bounds in APP_TIMEZONE.
+  // `since`/`through` are Denver-local DATE strings (YYYY-MM-DD); the
+  // `business_card_scans.created_at` column is a timestamptz, so the
+  // bound has to be the UTC instant of those Denver midnights — NOT
+  // `${date}T00:00:00Z`, which would point at UTC midnight (6–7h before
+  // Denver midnight) and miscount evening scans on either Friday or
+  // Sunday depending on DST.
+  const dayAfterThrough = format(
+    addDays(new Date(`${through}T12:00:00Z`), 1),
+    "yyyy-MM-dd",
+  );
+  const startStamp = appTimezoneMidnightUtc(since);
+  const endStamp = appTimezoneMidnightUtc(dayAfterThrough);
   const res = await supabase
     .from("business_card_scans")
     .select("salesperson_id")
@@ -159,7 +240,7 @@ export async function businessCardCountsByAe(
 export async function buildSnapshots(
   supabase: SupabaseClient,
   aeIds: readonly string[],
-  asOf = new Date(),
+  asOf: Date = todayInAppTimezone(),
 ): Promise<Map<string, CoachingSnapshot>> {
   if (aeIds.length === 0) return new Map();
   const weeks = recentWeekRanges(asOf);
@@ -235,7 +316,7 @@ export async function buildSnapshots(
  */
 export async function buildAeSummaries(
   supabase: SupabaseClient,
-  asOf = new Date(),
+  asOf: Date = todayInAppTimezone(),
 ): Promise<{ summaries: CoachingAeSummary[]; error: string | null }> {
   // Coaching surface is AE-only. Filtering on `role = 'ae'` directly
   // (rather than excluding known non-AE roles) means a future role
@@ -257,49 +338,63 @@ export async function buildAeSummaries(
 
   const aeIds = people.map((p) => p.id);
 
-  // Latest meeting per AE — drives both the "Last 1:1" date AND the scope
-  // for the open-commitments count below. We deliberately do NOT count
-  // historical open commitments across every past 1:1 — that inflates the
-  // manager's worklist and breaks trust in the index. The count should
-  // reflect only what's still open from the current cycle.
-  const [latestMeetingsRes, snapshots] = await Promise.all([
+  // Anchor open/carried buckets to the CURRENT business week (Monday) —
+  // NOT to the AE's latest row. Otherwise an AE the manager hasn't
+  // opened in two weeks would have last-week's open items show as
+  // "current open" until they tap in. We want the index to be accurate
+  // before anyone opens a detail page.
+  const currentWeekStart = mondayOfWeek(asOf);
+
+  // Pull every focus row + every open commitment for these AEs. We need
+  // the focus rows only to translate `one_on_one_id -> week_start` on
+  // each commitment; the bucket math itself just compares week_start to
+  // currentWeekStart.
+  const [focusRowsRes, snapshots, openCommitmentsRes] = await Promise.all([
     supabase
-      .from(ONE_ON_ONES_TABLE)
-      .select("id, ae_id, meeting_date, created_at")
-      .in("ae_id", aeIds)
-      // Tiebreak on created_at so two 1:1s on the same date resolve
-      // deterministically (most-recently-created wins).
-      .order("meeting_date", { ascending: false })
-      .order("created_at", { ascending: false }),
+      .from(WEEKLY_FOCUS_TABLE)
+      .select("id, ae_id, week_start")
+      .in("ae_id", aeIds),
     buildSnapshots(supabase, aeIds, asOf),
+    supabase
+      .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
+      .select("ae_id, one_on_one_id")
+      .in("ae_id", aeIds)
+      .eq("status", "open"),
   ]);
 
-  const latestByAe = new Map<string, { id: string; meeting_date: string }>();
-  if (!latestMeetingsRes.error && latestMeetingsRes.data) {
-    for (const row of latestMeetingsRes.data as Array<{
+  // Latest week_start per AE (for the index's "Week of …" label).
+  const latestWeekByAe = new Map<string, string>();
+  // Map of focus_row_id -> week_start, for bucketing commitments.
+  const weekStartById = new Map<string, string>();
+  if (!focusRowsRes.error && focusRowsRes.data) {
+    for (const row of focusRowsRes.data as Array<{
       id: string;
       ae_id: string;
-      meeting_date: string;
+      week_start: string;
     }>) {
-      // First occurrence wins because we ordered DESC.
-      if (!latestByAe.has(row.ae_id)) {
-        latestByAe.set(row.ae_id, { id: row.id, meeting_date: row.meeting_date });
+      weekStartById.set(row.id, row.week_start);
+      const current = latestWeekByAe.get(row.ae_id);
+      if (!current || row.week_start > current) {
+        latestWeekByAe.set(row.ae_id, row.week_start);
       }
     }
   }
 
-  // Second pass: open commitments scoped to each AE's latest 1:1 only.
-  const latestIds = Array.from(latestByAe.values()).map((m) => m.id);
+  // Open commitments: classify by whether the commitment's PARENT week
+  // is the current business week. If the AE has no current-week row yet,
+  // every open commitment is carryover by definition.
   const openByAe = new Map<string, number>();
-  if (latestIds.length > 0) {
-    const openRes = await supabase
-      .from(ONE_ON_ONE_COMMITMENTS_TABLE)
-      .select("ae_id, one_on_one_id")
-      .in("one_on_one_id", latestIds)
-      .eq("completed", false);
-    if (!openRes.error && openRes.data) {
-      for (const row of openRes.data as Array<{ ae_id: string }>) {
+  const carriedByAe = new Map<string, number>();
+  if (!openCommitmentsRes.error && openCommitmentsRes.data) {
+    for (const row of openCommitmentsRes.data as Array<{
+      ae_id: string;
+      one_on_one_id: string;
+    }>) {
+      const weekStart = weekStartById.get(row.one_on_one_id);
+      if (weekStart === currentWeekStart) {
         openByAe.set(row.ae_id, (openByAe.get(row.ae_id) ?? 0) + 1);
+      } else {
+        carriedByAe.set(row.ae_id, (carriedByAe.get(row.ae_id) ?? 0) + 1);
       }
     }
   }
@@ -311,8 +406,9 @@ export async function buildAeSummaries(
       first_name: p.first_name,
       percent: snap?.percent ?? null,
       rank: snap?.rank ?? null,
-      latest_meeting_date: latestByAe.get(p.id)?.meeting_date ?? null,
+      latest_week_start: latestWeekByAe.get(p.id) ?? null,
       open_commitments: openByAe.get(p.id) ?? 0,
+      carried_commitments: carriedByAe.get(p.id) ?? 0,
     };
   });
 

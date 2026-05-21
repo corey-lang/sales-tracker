@@ -1,6 +1,7 @@
 import { addDays, format, isValid, parseISO, startOfWeek } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { todayInAppTimezone } from "@/lib/dates";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 
@@ -40,8 +41,10 @@ export async function GET(req: Request) {
     }
 
     // Normalize to the Monday of that week, then Mon-Fri. Never report past
-    // today, so picking the current week shows progress so far.
-    const now = new Date();
+    // today, so picking the current week shows progress so far. "Today" is
+    // the Denver business-day so this admin view never drifts ahead of the
+    // AE-facing leaderboard.
+    const now = todayInAppTimezone();
     const todayStr = format(now, "yyyy-MM-dd");
     const monday = startOfWeek(parsed, { weekStartsOn: 1 });
     const since = format(monday, "yyyy-MM-dd");

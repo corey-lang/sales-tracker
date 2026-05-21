@@ -3,7 +3,7 @@ import { addDays, format, isWeekend, startOfWeek, subWeeks } from "date-fns";
 import { supabase } from "@/lib/supabase/client";
 import type { ActivityKey, ActivityValues } from "@/lib/activities";
 import { ZERO_ACTIVITY } from "@/lib/activities";
-import { formatDateMDY } from "@/lib/dates";
+import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 
 // The `weekly_goals` table stores Monday-Friday weekly targets.
 // `salesperson_id IS NULL` = global default; a UUID = per-person override.
@@ -26,7 +26,14 @@ export function weeklyTargetsFrom(goal: WeeklyGoal | null): ActivityValues {
   return out;
 }
 
-export function businessWeekToDateRange(today = new Date()): {
+// Default `today` for week-boundary functions: the current calendar day in
+// the app's business timezone (America/Denver), NOT raw `new Date()`. This
+// keeps the leaderboard's "this week" and the Weekly Focus row's week_start
+// aligned with the team's local calendar regardless of where the Vercel
+// function physically runs (typically UTC).
+export function businessWeekToDateRange(
+  today: Date = todayInAppTimezone(),
+): {
   since: string;
   through: string;
   isBusinessDay: boolean;
@@ -42,6 +49,18 @@ export function businessWeekToDateRange(today = new Date()): {
   };
 }
 
+// Monday (YYYY-MM-DD) of the business week that contains `today`. Single
+// source of truth for the Weekly Focus row's `week_start` so the API,
+// server helpers, and UI all key off the same Monday — picks Monday via
+// `weekStartsOn: 1`, matching businessWeekToDateRange.
+//
+// Default `today` is the current calendar date in `APP_TIMEZONE`
+// (America/Denver) so the week boundary is anchored to the team's local
+// calendar, not the server's clock.
+export function mondayOfWeek(today: Date = todayInAppTimezone()): string {
+  return format(startOfWeek(today, { weekStartsOn: 1 }), "yyyy-MM-dd");
+}
+
 // One Monday-Friday business week, identified by its Monday (`weekStart`).
 // Matches businessWeekToDateRange / weekStartsOn:1 used everywhere else, so
 // the week boundary is Monday 00:00 — a Sunday still belongs to the week that
@@ -54,11 +73,20 @@ export type WeekOption = {
 };
 
 // The current Mon-Fri week plus the prior `count - 1` weeks, newest first.
-// Powers the AE "Edit or backfill week" selector. No future weeks — this is
-// for editing/backfilling, and the rest of the app only reports up to today.
+// Powers the AE "Edit or backfill week" selector, the admin leaderboard
+// week picker, and the activity-report week picker. No future weeks — this
+// is for editing/backfilling, and the rest of the app only reports up to
+// today.
+//
+// Default `today` is the current calendar date in `APP_TIMEZONE`
+// (America/Denver) so the "current" week here agrees with
+// `businessWeekToDateRange` / `mondayOfWeek` / `ensureCurrentWeeklyFocus`.
+// Pre-fix, this defaulted to raw `new Date()` and could disagree across
+// Sunday-night-Denver / Monday-morning-Denver boundaries depending on the
+// browser's clock.
 export function recentBusinessWeeks(
   count = 12,
-  today = new Date(),
+  today: Date = todayInAppTimezone(),
 ): WeekOption[] {
   const currentMonday = startOfWeek(today, { weekStartsOn: 1 });
   const out: WeekOption[] = [];
@@ -156,7 +184,11 @@ export async function fetchActiveGoalFor(salespersonId: string): Promise<{
   data: WeeklyGoal | null;
   error: { message: string } | null;
 }> {
-  const today = new Date().toISOString().slice(0, 10);
+  // Denver business date — keeps the "effective_from <= today" cutoff
+  // aligned with everything else that asks "which week is now". A raw
+  // UTC slice would briefly flip to the next day's goal in late Denver
+  // evening, before the Denver-aware leaderboard / Weekly Focus does.
+  const today = format(todayInAppTimezone(), "yyyy-MM-dd");
   const [personal, global] = await Promise.all([
     supabase
       .from("weekly_goals")
@@ -197,7 +229,11 @@ export async function fetchActiveGoalForScope(
   error: { message: string } | null;
 }> {
   if (scope !== null) return fetchActiveGoalFor(scope);
-  const today = new Date().toISOString().slice(0, 10);
+  // Denver business date — keeps the "effective_from <= today" cutoff
+  // aligned with everything else that asks "which week is now". A raw
+  // UTC slice would briefly flip to the next day's goal in late Denver
+  // evening, before the Denver-aware leaderboard / Weekly Focus does.
+  const today = format(todayInAppTimezone(), "yyyy-MM-dd");
   const { data, error } = await supabase
     .from("weekly_goals")
     .select("*")

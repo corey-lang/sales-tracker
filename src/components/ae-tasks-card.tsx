@@ -5,7 +5,7 @@ import { format } from "date-fns";
 import { CalendarPlus, Check, ChevronDown, Plus } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
-import { formatDateMDY } from "@/lib/dates";
+import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import type { AeTask } from "@/lib/ae-tasks";
 
@@ -119,7 +119,10 @@ export function AeTasksCard() {
   };
 
   const { buckets, ordered, completed, openCount } = useMemo(() => {
-    const today = format(new Date(), "yyyy-MM-dd");
+    // "Today" is the Denver business day so "Due today" / "Overdue"
+    // bucketing stays consistent with the leaderboard / Weekly Focus
+    // notion of the current day regardless of browser timezone.
+    const today = format(todayInAppTimezone(), "yyyy-MM-dd");
     const overdue: AeTask[] = [];
     const dueToday: AeTask[] = [];
     const upcomingDated: AeTask[] = [];

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { format } from "date-fns";
 import { Settings } from "lucide-react";
 
-import { formatDateMDY } from "@/lib/dates";
+import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { nextQuote } from "@/lib/quotes";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -127,7 +127,9 @@ export default function DashboardPage() {
     );
   }
 
-  const now = new Date();
+  // "Today" reads from the Denver business calendar so the greeting matches
+  // what the dashboard, leaderboard, and Weekly Focus all consider "now".
+  const now = todayInAppTimezone();
   const today = `${format(now, "EEEE")}, ${formatDateMDY(now)}`;
 
   return (

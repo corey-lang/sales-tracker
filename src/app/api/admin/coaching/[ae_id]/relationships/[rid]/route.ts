@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
+  ApiError,
   handleApiError,
   notFound,
   parseBody,
@@ -15,14 +16,28 @@ import {
   type CoachingRelationship,
 } from "@/lib/one-on-ones";
 
-// PATCH /api/admin/coaching/[ae_id]/relationships/[rid]   -> { relationship: ... }
-// DELETE /api/admin/coaching/[ae_id]/relationships/[rid]  -> { ok: true }
+// PATCH  /api/admin/coaching/[ae_id]/relationships/[rid]   -> { relationship }
+// DELETE /api/admin/coaching/[ae_id]/relationships/[rid]   -> { relationship }
 //
-// Admin-only. The DB lookup pins BOTH `rid` and `ae_id` so the URL's
-// parent segment is enforced as a real ownership check, not just
-// documentation. An admin (or a future hand-rolled request) hitting
-// /admin/coaching/<wrong_ae>/relationships/<rid> gets a 404 instead of
-// silently updating a row that belongs to a different AE.
+// Admin-only.
+//
+// LIFECYCLE
+//   Gold List relationships are a persistent layer (eventually evolving
+//   into CRM). Hard-delete loses longitudinal context, so the DELETE
+//   endpoint SOFT-ARCHIVES: it stamps `archived_at` and returns the
+//   updated row. Archived rows stay queryable for future history /
+//   reactivation but drop out of the active Gold List by default.
+//
+//   PATCH also accepts an explicit `archived` boolean toggle so a future
+//   "restore" affordance can flip a previously archived contact back to
+//   active without re-typing them.
+//
+// OWNERSHIP
+//   The DB lookup pins BOTH `rid` and `ae_id` so the URL's parent segment
+//   is enforced as a real ownership check, not just documentation. An
+//   admin (or a future hand-rolled request) hitting
+//   /admin/coaching/<wrong_ae>/relationships/<rid> gets a 404 instead of
+//   silently updating a row that belongs to a different AE.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,6 +57,12 @@ const UpdateSchema = z.object({
   status: field,
   next_step: notesField,
   notes: notesField,
+  /**
+   * Explicit archive toggle. true = archive, false = restore. Omitting
+   * this leaves the archive state alone, so a normal edit doesn't
+   * unintentionally reactivate an archived row.
+   */
+  archived: z.boolean().optional(),
 });
 
 export async function PATCH(
@@ -65,6 +86,9 @@ export async function PATCH(
     if (body.status !== undefined) patch.status = body.status ?? null;
     if (body.next_step !== undefined) patch.next_step = body.next_step ?? null;
     if (body.notes !== undefined) patch.notes = body.notes ?? null;
+    if (body.archived !== undefined) {
+      patch.archived_at = body.archived ? new Date().toISOString() : null;
+    }
     if (Object.keys(patch).length === 0) {
       return Response.json({ error: "No fields to update." }, { status: 400 });
     }
@@ -76,7 +100,18 @@ export async function PATCH(
       .eq("ae_id", ae_id)
       .select("*")
       .maybeSingle();
-    if (res.error) throw new Error(res.error.message);
+    if (res.error) {
+      // Same partial-unique index as POST — an edit that renames an
+      // active relationship into a collision with another active one
+      // surfaces as 409.
+      if (res.error.code === "23505") {
+        throw new ApiError(
+          409,
+          "Another active relationship already matches that contact / company / title.",
+        );
+      }
+      throw new Error(res.error.message);
+    }
     if (!res.data) throw notFound("Relationship not found.");
     return Response.json({ relationship: res.data as CoachingRelationship });
   } catch (err) {
@@ -93,13 +128,19 @@ export async function DELETE(
     const { ae_id, rid } = await params;
     const supabase = getServerSupabase();
     await requireCoachableAe(supabase, ae_id);
+    // Soft archive — preserves longitudinal Gold List history. To truly
+    // delete, a service-role caller can act on the row directly; the UI
+    // never does.
     const res = await supabase
       .from(COACHING_RELATIONSHIPS_TABLE)
-      .delete()
+      .update({ archived_at: new Date().toISOString() })
       .eq("id", rid)
-      .eq("ae_id", ae_id);
+      .eq("ae_id", ae_id)
+      .select("*")
+      .maybeSingle();
     if (res.error) throw new Error(res.error.message);
-    return Response.json({ ok: true });
+    if (!res.data) throw notFound("Relationship not found.");
+    return Response.json({ relationship: res.data as CoachingRelationship });
   } catch (err) {
     return handleApiError(err);
   }

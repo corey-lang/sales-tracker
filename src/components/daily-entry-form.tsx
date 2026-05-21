@@ -10,6 +10,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
+import { todayInAppTimezone } from "@/lib/dates";
 import {
   businessWeekToDateRange,
   fetchActiveGoalFor,
@@ -81,7 +82,10 @@ export function DailyEntryForm({
 
   const saveDelta = async (key: ActivityKey, delta: number) => {
     if (delta <= 0) return false;
-    const today = format(new Date(), "yyyy-MM-dd");
+    // `today` is the Denver business day so a rep tapping just past
+    // midnight local-time logs to the right `entry_date` regardless of
+    // where their phone is. Matches the leaderboard/Weekly Focus window.
+    const today = format(todayInAppTimezone(), "yyyy-MM-dd");
 
     setSavingKey(key);
     setError(null);

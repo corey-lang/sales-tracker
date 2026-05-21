@@ -10,6 +10,8 @@ import {
   subWeeks,
 } from "date-fns";
 
+import { todayInAppTimezone } from "@/lib/dates";
+
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -56,26 +58,30 @@ export function FiltersCard({
     onChangeTo(fmt(end));
   };
 
+  // All quick-filter buttons anchor to the Denver business calendar so
+  // "This week" / "Today" / "MTD" line up with the leaderboard and
+  // Weekly Focus's notion of the current day/week regardless of the
+  // admin's browser timezone.
   const applyToday = () => {
-    const n = new Date();
+    const n = todayInAppTimezone();
     apply(n, n);
   };
   const applyThisWeek = () => {
-    const n = new Date();
+    const n = todayInAppTimezone();
     const start = startOfWeek(n, { weekStartsOn: 1 });
     apply(start, addDays(start, 4));
   };
   const applyLastWeek = () => {
-    const n = subWeeks(new Date(), 1);
+    const n = subWeeks(todayInAppTimezone(), 1);
     const start = startOfWeek(n, { weekStartsOn: 1 });
     apply(start, addDays(start, 4));
   };
   const applyMTD = () => {
-    const n = new Date();
+    const n = todayInAppTimezone();
     apply(startOfMonth(n), n);
   };
   const applyLastMonth = () => {
-    const n = subMonths(new Date(), 1);
+    const n = subMonths(todayInAppTimezone(), 1);
     apply(startOfMonth(n), endOfMonth(n));
   };
 

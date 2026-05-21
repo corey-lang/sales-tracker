@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { CalendarDays, Trophy, Zap } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
+import { todayInAppTimezone } from "@/lib/dates";
 import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
@@ -22,8 +23,14 @@ type Props = {
 
 type Standing = { id: string; first_name: string; percent: number | null };
 
-/** Business days remaining in the current Mon-Fri week, including today. */
-function businessDaysLeft(today = new Date()): number {
+/**
+ * Business days remaining in the current Mon-Fri week, including today.
+ *
+ * `today` defaults to the current Denver business day (not the browser's
+ * local clock) so a phone in another timezone shows the same "days left"
+ * as the leaderboard/Weekly Focus around midnight on the Denver boundary.
+ */
+function businessDaysLeft(today: Date = todayInAppTimezone()): number {
   const dow = today.getDay(); // 0 Sun .. 6 Sat
   if (dow === 0 || dow === 6) return 0;
   return 6 - dow; // Mon = 5 … Fri = 1

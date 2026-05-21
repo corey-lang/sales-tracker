@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
+  ApiError,
   handleApiError,
   parseBody,
   requireAdmin,
@@ -67,6 +68,16 @@ export async function POST(
       .select("*")
       .single();
     if (res.error || !res.data) {
+      // 23505 = Postgres unique_violation. The (ae_id, normalized
+      // contact/company/title) partial-unique index catches duplicates of
+      // an ACTIVE relationship (archived rows are excluded from the
+      // index, so re-adding a previously-archived contact is fine).
+      if (res.error?.code === "23505") {
+        throw new ApiError(
+          409,
+          "That contact is already on this AE's Gold List. Edit the existing one instead of adding a duplicate.",
+        );
+      }
       throw new Error(res.error?.message ?? "Could not create relationship.");
     }
     return Response.json({ relationship: res.data as CoachingRelationship });
