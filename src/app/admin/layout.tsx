@@ -19,6 +19,7 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 /** Admin sections, in nav order. Each is its own route under /admin. */
 const ADMIN_NAV = [
   { href: "/admin", label: "Dashboard" },
+  { href: "/admin/coaching", label: "Coaching" },
   { href: "/admin/business-cards", label: "Business Cards" },
   { href: "/admin/leaderboard", label: "Leaderboard" },
   { href: "/admin/reports/activity", label: "Activity Reports" },
@@ -83,7 +84,16 @@ export default function AdminLayout({
           className="flex flex-wrap gap-1.5 rounded-lg border bg-muted/40 p-1.5"
         >
           {ADMIN_NAV.map((item) => {
-            const active = pathname === item.href;
+            // /admin matches exactly (no prefix-match — otherwise every
+            // /admin/* page would also highlight Dashboard). Every other
+            // tab matches its own path OR any nested sub-path so an AE
+            // detail page like /admin/coaching/<ae_id> keeps Coaching
+            // highlighted in the nav.
+            const active =
+              item.href === "/admin"
+                ? pathname === "/admin"
+                : pathname === item.href ||
+                  pathname?.startsWith(`${item.href}/`);
             return (
               <Link
                 key={item.href}
