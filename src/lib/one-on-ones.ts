@@ -212,12 +212,18 @@ export type CoachingSnapshot = {
   percent: number | null;
   rank: number | null;
   total_ranked: number;
-  /** Sum of each activity for the current Mon-Fri week. */
+  /**
+   * Sum of each activity for the current Mon-Fri week. Mirrors the
+   * `ACTIVITIES` list in `src/lib/activities.ts` (so all eight goal-
+   * tracked columns are present), plus `business_cards` which is
+   * tracked outside the goal table.
+   */
   week_totals: {
     office_visits: number;
     service_requests: number;
     ones_scheduled: number;
     ones_held: number;
+    presentations: number;
     impressions: number;
     team_meetings: number;
     gold_list_touches: number;
@@ -241,6 +247,72 @@ export const WEEKLY_FOCUS_HISTORY_LIMIT = 12;
 
 /** Most recently archived relationships to surface in the "Archived" section. */
 export const ARCHIVED_RELATIONSHIPS_LIMIT = 50;
+
+/**
+ * Reasonable upper bound on a single weekly goal target. The values in
+ * `weekly_goals` are weekly Mon-Fri totals (not daily — see the
+ * `computeStandings` math), so anything above this is almost certainly a
+ * typo. Kept liberal so legitimate high-volume activities (impressions
+ * etc.) aren't artificially capped.
+ */
+export const WEEKLY_GOAL_MAX_VALUE = 999;
+
+/**
+ * A resolved weekly goal — the columns that come back from `weekly_goals`
+ * for ONE row, narrowed to the activity counters + provenance fields the
+ * coaching UI needs.
+ *
+ * Values are WEEKLY Mon-Fri totals (matches `computeStandings`, which
+ * treats the raw column values as weekly targets, NOT daily). The UI
+ * shows `actual / weekly_target`.
+ */
+export type WeeklyGoalValues = {
+  office_visits: number;
+  service_requests: number;
+  ones_scheduled: number;
+  ones_held: number;
+  presentations: number;
+  impressions: number;
+  team_meetings: number;
+  gold_list_touches: number;
+};
+
+/** A weekly_goals row scoped to the current-week / next-week views. */
+export type WeeklyGoalRow = WeeklyGoalValues & {
+  id: string;
+  /** Null = global default; UUID = per-AE override. */
+  salesperson_id: string | null;
+  /** YYYY-MM-DD. */
+  effective_from: string;
+};
+
+/** Coaching-page snapshot of the current week's resolved goal. */
+export type CurrentWeeklyGoal = {
+  /** Resolved weekly targets — already chosen between personal/global. */
+  values: WeeklyGoalValues;
+  /** Where the resolved row came from. `none` => no goal in effect. */
+  source: "personal" | "global" | "none";
+  /**
+   * Underlying row id when `source !== 'none'`; null when the helper
+   * fell through to ZERO targets (no goal exists yet).
+   */
+  id: string | null;
+  /** YYYY-MM-DD of the resolved row's effective_from, or null. */
+  effective_from: string | null;
+};
+
+/**
+ * The per-AE next-week OVERRIDE, if one has been scheduled. Distinct from
+ * `CurrentWeeklyGoal` because we deliberately don't fall back to a global
+ * goal here — a missing override means "next week inherits whatever's
+ * active that day", and the UI presents that as "Keep same goals as this
+ * week" (checkbox ON).
+ */
+export type NextWeekGoalOverride = {
+  id: string;
+  effective_from: string;
+  values: WeeklyGoalValues;
+};
 
 /** What the detail page GET returns under the Weekly Focus model. */
 export type CoachingDetail = {
@@ -290,4 +362,19 @@ export type CoachingDetail = {
    * inline so the history can show "3/4 done" without a follow-up fetch.
    */
   history: Array<WeeklyFocus & { commitments: WeeklyFocusCommitment[] }>;
+  /**
+   * Current-week resolved goal — used by the Weekly Goals / Goal Progress
+   * card to show `actual / weekly_target` per activity. Resolved with the
+   * same personal-then-global precedence the leaderboard uses, so the
+   * coaching page can never disagree with the leaderboard about targets.
+   */
+  weekly_goal_current: CurrentWeeklyGoal;
+  /**
+   * Per-AE override row scheduled for NEXT business week, or null if the
+   * AE will inherit whatever goal is active on next Monday. Drives the
+   * Next Week Goals card's "Keep same goals as this week" default state.
+   */
+  weekly_goal_next_override: NextWeekGoalOverride | null;
+  /** Monday (YYYY-MM-DD) of next business week — convenience for the UI. */
+  next_week_start: string;
 };

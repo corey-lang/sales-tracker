@@ -35,8 +35,11 @@ Run these in the Supabase SQL editor, top to bottom:
 | 19 | `manager_one_on_ones.sql` | Manager coaching foundation: `one_on_ones`, `one_on_one_commitments`, `coaching_relationships`, `training_commitments`. Server-only (RLS on, no policies). **Must run before `weekly_focus.sql` and `weekly_focus_v2.sql`** — they extend tables this migration creates. |
 | 20 | `weekly_focus.sql` | Evolves the 1:1 model into Weekly Focus: adds `week_start`, `notes_training`, `notes_manager` to `one_on_ones`, backfills, consolidates per-week duplicates, enforces one focus row per `(ae_id, week_start)`. **Depends on `manager_one_on_ones.sql`.** |
 | 21 | `weekly_focus_v2.sql` | Weekly Focus durability + privacy hardening: adds commitment `status` lifecycle (open / completed / dropped — replaces hard-delete), `(ae_id, status)` index, `coaching_relationships.archived_at` + normalized dedupe unique index, and splits `notes_manager` off `one_on_ones` into a separate `weekly_focus_private_notes` table so a future AE-facing read can never leak private notes. **Depends on both `manager_one_on_ones.sql` AND `weekly_focus.sql`.** |
+| 22 | `weekly_goals_lockdown.sql` | `weekly_goals` lockdown + uniqueness. Consolidates duplicate goal rows per `(scope, effective_from)` (keeps newest), then adds two partial UNIQUE indexes (per-AE + global) so duplicates cannot recur. ENABLEs RLS with an anon `SELECT`-only policy and REVOKEs `INSERT / UPDATE / DELETE` from `anon` + `authenticated` — anon clients can read goal targets (still needed by per-AE dashboard reads) but cannot mutate them. All admin goal writes now flow through service-role routes: `POST /api/admin/goals`, `DELETE /api/admin/goals/[id]`, and `PUT /api/admin/coaching/[ae_id]/next-week-goals`. **Must run after the matching app code ships** (the admin Goals card no longer writes via the anon key). **Replaces the staged `weekly_goals_rls.sql`** — that file should NOT be reapplied. Idempotent. |
 
 > **Coaching migration order is strict.** `manager_one_on_ones.sql` → `weekly_focus.sql` → `weekly_focus_v2.sql`. Each later file extends/renames structure the earlier one creates. Skipping or reordering will leave `one_on_ones` / commitments in a half-migrated state that the API code expects to be fully migrated. All three are idempotent and re-runnable.
+>
+> **Goal migration order.** `weekly_goals_lockdown.sql` is independent of the coaching chain and can be applied any time AFTER the app code that moves admin Goals card writes to `/api/admin/goals*` ships. It supersedes the rolled-back `weekly_goals_rls.sql` and `weekly_goals_rls_rollback.sql`.
 
 ## Staged migrations — DO NOT APPLY YET
 
@@ -44,27 +47,16 @@ These migrations are correct but will **break the running app** if applied
 before the matching application code ships. Apply each only once its
 precondition is met.
 
-### `weekly_goals_rls.sql` — blocked (was applied prematurely; rolled back)
+### `weekly_goals_rls.sql` — superseded by `weekly_goals_lockdown.sql`
 
-Enables RLS on `weekly_goals` with no anon policy, so the browser anon key can
-no longer read the table. **Several reads/writes still run client-side** and
-break the moment this is applied:
-
-- `src/lib/goals.ts` (reads — feeds my-week-card, today-totals-card, daily-entry-form)
-- `src/components/admin/totals-card.tsx` (reads)
-- `src/components/admin/goals-card.tsx` (reads **and writes** — insert/delete)
-- `src/components/admin/maintenance-card.tsx` (reads)
-
-The AE-facing leaderboard reads were already moved to `GET /api/leaderboard`,
-but the admin goal-management reads/writes above were not.
-
-**This migration was applied to the database by mistake** before those call
-sites were migrated. `weekly_goals_rls_rollback.sql` reverses it (disables RLS
-on `weekly_goals` only) and restores the prior anon access posture — run it if
-not already run. **Do not re-apply `weekly_goals_rls.sql`** until the call
-sites above are moved behind service-role server routes; only then retire the
-rollback. Until then `weekly_goals` stays anon-readable/writable — an accepted
-gap for the closed 11-person team, tracked as a remaining blocker.
+The original lockdown attempt simply enabled RLS with no policies, which
+broke every client-side `weekly_goals` read (goals.ts / today-totals-card /
+my-week-card / daily-entry-form / admin totals/maintenance/goals cards). It
+was rolled back by `weekly_goals_rls_rollback.sql`. **Do not re-apply
+`weekly_goals_rls.sql`.** The correct migration is migration #22
+(`weekly_goals_lockdown.sql`) in the table above, which keeps anon `SELECT`
+working while denying anon writes and moves admin writes behind service-role
+routes (`/api/admin/goals*`, `/api/admin/coaching/[ae_id]/next-week-goals`).
 
 ### `business_card_rls_lockdown.sql` — staged
 

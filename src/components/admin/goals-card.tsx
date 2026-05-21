@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api-client";
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { fetchActiveGoalForScope } from "@/lib/goals";
-import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -51,7 +51,6 @@ type Props = {
 };
 
 export function GoalsCard({ people }: Props) {
-  const { salesperson } = useSalesperson();
   // Full salespeople list (including admins) — used only for resolving
   // created_by IDs in the audit line, since the `people` prop intentionally
   // excludes admins from the scope dropdown.
@@ -237,39 +236,59 @@ export function GoalsCard({ people }: Props) {
     setSaving(true);
     setSaveError(null);
     setSavedMsg(null);
-    const payload = {
-      salesperson_id: scope === GLOBAL_SCOPE ? null : scope,
-      effective_from: effectiveFrom,
-      created_by: salesperson?.id ?? null,
-      ...values,
-    };
-    const { data, error } = await supabase
-      .from("weekly_goals")
-      .insert(payload)
-      .select();
-    setSaving(false);
-    if (error) {
-      setSaveError(error.message);
-      return;
-    }
-    if (!data || data.length === 0) {
+    // Writes go through the admin-gated server route because weekly_goals
+    // is now RLS-locked from the anon key — see
+    // supabase/weekly_goals_lockdown.sql. The route is idempotent on
+    // (salesperson_id, effective_from): a same-scope/same-date save
+    // REPLACES the existing row in place, matching the DB-level partial
+    // UNIQUE indexes.
+    try {
+      const res = await apiFetch("/api/admin/goals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salesperson_id: scope === GLOBAL_SCOPE ? null : scope,
+          effective_from: effectiveFrom,
+          ...values,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setSaveError(body?.error ?? `Couldn't save (${res.status}).`);
+        return;
+      }
+      setSavedMsg("Goal saved.");
+      refresh();
+    } catch (err) {
       setSaveError(
-        "Insert returned no row. Make sure the schema migration ran.",
+        err instanceof Error ? err.message : "Couldn't save — please retry.",
       );
-      return;
+    } finally {
+      setSaving(false);
     }
-    setSavedMsg("Goal saved.");
-    refresh();
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm("Delete this goal row from history?")) return;
-    const { error } = await supabase.from("weekly_goals").delete().eq("id", id);
-    if (error) {
-      setError(error.message);
-      return;
+    try {
+      const res = await apiFetch(`/api/admin/goals/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setError(body?.error ?? `Couldn't delete (${res.status}).`);
+        return;
+      }
+      refresh();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Couldn't delete — please retry.",
+      );
     }
-    refresh();
   };
 
   const personById = (id: string | null) => {

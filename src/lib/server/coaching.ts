@@ -1,19 +1,130 @@
-import { addDays, format } from "date-fns";
+import { addDays, format, startOfWeek } from "date-fns";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { appTimezoneMidnightUtc, todayInAppTimezone } from "@/lib/dates";
+import { GOAL_ACTIVITY_KEYS, ZERO_GOAL_VALUES } from "@/lib/goal-activities";
 import { businessWeekToDateRange, mondayOfWeek } from "@/lib/goals";
 import { ApiError, notFound } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 import type {
   CoachingAeSummary,
   CoachingSnapshot,
+  CurrentWeeklyGoal,
+  NextWeekGoalOverride,
   WeeklyFocus,
+  WeeklyGoalRow,
+  WeeklyGoalValues,
 } from "@/lib/one-on-ones";
 import {
   WEEKLY_FOCUS_TABLE,
   WEEKLY_FOCUS_COMMITMENTS_TABLE,
 } from "@/lib/one-on-ones";
+
+/** Pulls the numeric goal values off a row, defaulting nulls to 0. */
+function pickGoalValues(row: WeeklyGoalRow): WeeklyGoalValues {
+  const out: WeeklyGoalValues = { ...ZERO_GOAL_VALUES };
+  for (const a of GOAL_ACTIVITY_KEYS) {
+    out[a.key] = Number(row[a.key] ?? 0);
+  }
+  return out;
+}
+
+/** Monday (YYYY-MM-DD) of the NEXT Denver business week. */
+export function nextMondayOfBusinessWeek(
+  asOf: Date = todayInAppTimezone(),
+): string {
+  const monday = startOfWeek(asOf, { weekStartsOn: 1 });
+  return format(addDays(monday, 7), "yyyy-MM-dd");
+}
+
+/**
+ * Resolves the current and next-week goal state for ONE AE in a single
+ * roundtrip. Reuses the same personal-then-global precedence the
+ * leaderboard's `computeStandings` applies.
+ *
+ *   * `current` — the goal that's active for the AE today: most recent
+ *     per-AE row with effective_from <= today, falling back to the most
+ *     recent global (`salesperson_id IS NULL`) row.
+ *   * `nextOverride` — the per-AE override row whose `effective_from`
+ *     equals next Monday. ABSENT means "next week inherits whatever
+ *     goal is active that day" — the UI presents that as the
+ *     "Keep same goals as this week" checked state.
+ */
+export async function fetchAeWeeklyGoals(
+  supabase: SupabaseClient,
+  aeId: string,
+  asOf: Date = todayInAppTimezone(),
+): Promise<{
+  current: CurrentWeeklyGoal;
+  nextOverride: NextWeekGoalOverride | null;
+  nextMonday: string;
+}> {
+  const today = format(asOf, "yyyy-MM-dd");
+  const nextMonday = nextMondayOfBusinessWeek(asOf);
+
+  // One read covers both lookups: the personal/global resolution for
+  // "current" AND the per-AE override scan for next Monday.
+  const res = await supabase
+    .from("weekly_goals")
+    .select(
+      [
+        "id",
+        "salesperson_id",
+        "effective_from",
+        ...GOAL_ACTIVITY_KEYS.map((a) => a.key),
+      ].join(","),
+    )
+    .or(`salesperson_id.eq.${aeId},salesperson_id.is.null`)
+    .order("effective_from", { ascending: false })
+    .order("created_at", { ascending: false });
+
+  if (res.error) {
+    throw new ApiError(500, `Weekly goal lookup failed: ${res.error.message}`);
+  }
+  const rows = (res.data ?? []) as unknown as WeeklyGoalRow[];
+
+  // Personal first, then global — both filtered to effective_from <= today.
+  // The DB-side ordering above already sorted by recency, so [0] is newest.
+  const personal = rows.find(
+    (g) => g.salesperson_id === aeId && g.effective_from <= today,
+  );
+  const global = rows.find(
+    (g) => g.salesperson_id === null && g.effective_from <= today,
+  );
+  const activeRow = personal ?? global ?? null;
+
+  const current: CurrentWeeklyGoal = activeRow
+    ? {
+        values: pickGoalValues(activeRow),
+        source: personal ? "personal" : "global",
+        id: activeRow.id,
+        effective_from: activeRow.effective_from,
+      }
+    : {
+        values: { ...ZERO_GOAL_VALUES },
+        source: "none",
+        id: null,
+        effective_from: null,
+      };
+
+  // Next-week override: ONLY a per-AE row anchored exactly at next
+  // Monday. We deliberately do not promote a global row at next Monday
+  // into "the AE's next-week goal" — a global goal change affects the
+  // whole team and is set elsewhere on the admin Goals card.
+  const nextRow =
+    rows.find(
+      (g) => g.salesperson_id === aeId && g.effective_from === nextMonday,
+    ) ?? null;
+  const nextOverride: NextWeekGoalOverride | null = nextRow
+    ? {
+        id: nextRow.id,
+        effective_from: nextRow.effective_from,
+        values: pickGoalValues(nextRow),
+      }
+    : null;
+
+  return { current, nextOverride, nextMonday };
+}
 
 /**
  * Role allow-list for the coaching domain.
@@ -290,6 +401,7 @@ export async function buildSnapshots(
         service_requests: row?.totals.service_requests ?? 0,
         ones_scheduled: row?.totals.ones_scheduled ?? 0,
         ones_held: row?.totals.ones_held ?? 0,
+        presentations: row?.totals.presentations ?? 0,
         impressions: row?.totals.impressions ?? 0,
         team_meetings: row?.totals.team_meetings ?? 0,
         gold_list_touches: row?.totals.gold_list_touches ?? 0,

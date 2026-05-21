@@ -3,6 +3,7 @@ import { handleApiError, requireAdmin } from "@/lib/server/auth";
 import {
   buildSnapshots,
   ensureCurrentWeeklyFocus,
+  fetchAeWeeklyGoals,
   requireCoachableAe,
 } from "@/lib/server/coaching";
 import { mondayOfWeek } from "@/lib/goals";
@@ -70,6 +71,7 @@ export async function GET(
       trainingRes,
       weeksRes,
       privateNotesRes,
+      goalsRes,
     ] = await Promise.all([
       buildSnapshots(supabase, [ae.id]),
       supabase
@@ -120,6 +122,10 @@ export async function GET(
         .select("notes")
         .eq("weekly_focus_id", currentWeek.id)
         .maybeSingle(),
+      // Current + next-week goal resolution, sharing the same goal-row
+      // sort the leaderboard uses so progress %s here can never disagree
+      // with the leaderboard's.
+      fetchAeWeeklyGoals(supabase, ae.id),
     ]);
 
     const firstErr =
@@ -226,6 +232,7 @@ export async function GET(
             service_requests: 0,
             ones_scheduled: 0,
             ones_held: 0,
+            presentations: 0,
             impressions: 0,
             team_meetings: 0,
             gold_list_touches: 0,
@@ -236,6 +243,9 @@ export async function GET(
       relationships,
       archived_relationships,
       training,
+      weekly_goal_current: goalsRes.current,
+      weekly_goal_next_override: goalsRes.nextOverride,
+      next_week_start: goalsRes.nextMonday,
       current_week: {
         ...currentWeek,
         commitments: byWeek.get(currentWeek.id) ?? [],

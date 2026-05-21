@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { supabase } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api-client";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -92,6 +93,29 @@ export function MaintenanceCard() {
     setMsg(`Cleared ${count ?? 0} activity rows.`);
   };
 
+  /**
+   * Calls the admin-gated maintenance route. Both goal-destructive
+   * actions go through the same endpoint now that `weekly_goals` is
+   * RLS-locked from the anon key — see supabase/weekly_goals_lockdown.sql.
+   */
+  const runGoalMaintenance = async (
+    action: "clear_all" | "clear_old_versions",
+  ): Promise<{ deleted: number } | null> => {
+    const res = await apiFetch("/api/admin/goals/maintenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const body = (await res.json().catch(() => null)) as
+      | { deleted?: number; error?: string }
+      | null;
+    if (!res.ok || !body || typeof body.deleted !== "number") {
+      setError(body?.error ?? `Couldn't run (${res.status}).`);
+      return null;
+    }
+    return { deleted: body.deleted };
+  };
+
   const clearAllGoals = async () => {
     if (
       !confirm(
@@ -104,18 +128,16 @@ export function MaintenanceCard() {
     setBusy(true);
     setMsg(null);
     setError(null);
-
-    const { error: delErr, count } = await supabase
-      .from("weekly_goals")
-      .delete({ count: "exact" })
-      .gte("effective_from", MATCH_ALL);
-
-    setBusy(false);
-    if (delErr) {
-      setError(delErr.message);
-      return;
+    try {
+      const result = await runGoalMaintenance("clear_all");
+      if (result) setMsg(`Cleared ${result.deleted} goal rows.`);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Couldn't clear — please retry.",
+      );
+    } finally {
+      setBusy(false);
     }
-    setMsg(`Cleared ${count ?? 0} goal rows.`);
   };
 
   const clearOldGoalVersions = async () => {
@@ -129,47 +151,22 @@ export function MaintenanceCard() {
     setBusy(true);
     setMsg(null);
     setError(null);
-
-    const { data: all, error: fetchErr } = await supabase
-      .from("weekly_goals")
-      .select("id, salesperson_id, effective_from, created_at")
-      .order("effective_from", { ascending: false })
-      .order("created_at", { ascending: false });
-
-    if (fetchErr) {
-      setBusy(false);
-      setError(fetchErr.message);
-      return;
-    }
-
-    const seenScope = new Set<string>();
-    const idsToDelete: string[] = [];
-    for (const row of all ?? []) {
-      const scopeKey = row.salesperson_id ?? "__global__";
-      if (seenScope.has(scopeKey)) {
-        idsToDelete.push(row.id);
-      } else {
-        seenScope.add(scopeKey);
+    try {
+      const result = await runGoalMaintenance("clear_old_versions");
+      if (result) {
+        setMsg(
+          result.deleted === 0
+            ? "No old versions to delete — every scope has only one row."
+            : `Deleted ${result.deleted} old goal versions; latest per scope kept.`,
+        );
       }
-    }
-
-    if (idsToDelete.length === 0) {
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Couldn't clear — please retry.",
+      );
+    } finally {
       setBusy(false);
-      setMsg("No old versions to delete — every scope has only one row.");
-      return;
     }
-
-    const { error: delErr, count } = await supabase
-      .from("weekly_goals")
-      .delete({ count: "exact" })
-      .in("id", idsToDelete);
-
-    setBusy(false);
-    if (delErr) {
-      setError(delErr.message);
-      return;
-    }
-    setMsg(`Deleted ${count ?? 0} old goal versions; latest per scope kept.`);
   };
 
   return (
