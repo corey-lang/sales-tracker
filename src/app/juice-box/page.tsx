@@ -1803,7 +1803,26 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
                 <button
                   type="button"
                   aria-label="Pick a GIF"
-                  onClick={() => setGifPickerOpen(true)}
+                  // Dismiss the iOS soft keyboard before opening the picker.
+                  // Otherwise the fixed composer stays lifted by the visual
+                  // viewport, leaving it floating awkwardly above the GIF
+                  // grid. We blur both the textarea (the usual focused
+                  // element) and any other active text input as a defence
+                  // for iOS Safari, which has been known to leave focus on
+                  // a hidden helper input across rerenders. The picker's
+                  // search input is no longer autofocused for the same
+                  // reason — typing is opt-in, the keyboard stays down.
+                  onClick={() => {
+                    textareaRef.current?.blur();
+                    const active = document.activeElement;
+                    if (
+                      active instanceof HTMLElement &&
+                      active !== document.body
+                    ) {
+                      active.blur();
+                    }
+                    setGifPickerOpen(true);
+                  }}
                   disabled={sending}
                   className="inline-flex h-8 items-center rounded-md bg-muted/60 px-2 text-[11px] font-bold tracking-wide text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -2066,7 +2085,10 @@ function GifPickerSheet({
             />
             <input
               type="search"
-              autoFocus
+              // No autoFocus: tapping into the search input is opt-in so
+              // the iOS keyboard stays dismissed when the picker opens,
+              // which keeps the fixed composer docked at the bottom of
+              // the viewport instead of lifted above the soft keyboard.
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search GIPHY…"
