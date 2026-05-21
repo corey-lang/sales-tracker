@@ -2078,23 +2078,11 @@ function GifPickerSheet({
               <X aria-hidden="true" className="size-4" />
             </button>
           </header>
-          <div className="relative">
-            <Search
-              aria-hidden="true"
-              className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-            />
-            <input
-              type="search"
-              // No autoFocus: tapping into the search input is opt-in so
-              // the iOS keyboard stays dismissed when the picker opens,
-              // which keeps the fixed composer docked at the bottom of
-              // the viewport instead of lifted above the soft keyboard.
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search GIPHY…"
-              className="w-full rounded-md border border-input bg-background/40 py-2 pl-8 pr-3 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-            />
-          </div>
+          {/* Scrollable results region. Pinned ABOVE the search input now
+              so the grid reads as the picker's primary content and the
+              input feels like a docked composer at the bottom — closer
+              to the thumb on phones, and visually connected to the
+              "Powered by GIPHY" footer beneath it. */}
           <div className="min-h-0 flex-1 overflow-y-auto">
             {configured === false ? (
               <p className="px-1 py-6 text-center text-sm text-muted-foreground">
@@ -2132,9 +2120,34 @@ function GifPickerSheet({
               </div>
             )}
           </div>
-          <p className="text-center text-[10px] text-muted-foreground/70">
-            Powered by GIPHY
-          </p>
+          {/* Bottom-docked search + GIPHY attribution. The thin top
+              border separates the input from the scrollable grid above
+              so it reads as a docked composer; the attribution sits
+              directly under the input so the credit stays visible
+              without competing with the grid for vertical space. */}
+          <div className="-mx-3 -mb-3 mt-1 space-y-1.5 border-t border-border/60 bg-card/60 px-3 pb-3 pt-2">
+            <div className="relative">
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+              />
+              <input
+                type="search"
+                // No autoFocus: tapping into the search input is opt-in
+                // so the iOS keyboard stays dismissed when the picker
+                // opens. Tapping the field naturally raises the
+                // keyboard and the input — anchored at the bottom of
+                // the card — sits right above it like a chat composer.
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search GIPHY…"
+                className="w-full rounded-md border border-input bg-background/40 py-2 pl-8 pr-3 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              />
+            </div>
+            <p className="text-center text-[10px] text-muted-foreground/70">
+              Powered by GIPHY
+            </p>
+          </div>
         </CardContent>
       </Card>
     </div>
