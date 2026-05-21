@@ -1956,13 +1956,31 @@ function GifPickerSheet({
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Esc-to-close — same affordance as the reply / reaction-detail sheets.
+  // Esc-to-close + body scroll lock for the lifetime of the picker.
+  //
+  // The picker is rendered with `position: fixed`, so the underlying
+  // feed is still the document's primary scroller. Without locking
+  // body overflow, a touch-scroll on the GIF grid that hits the top
+  // or bottom of the (often short) results region — or any touchmove
+  // outside the results region itself — propagates to the document
+  // and scrolls the Juice Box feed behind the picker. Setting
+  // `document.body.style.overflow = "hidden"` while the picker is
+  // mounted matches the existing pattern in VerificationCenter and
+  // ScanBizCardSheet and reliably blocks the leak on iOS Safari,
+  // Android Chrome, and desktop. Cleanup restores the previous
+  // overflow value so we don't clobber anything a future caller may
+  // have set on `<body>`.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
   }, [onClose]);
 
   // Debounced fetch on query changes. CACHE HIT shortcuts the debounce
@@ -2082,8 +2100,12 @@ function GifPickerSheet({
               so the grid reads as the picker's primary content and the
               input feels like a docked composer at the bottom — closer
               to the thumb on phones, and visually connected to the
-              "Powered by GIPHY" footer beneath it. */}
-          <div className="min-h-0 flex-1 overflow-y-auto">
+              "Powered by GIPHY" footer beneath it.
+              `overscroll-contain` stops iOS rubber-band scrolling from
+              chaining into the document (body scroll is also locked
+              while the picker is mounted) so the grid is the only
+              scroller responding to touch within the picker. */}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
             {configured === false ? (
               <p className="px-1 py-6 text-center text-sm text-muted-foreground">
                 GIF search isn&apos;t configured yet. Ask an admin to set
