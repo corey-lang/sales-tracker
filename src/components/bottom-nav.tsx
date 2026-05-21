@@ -52,7 +52,7 @@ const LEADERBOARD: NavItem = {
 const TODOS: NavItem = { href: "/todos", label: "To-Dos", icon: ListChecks };
 const SCAN_BIZ_CARD: NavItem = {
   href: "/scan-biz-card",
-  label: "Scan Biz Card",
+  label: "Scan",
   icon: ScanLine,
 };
 
@@ -127,7 +127,7 @@ export function BottomNav({
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-0.5 px-1 py-2.5 text-[11px] font-medium",
+                  "flex flex-col items-center justify-center gap-1 px-1 py-3 text-[12px] font-medium",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                   active
                     ? "text-primary"
@@ -138,7 +138,7 @@ export function BottomNav({
                   <Icon
                     aria-hidden="true"
                     className={cn(
-                      "size-5",
+                      "size-6",
                       active ? "text-primary" : "text-muted-foreground",
                     )}
                   />
