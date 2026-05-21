@@ -105,19 +105,6 @@ type SubscriptionRow = {
   salesperson_id: string;
 };
 
-type SalespersonRow = {
-  id: string;
-  role: string | null;
-  is_test: boolean | null;
-};
-
-function isJuiceBoxEligible(person: SalespersonRow): boolean {
-  // Matches requireJuiceBoxAccess: admin OR test account. Widening the
-  // Juice Box rollout to all AEs later means relaxing this in lockstep
-  // with requireJuiceBoxAccess — single point of truth.
-  return person.role === "admin" || person.is_test === true;
-}
-
 /**
  * Returns the hostname portion of a push endpoint URL — used in logs so
  * we never write the auth-bearing path segment to Vercel function logs.
@@ -192,9 +179,12 @@ async function sendOne(
 }
 
 /**
- * Sends `payload` as a Web Push notification to every Juice Box-
- * eligible salesperson's subscriptions except the sender's own.
- * Internal errors are swallowed — per-send failures don't bubble up.
+ * Sends `payload` as a Web Push notification to every salesperson's
+ * subscriptions except the sender's own. Juice Box is open to the
+ * whole team, so any subscription that survives the endpoint-host
+ * allowlist (enforced at registration in /api/juice-box/push/subscribe)
+ * is a valid recipient. Internal errors are swallowed — per-send
+ * failures don't bubble up.
  *
  * CALL CONVENTION — Vercel serverless
  *   Callers MUST `await` this. Detached promises are killed when the
@@ -229,10 +219,10 @@ export async function fanOutJuiceBoxPush(opts: {
 
   const supabase = getServerSupabase();
 
-  // Two-step query because push_subscriptions.salesperson_id is TEXT
-  // (no FK; see team_messages.sql rationale), and PostgREST can't
-  // auto-join without FK metadata. For an 11-person team this is
-  // negligible.
+  // Single query — every subscription except the sender's is a valid
+  // recipient now that Juice Box is open to the whole team. The prior
+  // implementation re-fetched salespeople rows to apply an admin-or-
+  // test filter; that's gone.
   const subsRes = await supabase
     .from(PUSH_SUBSCRIPTIONS_TABLE)
     .select("id, endpoint, p256dh, auth, salesperson_id")
@@ -244,47 +234,17 @@ export async function fanOutJuiceBoxPush(opts: {
     return;
   }
   const subs = (subsRes.data ?? []) as SubscriptionRow[];
+  const hostList = Array.from(
+    new Set(subs.map((s) => endpointHost(s.endpoint))),
+  ).join(",");
   console.log(
-    `[juice-box-push] subscriptions-found count=${subs.length} (after sender-exclude)`,
+    `[juice-box-push] subscriptions-found count=${subs.length} hosts=${hostList || "(none)"} (after sender-exclude)`,
   );
   if (subs.length === 0) return;
 
-  const peopleRes = await supabase
-    .from("salespeople")
-    .select("id, role, is_test")
-    .in(
-      "id",
-      Array.from(new Set(subs.map((s) => s.salesperson_id))),
-    );
-  if (peopleRes.error || !peopleRes.data) {
-    console.error(
-      `[juice-box-push] people-fetch-error: ${peopleRes.error?.message ?? "no data"}`,
-    );
-    return;
-  }
-  const peopleById = new Map<string, SalespersonRow>(
-    (peopleRes.data as SalespersonRow[]).map((p) => [p.id, p]),
-  );
-
-  // Filter to the Juice Box gate: admin OR test account. This matches
-  // requireJuiceBoxAccess, so widening the gate later (rolling Juice
-  // Box out to all AEs) requires no change here — just relax the
-  // check in lockstep with the rollout decision.
-  const eligible = subs.filter((s) => {
-    const p = peopleById.get(s.salesperson_id);
-    return p ? isJuiceBoxEligible(p) : false;
-  });
-  const hostList = Array.from(
-    new Set(eligible.map((s) => endpointHost(s.endpoint))),
-  ).join(",");
-  console.log(
-    `[juice-box-push] eligible count=${eligible.length} hosts=${hostList || "(none)"}`,
-  );
-  if (eligible.length === 0) return;
-
   const payloadJson = JSON.stringify(opts.payload);
   const results = await Promise.allSettled(
-    eligible.map((s) => sendOne(s, payloadJson)),
+    subs.map((s) => sendOne(s, payloadJson)),
   );
 
   // Aggregate per-status counts so the summary line is grep-able.
@@ -307,6 +267,6 @@ export async function fanOutJuiceBoxPush(opts: {
   }
   const elapsed = Date.now() - startedAt;
   console.log(
-    `[juice-box-push] fan-out complete sender=${opts.excludeSalespersonId} eligible=${eligible.length} ok=${ok} gc=${gc} error=${error} elapsed_ms=${elapsed}`,
+    `[juice-box-push] fan-out complete sender=${opts.excludeSalespersonId} recipients=${subs.length} ok=${ok} gc=${gc} error=${error} elapsed_ms=${elapsed}`,
   );
 }

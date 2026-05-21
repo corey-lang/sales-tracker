@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { isTestAccount } from "@/lib/permissions";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
 import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 
@@ -21,8 +20,8 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 // theme. The active tab is tinted with the orange accent.
 //
 // Role-awareness:
-//   * Juice Box       — admins + test accounts only (matches the /juice-box
-//                       page gate). Everyone else's nav drops the tab.
+//   * Juice Box       — open to the whole team; tab renders for any
+//                       signed-in salesperson.
 //   * To-Dos          — AE workflow, hidden from assistants.
 //   * Scan Biz Card   — AE workflow, hidden from assistants.
 //   Settings / logout / notifications no longer live in the nav; they're
@@ -60,22 +59,14 @@ const SCAN_BIZ_CARD: NavItem = {
 export const BOTTOM_NAV_SPACER =
   "pb-[calc(5rem+env(safe-area-inset-bottom))]";
 
-export function canSeeJuiceBox(
-  salesperson: Pick<StoredSalesperson, "first_name" | "is_admin" | "is_test"> | null,
-): boolean {
-  if (!salesperson) return false;
-  if (salesperson.is_admin) return true;
-  return isTestAccount(salesperson);
-}
-
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
-  const items: NavItem[] = [HOME];
-  if (canSeeJuiceBox(salesperson)) items.push(JUICE_BOX);
-  items.push(LEADERBOARD);
-  // AE workflows. Assistants have a restricted dashboard (VerificationCenter
-  // only) and don't use these features, so we hide their tabs to keep the
-  // assistant nav uncluttered.
-  if (salesperson && salesperson.role !== "assistant") {
+  if (!salesperson) return [HOME];
+  // Juice Box is now open to the whole team; every signed-in user
+  // gets the tab. To-Dos and Scan Biz Card stay AE-only since
+  // assistants have a restricted (VerificationCenter) dashboard and
+  // don't use those workflows.
+  const items: NavItem[] = [HOME, JUICE_BOX, LEADERBOARD];
+  if (salesperson.role !== "assistant") {
     items.push(TODOS, SCAN_BIZ_CARD);
   }
   return items;
@@ -87,9 +78,8 @@ export function BottomNav({
   salesperson: StoredSalesperson | null;
 }) {
   const pathname = usePathname();
-  const showJuiceBox = canSeeJuiceBox(salesperson);
-  // Hook is always called (rules-of-hooks); the provider is a no-op for
-  // ineligible users so the value is 0 / null in that case.
+  // Hook is always called (rules-of-hooks); the provider is a no-op
+  // for signed-out users so the value is 0 in that case.
   const { unreadCount } = useJuiceBoxUnread();
 
   const items = buildNavItems(salesperson);
@@ -120,7 +110,7 @@ export function BottomNav({
             (item.href !== "/" && pathname?.startsWith(`${item.href}/`));
           const Icon = item.icon;
           const showBadge =
-            showJuiceBox && item.href === "/juice-box" && unreadCount > 0;
+            item.href === "/juice-box" && unreadCount > 0;
           return (
             <li key={item.href}>
               <Link

@@ -3,8 +3,12 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
-import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import {
+  badRequest,
+  handleApiError,
+  parseBody,
+  requireSalesperson,
+} from "@/lib/server/auth";
 import {
   JUICE_BOX_MEDIA_BUCKET,
   MEDIA_ALLOWED_IMAGE_MIME_TYPES,
@@ -20,7 +24,7 @@ import {
 // FLOW
 //   1. Client validates file locally, then POSTs here with the file's
 //      content_type and byte size.
-//   2. Server (this route) gates on requireJuiceBoxAccess, validates
+//   2. Server (this route) gates on requireSalesperson, validates
 //      content_type / size against the bucket's published policy, and
 //      mints a one-time signed upload URL scoped to a single object path
 //      under <salesperson_id>/<uuid>.<ext>.
@@ -32,9 +36,9 @@ import {
 //      etc.). That route re-validates the URL belongs to our bucket.
 //
 // SECURITY
-//   * Auth: admin OR test only (requireJuiceBoxAccess). Regular AEs get
-//     403. Identity comes from the signed session — the route never
-//     accepts a salesperson_id in the body.
+//   * Auth: any signed-in salesperson (requireSalesperson). Identity
+//     comes from the signed session — the route never accepts a
+//     salesperson_id in the body.
 //   * Content type whitelist enforced in two places: this route AND the
 //     bucket's allowed_mime_types. Either rejection blocks an upload.
 //   * Size cap enforced in this route AND the bucket's file_size_limit.
@@ -59,7 +63,7 @@ const EXT_BY_MIME: Record<string, string> = {
 
 export async function POST(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const body = await parseBody(req, SignSchema);
 
     if (!(MEDIA_ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(body.content_type)) {

@@ -1,6 +1,5 @@
 import { getServerSupabase } from "@/lib/supabase/server";
-import { handleApiError } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import { handleApiError, requireSalesperson } from "@/lib/server/auth";
 import { isPushConfigured } from "@/lib/server/push";
 
 // Juice Box push diagnostics — current user's subscription state.
@@ -19,16 +18,16 @@ import { isPushConfigured } from "@/lib/server/push";
 //       }
 //
 // PURPOSE
-//   Lets a signed-in admin / test user verify their device's push
-//   subscription is in the DB (and matches the host they expect for
-//   their browser / OS). Useful when debugging "I tapped Enable
-//   notifications but I'm not getting pushes" — if this route returns
-//   subscription_count=0 the issue is on the OPT-IN path; if it
-//   returns ≥1 the issue is on the DELIVERY path (check the
-//   [juice-box-push] log lines in Vercel function logs).
+//   Lets any signed-in user verify their device's push subscription is
+//   in the DB (and matches the host they expect for their browser /
+//   OS). Useful when debugging "I tapped Enable notifications but I'm
+//   not getting pushes" — if this route returns subscription_count=0
+//   the issue is on the OPT-IN path; if it returns ≥1 the issue is on
+//   the DELIVERY path (check the [juice-box-push] log lines in Vercel
+//   function logs).
 //
 // SAFETY
-//   * Auth-gated by requireJuiceBoxAccess (admin / test only).
+//   * Auth-gated by requireSalesperson (any signed-in user).
 //   * Self-scoped — returns only rows owned by the caller's
 //     salesperson_id. A user can never see another user's
 //     subscription data through this route.
@@ -51,7 +50,7 @@ function safeEndpointHost(endpoint: string): string {
 
 export async function GET(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const supabase = getServerSupabase();
 
     const res = await supabase

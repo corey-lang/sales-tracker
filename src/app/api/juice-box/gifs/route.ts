@@ -1,5 +1,4 @@
-import { handleApiError } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import { handleApiError, requireSalesperson } from "@/lib/server/auth";
 import { searchGiphy } from "@/lib/server/giphy";
 
 // Juice Box — proxy to the GIPHY API.
@@ -10,8 +9,7 @@ import { searchGiphy } from "@/lib/server/giphy";
 // PURPOSE
 //   Keeps the GIPHY API key server-side. The browser-side GIF picker
 //   never sees the key, never talks to GIPHY directly, and can only
-//   reach this route under the same admin/test gate as the rest of the
-//   Juice Box surface.
+//   reach this route while signed in.
 //
 // GRACEFUL DEGRADATION
 //   When GIPHY_API_KEY is unset, the route still answers 200 with
@@ -20,7 +18,7 @@ import { searchGiphy } from "@/lib/server/giphy";
 //   throwing a network error.
 //
 // SECURITY
-//   * Auth: admin OR test only (requireJuiceBoxAccess). Regular AEs 403.
+//   * Auth: any signed-in salesperson (requireSalesperson).
 //   * Limit is clamped to [1, MAX_LIMIT] server-side.
 //   * No tracking parameters or salesperson ids leak to GIPHY.
 
@@ -32,7 +30,7 @@ const DEFAULT_LIMIT = 20;
 
 export async function GET(req: Request) {
   try {
-    await requireJuiceBoxAccess(req);
+    await requireSalesperson(req);
 
     const url = new URL(req.url);
     const limitParam = url.searchParams.get("limit");

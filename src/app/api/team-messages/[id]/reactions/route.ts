@@ -6,8 +6,8 @@ import {
   handleApiError,
   notFound,
   parseBody,
+  requireSalesperson,
 } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
 import {
   isAllowedReaction,
   TEAM_MESSAGES_TABLE,
@@ -32,8 +32,9 @@ import {
 //   choice between insert/update/delete.
 //
 // ACCESS
-//   Admin OR test only (requireJuiceBoxAccess). Identity from the signed
-//   session — the route never reads salesperson_id from the request body.
+//   Any signed-in salesperson (requireSalesperson). Identity from the
+//   signed session — the route never reads salesperson_id from the
+//   request body.
 //
 // EMOJI WHITELIST
 //   isAllowedReaction() is the single source of truth for which emoji are
@@ -57,7 +58,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const { id: messageId } = await params;
     const body = await parseBody(req, ToggleSchema);
 

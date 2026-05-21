@@ -1,6 +1,5 @@
 import { getServerSupabase } from "@/lib/supabase/server";
-import { handleApiError } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import { handleApiError, requireSalesperson } from "@/lib/server/auth";
 import {
   TEAM_MESSAGE_READS_TABLE,
   type TeamMessageRead,
@@ -12,9 +11,9 @@ import {
 //   POST /api/team-messages/reads/me   -> { last_read_at: string }
 //
 // ACCESS
-//   Both verbs require admin OR test (requireJuiceBoxAccess). Regular AEs
-//   get 403. Identity is the server-validated session — the body is
-//   intentionally unused so a client can NEVER mutate another user's marker.
+//   Both verbs require any signed-in salesperson (requireSalesperson).
+//   Identity is the server-validated session — the body is intentionally
+//   unused so a client can NEVER mutate another user's marker.
 //
 // SEMANTICS
 //   POST stamps last_read_at = NOW() and upserts on salesperson_id. There
@@ -28,7 +27,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const supabase = getServerSupabase();
 
     const res = await supabase
@@ -52,7 +51,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const supabase = getServerSupabase();
 
     // Stamp NOW() server-side. Body is intentionally ignored — see header.

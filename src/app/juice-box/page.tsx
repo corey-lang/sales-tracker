@@ -29,7 +29,7 @@ import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { cn } from "@/lib/utils";
-import { BottomNav, canSeeJuiceBox } from "@/components/bottom-nav";
+import { BottomNav } from "@/components/bottom-nav";
 import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 import {
   ALLOWED_REACTIONS,
@@ -505,19 +505,17 @@ export default function JuiceBoxPage() {
   // effect lands the viewport on the most recent post once initial data
   // resolves — see FeedList. Calling useScrollToTop would race with that.
 
-  // Two gates, one effect: not signed in -> /, ineligible -> /dashboard.
+  // One gate: signed-out users go to /. Juice Box is otherwise open
+  // to the whole team — the prior admin/test eligibility redirect was
+  // removed when the feature graduated out of pilot.
   useEffect(() => {
     if (!loaded) return;
     if (!salesperson) {
       router.replace("/");
-      return;
-    }
-    if (!canSeeJuiceBox(salesperson)) {
-      router.replace("/dashboard");
     }
   }, [loaded, salesperson, router]);
 
-  if (!loaded || !salesperson || !canSeeJuiceBox(salesperson)) {
+  if (!loaded || !salesperson) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>

@@ -1,8 +1,12 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
-import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import {
+  badRequest,
+  handleApiError,
+  parseBody,
+  requireSalesperson,
+} from "@/lib/server/auth";
 import { isTrustedPushEndpoint } from "@/lib/server/push";
 
 // Juice Box push subscriptions — register / unregister a browser.
@@ -24,9 +28,8 @@ import { isTrustedPushEndpoint } from "@/lib/server/push";
 //     fan-out doesn't keep trying to send to it.
 //
 // ACCESS
-//   Admin OR test only (requireJuiceBoxAccess). Regular AEs get 403 —
-//   matching the rest of the Juice Box surface. Identity comes from
-//   the signed session, never from the body, so a user can never
+//   Any signed-in salesperson (requireSalesperson). Identity comes
+//   from the signed session, never from the body, so a user can never
 //   register a subscription as a teammate.
 //
 // ENDPOINT ALLOWLIST
@@ -63,7 +66,7 @@ const UnsubscribeSchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const body = await parseBody(req, SubscribeSchema);
 
     // Allowlist the endpoint host. Single error message regardless of
@@ -103,7 +106,7 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const body = await parseBody(req, UnsubscribeSchema);
     const supabase = getServerSupabase();
 

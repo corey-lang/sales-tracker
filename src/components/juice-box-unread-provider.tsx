@@ -13,7 +13,6 @@ import {
 import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
-import { canSeeJuiceBox } from "@/components/bottom-nav";
 import {
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGES_UNREAD_CHANNEL,
@@ -30,8 +29,8 @@ import {
 //   layer — sitting in a Client provider mounted in the root layout.
 //
 // WHAT IT DOES
-//   - On mount (when the caller is Juice-Box-eligible), fetches the
-//     unread summary from /api/team-messages/unread.
+//   - On mount (when the caller is signed in), fetches the unread
+//     summary from /api/team-messages/unread.
 //   - Subscribes to postgres_changes on `team_messages` so:
 //       * teammate INSERTs   -> increment count
 //       * own INSERTs        -> ignored (we mark read on self-post)
@@ -41,10 +40,11 @@ import {
 //     to 0 and advance the local `lastReadAt` once the user has actually
 //     seen the latest posts.
 //
-// INELIGIBLE USERS
-//   For everyone who can't see Juice Box (regular AEs, signed-out users),
-//   the provider is a no-op. The hook returns zeroes so consumers don't
-//   need to special-case eligibility themselves.
+// SIGNED-OUT USERS
+//   For signed-out callers the provider is a no-op. The hook returns
+//   zeroes so consumers don't need to special-case the unauthenticated
+//   path. Juice Box is otherwise open to every signed-in salesperson;
+//   `eligible` below is simply "do we have a session yet".
 
 type JuiceBoxUnreadContextValue = {
   /** Latest known unread count. Defaults to 0 until the first fetch. */
@@ -69,8 +69,8 @@ const Context = createContext<JuiceBoxUnreadContextValue>({
 
 export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
   const { salesperson, loaded: salespersonLoaded } = useSalesperson();
-  const eligible = canSeeJuiceBox(salesperson);
   const userId = salesperson?.id ?? null;
+  const eligible = userId !== null;
 
   // Raw state — what the server told us. Derived display values below zero
   // these out for ineligible users without needing to setState on transition.
@@ -186,10 +186,10 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
   // Safari, and most Chromium-based browsers; absent on older iOS, in
   // Firefox today, and in browser tabs (iOS only badges installed Home
   // Screen apps). Feature-detected so unsupported platforms silently
-  // no-op. Ineligible users (signed out, role doesn't include Juice
-  // Box) get the badge cleared explicitly so a prior session's badge
-  // doesn't linger on the icon. Errors are swallowed because the API
-  // can reject on transient OS conditions and the badge is best-effort.
+  // no-op. Signed-out users get the badge cleared explicitly so a
+  // prior session's badge doesn't linger on the icon. Errors are
+  // swallowed because the API can reject on transient OS conditions
+  // and the badge is best-effort.
   useEffect(() => {
     if (typeof navigator === "undefined") return;
     const nav = navigator as Navigator & {

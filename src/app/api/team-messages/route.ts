@@ -1,8 +1,12 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
-import { badRequest, handleApiError, parseBody } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import {
+  badRequest,
+  handleApiError,
+  parseBody,
+  requireSalesperson,
+} from "@/lib/server/auth";
 import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
 import { fanOutJuiceBoxPush } from "@/lib/server/push";
 import {
@@ -33,8 +37,9 @@ import {
 //   the next click produces.
 //
 // ACCESS
-//   Both verbs require the caller to be an admin OR the test account
-//   (requireJuiceBoxAccess). Regular AEs receive 403 — matching the UI gate.
+//   Both verbs require any signed-in salesperson (requireSalesperson).
+//   Juice Box is now open to the whole team; the prior admin/test gate
+//   was removed when the feature graduated out of pilot.
 //
 // IDENTITY
 //   salesperson_id and salesperson_name come from the server-validated
@@ -260,7 +265,7 @@ function aggregateReactions(
 
 export async function GET(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const supabase = getServerSupabase();
 
     // Pagination — accept `?before=<ISO>&limit=N`. Both optional; the
@@ -343,7 +348,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const body = await parseBody(req, CreateMessageSchema);
     const supabase = getServerSupabase();
 

@@ -1,6 +1,5 @@
 import { getServerSupabase } from "@/lib/supabase/server";
-import { handleApiError } from "@/lib/server/auth";
-import { requireJuiceBoxAccess } from "@/lib/server/juice-box";
+import { handleApiError, requireSalesperson } from "@/lib/server/auth";
 import {
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_READS_TABLE,
@@ -17,8 +16,9 @@ import {
 // whether the removed message was unread from realtime payload alone).
 //
 // ACCESS
-//   Admin OR test only (requireJuiceBoxAccess). Identity from the signed
-//   session — the route never reads salesperson_id from the request.
+//   Any signed-in salesperson (requireSalesperson). Identity from the
+//   signed session — the route never reads salesperson_id from the
+//   request.
 //
 // COUNT SEMANTICS
 //   - Non-deleted messages (is_deleted = false).
@@ -30,7 +30,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    const me = await requireJuiceBoxAccess(req);
+    const me = await requireSalesperson(req);
     const supabase = getServerSupabase();
 
     // One round-trip for the marker; second one for the count.
