@@ -4,7 +4,7 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import {
   handleApiError,
   parseBody,
-  requireSalesperson,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import { isTaskStatus } from "@/lib/ae-tasks";
 
@@ -13,9 +13,14 @@ import { isTaskStatus } from "@/lib/ae-tasks";
 //   POST /api/tasks            -> { task: AeTask }
 //
 // OWNERSHIP
-//   Every query is scoped to requireSalesperson(req).id — the salesperson from
-//   the signed session token. An AE only ever sees or creates their own tasks;
-//   salesperson_id is never read from the request body or query string.
+//   Every query is scoped to requireAeToolAccess(req).id — the salesperson
+//   from the signed session token. An AE only ever sees or creates their own
+//   tasks; salesperson_id is never read from the request body or query string.
+//
+// ACCESS
+//   AE-only. juice_box_only accounts (Travis, Rizz, …) have no To-Do
+//   surface — requireAeToolAccess rejects them with a 403 so a direct
+//   fetch can't bypass the UI redirect.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,7 +43,7 @@ const CreateTaskSchema = z.object({
 
 export async function GET(req: Request) {
   try {
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const supabase = getServerSupabase();
 
     const statusParam = new URL(req.url).searchParams.get("status");
@@ -74,7 +79,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const body = await parseBody(req, CreateTaskSchema);
     const supabase = getServerSupabase();
 

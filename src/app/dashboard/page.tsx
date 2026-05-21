@@ -45,7 +45,17 @@ export default function DashboardPage() {
   const [quote, setQuote] = useState<string>("");
 
   useEffect(() => {
-    if (loaded && !salesperson) router.replace("/");
+    if (!loaded) return;
+    if (!salesperson) {
+      router.replace("/");
+      return;
+    }
+    // juice_box_only accounts (Travis, Rizz, …) only have access to
+    // /juice-box; bounce them away from Home so the URL bar can't be
+    // used to peek at the full dashboard.
+    if (salesperson.role === "juice_box_only") {
+      router.replace("/juice-box");
+    }
   }, [loaded, salesperson, router]);
 
   useScrollToTop();

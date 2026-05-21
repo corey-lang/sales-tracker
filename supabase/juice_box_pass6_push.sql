@@ -15,11 +15,13 @@
 --   * The table is NOT published to supabase_realtime — no client needs
 --     to subscribe to subscription changes.
 --
--- ROLLOUT GATE
---   The current Juice Box rollout is admin + test only. Both the
---   subscribe API and the fan-out logic call requireJuiceBoxAccess /
---   re-check role, so a regular AE who happens to insert a row by other
---   means still won't receive notifications.
+-- ACCESS
+--   Juice Box is now open to every signed-in salesperson — including
+--   juice_box_only guests (Travis, Rizz, …). The subscribe API gates
+--   on requireSalesperson, and the fan-out walks every row except the
+--   sender's. The historical "admin + test only" pilot gate that
+--   shipped with Pass 6 has been removed in lockstep with the rest of
+--   the Juice Box gating; the prose above remains as Pass-6 context.
 --
 -- Idempotent: re-runnable.
 

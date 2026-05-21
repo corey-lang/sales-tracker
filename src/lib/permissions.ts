@@ -1,7 +1,12 @@
-export type UserRole = "admin" | "assistant" | "ae";
+export type UserRole = "admin" | "assistant" | "ae" | "juice_box_only";
 
 export function isUserRole(value: unknown): value is UserRole {
-  return value === "admin" || value === "assistant" || value === "ae";
+  return (
+    value === "admin" ||
+    value === "assistant" ||
+    value === "ae" ||
+    value === "juice_box_only"
+  );
 }
 
 /**

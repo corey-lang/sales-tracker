@@ -4,7 +4,7 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import {
   handleApiError,
   parseBody,
-  requireSalesperson,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 
 // "Scan & Add to Phone Contacts" — vCard (.vcf) generation.
@@ -21,7 +21,8 @@ import {
 // vCard is still generated from the body fields.
 //
 // AUTHORIZATION
-//   requireSalesperson() — any signed-in salesperson.
+//   requireAeToolAccess() — AE/admin/assistant only. juice_box_only callers
+//   have no scan-to-contact surface and are rejected with 403.
 
 export const runtime = "nodejs";
 
@@ -74,7 +75,7 @@ function fileSlug(value: string): string {
 
 export async function POST(req: Request) {
   try {
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const { contactId, contact } = await parseBody(req, VCardSchema);
 
     const firstName = clean(contact.firstName);

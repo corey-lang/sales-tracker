@@ -62,7 +62,9 @@ export default function MorePage() {
                 ? "Admin"
                 : salesperson.role === "assistant"
                   ? "Assistant"
-                  : "Account Executive"}
+                  : salesperson.role === "juice_box_only"
+                    ? "Juice Box"
+                    : "Account Executive"}
             </p>
           </CardContent>
         </Card>

@@ -4,18 +4,22 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import {
   handleApiError,
   parseBody,
-  requireSalesperson,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import { TASK_STATUSES } from "@/lib/ae-tasks";
 
 // AE To-Do tasks — update one task.
 //   PATCH /api/tasks/:id   body: { title?, description?, due_date?, status? }
 //
+// ACCESS
+//   AE-only via requireAeToolAccess. juice_box_only callers (Travis,
+//   Rizz, …) are rejected on the role check before the DB is touched.
+//
 // OWNERSHIP
 //   The update is scoped to BOTH the task id AND
-//   requireSalesperson(req).id, so an AE can only modify their own tasks. A
-//   task that does not exist, or belongs to someone else, returns 404 — the
-//   two cases are deliberately indistinguishable.
+//   requireAeToolAccess(req).id, so an AE can only modify their own tasks.
+//   A task that does not exist, or belongs to someone else, returns 404 —
+//   the two cases are deliberately indistinguishable.
 
 export const runtime = "nodejs";
 
@@ -39,7 +43,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const { id } = await params;
     const body = await parseBody(req, UpdateTaskSchema);
     const supabase = getServerSupabase();

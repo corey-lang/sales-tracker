@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { supabase } from "@/lib/supabase/client";
 import { isUserRole } from "@/lib/permissions";
+import { landingPathFor } from "@/lib/role-routing";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button } from "@/components/ui/button";
@@ -51,7 +52,7 @@ export default function Home() {
   useEffect(() => {
     if (!loaded) return;
     if (salesperson) {
-      router.replace(salesperson.is_admin ? "/admin" : "/dashboard");
+      router.replace(landingPathFor(salesperson));
       return;
     }
     // Bulk fetch deliberately excludes admin_pin — we only need id/name/is_admin
@@ -120,15 +121,18 @@ export default function Home() {
       return;
     }
 
+    const role = isUserRole(signedIn.role) ? signedIn.role : "ae";
     setSalesperson({
       id: signedIn.id,
       first_name: signedIn.first_name,
       is_admin: signedIn.is_admin,
       is_test: signedIn.is_test === true,
-      role: isUserRole(signedIn.role) ? signedIn.role : "ae",
+      role,
       token,
     });
-    router.push(signedIn.is_admin ? "/admin" : "/dashboard");
+    router.push(
+      landingPathFor({ is_admin: signedIn.is_admin, role }),
+    );
   };
 
   return (

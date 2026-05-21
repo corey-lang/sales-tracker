@@ -518,11 +518,12 @@ export async function POST(req: Request) {
       reactions: [],
     };
 
-    // Web Push fan-out to every Juice Box-eligible subscription
-    // except the sender's own devices. Errors (5xx, network) are
-    // swallowed inside fanOutJuiceBoxPush; dead 404/410 subscriptions
-    // are GC'd from the DB inside as well. No-op when VAPID env is
-    // unset, so the route stays functional before push is configured.
+    // Web Push fan-out to every subscription on file except the
+    // sender's own devices — Juice Box is now open to the whole team.
+    // Errors (5xx, network) are swallowed inside fanOutJuiceBoxPush;
+    // dead 404/410 subscriptions are GC'd from the DB inside as well.
+    // No-op when VAPID env is unset, so the route stays functional
+    // before push is configured.
     //
     // EXECUTION MODEL — Vercel serverless
     //   This is `await`-ed, NOT fire-and-forget. On Vercel's Node.js

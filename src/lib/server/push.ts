@@ -6,10 +6,12 @@ import { getServerSupabase } from "@/lib/supabase/server";
 //
 // WHAT THIS IS
 //   Loads VAPID credentials from env, signs and sends Web Push payloads
-//   to every subscription belonging to a Juice Box-eligible salesperson
-//   except the sender. Subscriptions that come back 404 / 410 from the
-//   push service are removed from the DB on the way through so they
-//   don't keep generating retries.
+//   to every subscription on file except the sender's own. Juice Box is
+//   open to the whole team — including juice_box_only guests like
+//   Travis and Rizz — so the prior admin/test eligibility filter has
+//   been removed. Subscriptions that come back 404 / 410 from the push
+//   service are removed from the DB on the way through so they don't
+//   keep generating retries.
 //
 // FIRE-AND-FORGET
 //   Call from the create-message route AFTER the insert resolves; do

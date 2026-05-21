@@ -62,10 +62,19 @@ export default function ScanBizCardPage() {
     }
     if (salesperson.role === "assistant") {
       router.replace("/dashboard");
+      return;
+    }
+    if (salesperson.role === "juice_box_only") {
+      router.replace("/juice-box");
     }
   }, [loaded, salesperson, router]);
 
-  if (!loaded || !salesperson || salesperson.role === "assistant") {
+  if (
+    !loaded ||
+    !salesperson ||
+    salesperson.role === "assistant" ||
+    salesperson.role === "juice_box_only"
+  ) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>

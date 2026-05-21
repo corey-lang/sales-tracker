@@ -1,10 +1,11 @@
 import { getServerSupabase } from "@/lib/supabase/server";
-import { handleApiError, requireSalesperson } from "@/lib/server/auth";
+import { handleApiError, requireAeToolAccess } from "@/lib/server/auth";
 
 // AE To-Do tasks — mark one task complete.
 //   POST /api/tasks/:id/complete   -> { task: AeTask }
 //
-// A convenience endpoint equivalent to PATCH { status: "done" }. Scoped to
+// A convenience endpoint equivalent to PATCH { status: "done" }. AE-only:
+// requireAeToolAccess rejects juice_box_only callers up front. Scoped to
 // both the task id AND the authenticated salesperson, so an AE can only
 // complete their own tasks; a missing or other-owned task returns 404.
 
@@ -18,7 +19,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const { id } = await params;
     const supabase = getServerSupabase();
 

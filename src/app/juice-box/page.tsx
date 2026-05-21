@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -19,6 +20,7 @@ import {
   MoreVertical,
   Search,
   Send,
+  Settings,
   SmilePlus,
   Sparkles,
   Trash2,
@@ -564,6 +566,21 @@ export default function JuiceBoxPage() {
             <p className="text-sm text-muted-foreground">Live team feed</p>
             <LiveBadge />
           </div>
+          {/* juice_box_only users have no Home tab — and therefore no
+              Home-header settings gear — so the only path to /more
+              (notifications opt-in, sign-in summary, log out) lives
+              right here in the Juice Box header. Other roles still
+              reach /more via the gear on /dashboard. */}
+          {salesperson.role === "juice_box_only" && (
+            <Link
+              href="/more"
+              aria-label="Account and notification settings"
+              className="absolute right-3 top-1/2 -translate-y-1/2 inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              style={{ top: "calc(50% + env(safe-area-inset-top) / 2)" }}
+            >
+              <Settings aria-hidden="true" className="size-5" />
+            </Link>
+          )}
         </header>
 
         <JuiceBoxFeed

@@ -241,6 +241,30 @@ export async function requireAdmin(req: Request): Promise<AuthedSalesperson> {
   return me;
 }
 
+/**
+ * Requires the caller to be allowed to use the AE app's everyday tools
+ * (To-Dos, business-card scanning, the AE leaderboard, the daily-entry
+ * activity log, etc.).
+ *
+ * The current rule is simple: any signed-in salesperson EXCEPT the
+ * `juice_box_only` role qualifies. Those accounts (Travis, Rizz, …)
+ * are guests in the team chat with no AE surface — the UI redirects
+ * them away from those pages and this helper enforces the same gate
+ * server-side so a direct fetch can't bypass the client.
+ *
+ * Future AE-only endpoints should reach for this helper rather than
+ * `requireSalesperson` so the gate stays consistent.
+ */
+export async function requireAeToolAccess(
+  req: Request,
+): Promise<AuthedSalesperson> {
+  const me = await requireSalesperson(req);
+  if (me.role === "juice_box_only") {
+    throw forbidden("This action is not available for your account.");
+  }
+  return me;
+}
+
 /** True for roles that may act on ANY salesperson's business-card scan. */
 function isReviewerRole(role: UserRole): boolean {
   return role === "admin" || role === "assistant";
@@ -275,6 +299,7 @@ export type ScanAccess = {
  * Access rule:
  *   - reviewers (admin / assistant) may act on ANY scan;
  *   - an AE may act only on a scan they own (scan.salesperson_id === me.id);
+ *   - juice_box_only accounts are forbidden outright (no scan surface);
  *   - everyone else is forbidden.
  *
  * Identity is the signed-token salesperson — `scanId` is the only thing taken
@@ -286,7 +311,10 @@ export async function requireScanAccess(
   req: Request,
   scanId: string,
 ): Promise<ScanAccess> {
-  const me = await requireSalesperson(req);
+  // Route through requireAeToolAccess so juice_box_only callers are
+  // rejected on the role check instead of relying on the "they can
+  // never own a scan" data invariant.
+  const me = await requireAeToolAccess(req);
 
   const supabase = getServerSupabase();
   const res = await supabase

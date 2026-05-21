@@ -6,7 +6,7 @@ import { isTestAccount } from "@/lib/permissions";
 import {
   handleApiError,
   parseBody,
-  requireSalesperson,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 
 // Server-side intake for a business card scan.
@@ -14,11 +14,13 @@ import {
 //   body: { imageUrl: string, storagePath?: string }
 //   200:  { scanId: string }
 //
-// AUTHORIZATION (Phase 0)
+// AUTHORIZATION
 //   The caller is identified by their signed session token, validated by
-//   requireSalesperson() against the salespeople table. The scan is attributed
-//   to THAT salesperson — the route no longer trusts a salespersonId from the
-//   request body, so an AE can only ever create scans for themselves.
+//   requireAeToolAccess() against the salespeople table — AE-only by
+//   design. Scans are attributed to that salesperson; salespersonId is
+//   never read from the request body. juice_box_only accounts (Travis,
+//   Rizz, …) have no scan surface and are rejected with 403 here so a
+//   direct fetch can't bypass the UI redirect.
 //
 //   business_card_scans has RLS enabled (see supabase/business_card_rls.sql)
 //   and the app has no Supabase Auth, so the browser anon key cannot insert
@@ -40,7 +42,7 @@ const ScanSchema = z.object({
 export async function POST(req: Request) {
   try {
     // Identity comes from the session token, not the request body.
-    const me = await requireSalesperson(req);
+    const me = await requireAeToolAccess(req);
     const { imageUrl, storagePath } = await parseBody(req, ScanSchema);
 
     // Only accept an image we just uploaded to our own bucket — never an

@@ -61,8 +61,14 @@ export const BOTTOM_NAV_SPACER =
 
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   if (!salesperson) return [HOME];
-  // Juice Box is now open to the whole team; every signed-in user
-  // gets the tab. To-Dos and Scan Biz Card stay AE-only since
+  // Juice Box-only accounts (Travis, Rizz, …) see ONLY the Juice Box
+  // tab — they have no access to Home / Leaderboard / To-Dos / Scan
+  // and shouldn't be tempted by tabs that would just redirect them
+  // back here. Notifications + log out are reachable via the gear in
+  // the Juice Box page header (see /juice-box).
+  if (salesperson.role === "juice_box_only") return [JUICE_BOX];
+  // Juice Box is otherwise open to the whole team; every signed-in
+  // user gets the tab. To-Dos and Scan Biz Card stay AE-only since
   // assistants have a restricted (VerificationCenter) dashboard and
   // don't use those workflows.
   const items: NavItem[] = [HOME, JUICE_BOX, LEADERBOARD];
@@ -85,7 +91,9 @@ export function BottomNav({
   const items = buildNavItems(salesperson);
 
   // Grid columns map 1:1 to the active item count so the tabs share width
-  // evenly regardless of which role-gated items are present.
+  // evenly regardless of which role-gated items are present. A single tab
+  // (juice_box_only users) gets `grid-cols-1` so the lone Juice Box tab
+  // centers across the full bar instead of squatting in one half.
   const gridClass =
     items.length === 5
       ? "grid-cols-5"
@@ -93,7 +101,9 @@ export function BottomNav({
         ? "grid-cols-4"
         : items.length === 3
           ? "grid-cols-3"
-          : "grid-cols-2";
+          : items.length === 2
+            ? "grid-cols-2"
+            : "grid-cols-1";
 
   return (
     <nav

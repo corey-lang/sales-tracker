@@ -39,7 +39,16 @@ export default function LeaderboardPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (loaded && !salesperson) router.replace("/");
+    if (!loaded) return;
+    if (!salesperson) {
+      router.replace("/");
+      return;
+    }
+    // juice_box_only accounts have no leaderboard access — bounce them
+    // back to their only allowed surface.
+    if (salesperson.role === "juice_box_only") {
+      router.replace("/juice-box");
+    }
   }, [loaded, salesperson, router]);
 
   useEffect(() => {

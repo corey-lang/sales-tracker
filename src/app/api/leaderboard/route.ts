@@ -2,6 +2,7 @@ import { format } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { businessWeekToDateRange } from "@/lib/goals";
+import { handleApiError, requireAeToolAccess } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 
 // GET /api/leaderboard
@@ -10,6 +11,13 @@ import { computeStandings } from "@/lib/server/leaderboard-standings";
 // page and the dashboard mini card). Always the CURRENT business week — there
 // is no week parameter here, so a non-admin caller cannot pull historical
 // leaderboard data. Prior weeks are admin-only: see /api/admin/leaderboard.
+//
+// ACCESS
+//   requireAeToolAccess() — any signed-in salesperson EXCEPT
+//   juice_box_only. Travis/Rizz are guests in the team chat with no
+//   leaderboard surface; the UI redirects them away from /leaderboard
+//   and this route enforces the same gate so a direct fetch can't
+//   bypass the client.
 //
 // WHY THIS EXISTS
 //   The browser used to run `weekly_goals.select("*")` directly to compute
@@ -31,25 +39,31 @@ import { computeStandings } from "@/lib/server/leaderboard-standings";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const now = new Date();
-  const { since, through } = businessWeekToDateRange(now);
-  const todayStr = format(now, "yyyy-MM-dd");
+export async function GET(req: Request) {
+  try {
+    await requireAeToolAccess(req);
 
-  const { standings, error } = await computeStandings(
-    getServerSupabase(),
-    since,
-    through,
-    todayStr,
-  );
-  if (error) {
-    return Response.json({ error }, { status: 500 });
+    const now = new Date();
+    const { since, through } = businessWeekToDateRange(now);
+    const todayStr = format(now, "yyyy-MM-dd");
+
+    const { standings, error } = await computeStandings(
+      getServerSupabase(),
+      since,
+      through,
+      todayStr,
+    );
+    if (error) {
+      return Response.json({ error }, { status: 500 });
+    }
+
+    // Only `standings` leaves the server. Sorting is intentionally left to
+    // each consumer so the full page and the mini card keep their own ranking.
+    return Response.json(
+      { standings },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (err) {
+    return handleApiError(err);
   }
-
-  // Only `standings` leaves the server. Sorting is intentionally left to each
-  // consumer so the full page and the mini card keep their own ranking.
-  return Response.json(
-    { standings },
-    { headers: { "Cache-Control": "no-store" } },
-  );
 }
