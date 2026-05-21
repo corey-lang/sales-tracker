@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CalendarDays, Trophy, Zap } from "lucide-react";
 
+import { apiFetch } from "@/lib/api-client";
 import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 
@@ -70,7 +71,9 @@ export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/leaderboard")
+    // apiFetch attaches the signed session token — /api/leaderboard
+    // gates on requireAeToolAccess so a bare fetch would 401.
+    apiFetch("/api/leaderboard")
       .then(async (res) => {
         const body = (await res.json()) as {
           standings?: Standing[];

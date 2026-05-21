@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { apiFetch } from "@/lib/api-client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { progressColor } from "@/lib/goals";
@@ -57,8 +58,10 @@ export default function LeaderboardPage() {
 
     // Percentages are computed server-side by /api/leaderboard so raw
     // weekly_goals targets never reach the browser. Sorting stays here to
-    // preserve this view's existing ranking behavior.
-    fetch("/api/leaderboard")
+    // preserve this view's existing ranking behavior. apiFetch attaches
+    // the signed session token — /api/leaderboard now gates on
+    // requireAeToolAccess, so a bare fetch would 401.
+    apiFetch("/api/leaderboard")
       .then(async (res) => {
         const body = (await res.json()) as {
           standings?: Standing[];
