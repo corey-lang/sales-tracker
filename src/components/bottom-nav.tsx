@@ -37,7 +37,14 @@ type NavItem = {
   icon: LucideIcon;
 };
 
-const HOME: NavItem = { href: "/dashboard", label: "Home", icon: Home };
+// Two "Home" variants. Admins (Corey, Ryan, …) land on /admin after
+// login per `landingPathFor`, so their Home tab routes there too —
+// otherwise tapping Home from /admin would silently navigate them to
+// the AE log-activity page. Every other role keeps the AE dashboard
+// as their Home. juice_box_only users don't see a Home tab at all
+// (handled below in buildNavItems).
+const HOME_AE: NavItem = { href: "/dashboard", label: "Home", icon: Home };
+const HOME_ADMIN: NavItem = { href: "/admin", label: "Home", icon: Home };
 const JUICE_BOX: NavItem = {
   href: "/juice-box",
   label: "Juice Box",
@@ -60,18 +67,22 @@ export const BOTTOM_NAV_SPACER =
   "pb-[calc(5rem+env(safe-area-inset-bottom))]";
 
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
-  if (!salesperson) return [HOME];
+  if (!salesperson) return [HOME_AE];
   // Juice Box-only accounts (Travis, Rizz, …) see ONLY the Juice Box
   // tab — they have no access to Home / Leaderboard / To-Dos / Scan
   // and shouldn't be tempted by tabs that would just redirect them
   // back here. Notifications + log out are reachable via the gear in
   // the Juice Box page header (see /juice-box).
   if (salesperson.role === "juice_box_only") return [JUICE_BOX];
+  // Admin Home points at /admin so Home stays consistent with where
+  // admins land after login (see landingPathFor). Every other role's
+  // Home is the AE /dashboard.
+  const home = salesperson.is_admin ? HOME_ADMIN : HOME_AE;
   // Juice Box is otherwise open to the whole team; every signed-in
   // user gets the tab. To-Dos and Scan Biz Card stay AE-only since
   // assistants have a restricted (VerificationCenter) dashboard and
   // don't use those workflows.
-  const items: NavItem[] = [HOME, JUICE_BOX, LEADERBOARD];
+  const items: NavItem[] = [home, JUICE_BOX, LEADERBOARD];
   if (salesperson.role !== "assistant") {
     items.push(TODOS, SCAN_BIZ_CARD);
   }
