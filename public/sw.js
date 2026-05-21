@@ -56,6 +56,9 @@ self.addEventListener("push", (event) => {
     .showNotification(title, {
       body,
       // /icon-192.png is the same asset Pass 4 PWA setup provisions.
+      // The `badge` here is the SW NOTIFICATION-ICON badge (small mono
+      // glyph in the Android tray), unrelated to the home-screen app
+      // icon badge — that one is set via the Badging API below.
       icon: "/icon-192.png",
       badge: "/icon-192.png",
       // Collapse repeated Juice Box pings into the same notification
@@ -76,7 +79,29 @@ self.addEventListener("push", (event) => {
       );
     });
 
-  event.waitUntil(showPromise);
+  // Home-screen / dock app badge. Feature-detected — the Badging API
+  // is supported on iOS 16.4+ standalone PWAs, macOS Safari, and most
+  // Chromium-based browsers; missing on older iOS, current Firefox,
+  // and in-browser tabs (badges only apply to installed PWAs on iOS).
+  // We don't know the recipient's exact unread count from the shared
+  // push payload, so we set a conservative "1" as a "something new"
+  // indicator. The foreground unread provider reconciles to the
+  // accurate count the moment the user opens the app.
+  let badgePromise = Promise.resolve();
+  if (
+    self.navigator &&
+    typeof self.navigator.setAppBadge === "function"
+  ) {
+    const count =
+      typeof (data && data.badge) === "number" && data.badge > 0
+        ? data.badge
+        : 1;
+    badgePromise = self.navigator.setAppBadge(count).catch((err) => {
+      console.warn("[juice-box-sw] setAppBadge failed: " + String(err));
+    });
+  }
+
+  event.waitUntil(Promise.all([showPromise, badgePromise]));
 });
 
 self.addEventListener("notificationclick", (event) => {

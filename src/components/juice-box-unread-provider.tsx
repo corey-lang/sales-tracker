@@ -181,6 +181,36 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
     };
   }, [eligible, userId]);
 
+  // Mirror the unread count onto the home-screen / dock app badge via
+  // the W3C Badging API. Supported on iOS 16.4+ standalone PWAs, macOS
+  // Safari, and most Chromium-based browsers; absent on older iOS, in
+  // Firefox today, and in browser tabs (iOS only badges installed Home
+  // Screen apps). Feature-detected so unsupported platforms silently
+  // no-op. Ineligible users (signed out, role doesn't include Juice
+  // Box) get the badge cleared explicitly so a prior session's badge
+  // doesn't linger on the icon. Errors are swallowed because the API
+  // can reject on transient OS conditions and the badge is best-effort.
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+    const nav = navigator as Navigator & {
+      setAppBadge?: (count?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    if (!eligible) {
+      if (typeof nav.clearAppBadge === "function") {
+        nav.clearAppBadge().catch(() => undefined);
+      }
+      return;
+    }
+    if (unreadCount > 0) {
+      if (typeof nav.setAppBadge === "function") {
+        nav.setAppBadge(unreadCount).catch(() => undefined);
+      }
+    } else if (typeof nav.clearAppBadge === "function") {
+      nav.clearAppBadge().catch(() => undefined);
+    }
+  }, [eligible, unreadCount]);
+
   // Reads current `unreadCount` inside markAllRead without forcing the
   // callback identity to change every time the count moves.
   const unreadCountRef = useRef(unreadCount);
