@@ -1576,19 +1576,31 @@ function GoalProgressRow({
 }
 
 // ---------------------------------------------------------------------------
-// Section — Next Week Goals (manager planning)
+// Section — Update goals (manager planning)
 // ---------------------------------------------------------------------------
 
 /**
- * "Keep same or adjust?" card. Defaults to the keep-same state when no
- * override row exists. Saving in keep-same mode DELETEs any prior
- * override row; saving in custom mode UPSERTs the per-AE override at
- * next Monday's `effective_from`. The route prevents duplicate inserts,
- * and the resolved state round-trips back so the form re-syncs without
- * a full refetch.
+ * "Update goals" card. Lets the manager change an AE's weekly goals and
+ * choose when the change takes effect:
+ *   * Start This Week — writes a per-AE weekly_goals row at the CURRENT
+ *     Monday's effective_from. The new goal applies retroactively to
+ *     this Mon-Fri week (leaderboard / tracker recompute immediately)
+ *     and remains active every future week until another change is made.
+ *   * Start Next Week — writes at next Monday's effective_from. This
+ *     week stays on the current goal; the new one takes effect Monday
+ *     and remains active every future week until another change is made.
  *
- * Existing CURRENT-week goals are never touched by this card — the
- * server only ever writes to the next-Monday override row.
+ * PRODUCT MODEL — ONGOING, NOT ONE-WEEK
+ *   This is NOT a one-week override. Goal changes persist until the next
+ *   goal change. The underlying weekly_goals table is effective-dated,
+ *   and every read site (AE dashboard, Weekly Tracker, leaderboards,
+ *   reports, Weekly Focus) resolves to the latest row whose
+ *   effective_from <= the week being viewed. Writing at a Monday slots
+ *   the new row into that timeline; no other rows are touched.
+ *
+ * `nextOverride` here is still useful as a "yes there's already a row
+ * scheduled at next Monday" signal — surfaced as a small notice so the
+ * manager understands they're editing that future row.
  */
 function NextWeekGoalsCard({
   aeId,
@@ -1603,25 +1615,26 @@ function NextWeekGoalsCard({
   nextWeekStart: string;
   onChange: () => void;
 }) {
-  // keepSame defaults to TRUE when no per-AE override row exists for
-  // next Monday — the natural "inherit whatever's active that day" state.
-  const [keepSame, setKeepSame] = useState<boolean>(nextOverride === null);
+  // Default to "next_week" — the safer choice. "This week" retroactively
+  // changes the in-flight leaderboard percent, so make it an explicit
+  // pick rather than the default.
+  type StartChoice = "this_week" | "next_week";
+  const [start, setStart] = useState<StartChoice>("next_week");
 
-  // Editable values for the custom branch. Seeded from the existing
-  // override row if there is one, otherwise from the current week's
-  // values so the manager starts with a sensible draft.
+  // Editable values. Seed from the existing next-Monday row if one
+  // exists (so the manager picks up an in-flight scheduled change),
+  // otherwise from the current week's resolved values.
   const seedValues: WeeklyGoalValues = useMemo(() => {
     return nextOverride?.values ?? currentGoal.values;
   }, [nextOverride, currentGoal]);
   const [values, setValues] = useState<WeeklyGoalValues>(seedValues);
 
   // Re-sync local state when the upstream detail refetches (e.g. after a
-  // save round-trip). Key on the override id / null so an unchanged
-  // detail render doesn't clobber in-progress edits — this is exactly
-  // the "sync from props that change irregularly" case the rule allows.
+  // save round-trip). Key on the override / current row ids so an
+  // unchanged detail render doesn't clobber in-progress edits — this
+  // is the "sync from props that change irregularly" case.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setKeepSame(nextOverride === null);
     setValues(nextOverride?.values ?? currentGoal.values);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nextOverride?.id ?? "none", currentGoal.id ?? "none"]);
@@ -1653,17 +1666,11 @@ function NextWeekGoalsCard({
     setError(null);
     setSaved(false);
     try {
-      const body = keepSame
-        ? { keep_same: true }
-        : { keep_same: false, values };
-      const res = await apiFetch(
-        `/api/admin/coaching/${aeId}/next-week-goals`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
+      const res = await apiFetch(`/api/admin/coaching/${aeId}/goals`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start, values }),
+      });
       if (!res.ok) {
         const reason = (await res.json().catch(() => null)) as {
           error?: string;
@@ -1680,21 +1687,32 @@ function NextWeekGoalsCard({
     }
   };
 
-  const weekLabel = nextWeekStart
-    ? `Week of ${format(addDays(parseISO(nextWeekStart), 0), "MMM d")}–${format(
+  // Friendly Mon-Fri label for whichever week the manager is targeting.
+  const nextWeekLabel = nextWeekStart
+    ? `${format(parseISO(nextWeekStart), "MMM d")}–${format(
         addDays(parseISO(nextWeekStart), 4),
         "MMM d",
       )}`
-    : "Next week";
+    : "next week";
+  const thisMondayIso = nextWeekStart
+    ? format(addDays(parseISO(nextWeekStart), -7), "yyyy-MM-dd")
+    : null;
+  const thisWeekLabel = thisMondayIso
+    ? `${format(parseISO(thisMondayIso), "MMM d")}–${format(
+        addDays(parseISO(thisMondayIso), 4),
+        "MMM d",
+      )}`
+    : "this week";
 
   return (
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <CardTitle>Next week goals</CardTitle>
+            <CardTitle>Update goals</CardTitle>
             <CardDescription>
-              {weekLabel} — manager only.
+              Change the AE&apos;s ongoing goals and pick when the change
+              takes effect — manager only.
             </CardDescription>
           </div>
           <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -1703,72 +1721,121 @@ function NextWeekGoalsCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={keepSame}
-            onChange={(e) => setKeepSame(e.target.checked)}
-            disabled={saving}
-            className="mt-0.5 size-4 rounded border-border accent-primary"
-          />
-          <span className="flex flex-col">
-            <span>Use active goals for next week</span>
-            <span className="text-[11px] text-muted-foreground">
-              No per-AE override — next week uses whichever goal (personal
-              or team default) is in effect on Monday.
+        <fieldset className="space-y-2">
+          <legend className="text-xs uppercase tracking-wide text-muted-foreground">
+            When should this change take effect?
+          </legend>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="radio"
+              name={`goal-start-${aeId}`}
+              value="this_week"
+              checked={start === "this_week"}
+              onChange={() => setStart("this_week")}
+              disabled={saving}
+              className="mt-0.5 size-4 border-border accent-primary"
+            />
+            <span className="flex flex-col">
+              <span>
+                Start This Week
+                <span className="ml-1 text-muted-foreground">
+                  ({thisWeekLabel})
+                </span>
+              </span>
+              <span className="text-[11px] text-muted-foreground">
+                These goals will apply starting this week and continue
+                until changed again. The leaderboard and tracker
+                recompute against the new targets immediately.
+              </span>
             </span>
-          </span>
-        </label>
+          </label>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="radio"
+              name={`goal-start-${aeId}`}
+              value="next_week"
+              checked={start === "next_week"}
+              onChange={() => setStart("next_week")}
+              disabled={saving}
+              className="mt-0.5 size-4 border-border accent-primary"
+            />
+            <span className="flex flex-col">
+              <span>
+                Start Next Week
+                <span className="ml-1 text-muted-foreground">
+                  ({nextWeekLabel})
+                </span>
+              </span>
+              <span className="text-[11px] text-muted-foreground">
+                These goals will apply starting next week and continue
+                until changed again. This week stays on the current
+                goal.
+              </span>
+            </span>
+          </label>
+        </fieldset>
 
-        {!keepSame && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="py-1 text-left font-semibold">Goal</th>
-                  <th className="py-1 text-right font-semibold">This week</th>
-                  <th className="py-1 text-right font-semibold">Next week</th>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                <th className="py-1 text-left font-semibold">Goal</th>
+                <th className="py-1 text-right font-semibold">Current</th>
+                <th className="py-1 text-right font-semibold">New</th>
+              </tr>
+            </thead>
+            <tbody>
+              {GOAL_ACTIVITY_KEYS.map((a) => (
+                <tr
+                  key={a.key}
+                  className="border-t border-border/60 last:border-b"
+                >
+                  <td className="py-1.5">{a.label}</td>
+                  <td className="py-1.5 text-right text-muted-foreground tabular-nums">
+                    {Number(currentGoal.values[a.key] ?? 0)}
+                  </td>
+                  <td className="py-1.5 text-right">
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={WEEKLY_GOAL_MAX_VALUE}
+                      step={1}
+                      value={values[a.key]}
+                      onChange={(e) => setKey(a.key, e.target.value)}
+                      disabled={saving}
+                      className="ml-auto h-8 w-20 text-right tabular-nums"
+                    />
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {GOAL_ACTIVITY_KEYS.map((a) => (
-                  <tr
-                    key={a.key}
-                    className="border-t border-border/60 last:border-b"
-                  >
-                    <td className="py-1.5">{a.label}</td>
-                    <td className="py-1.5 text-right text-muted-foreground tabular-nums">
-                      {Number(currentGoal.values[a.key] ?? 0)}
-                    </td>
-                    <td className="py-1.5 text-right">
-                      <Input
-                        type="number"
-                        inputMode="numeric"
-                        min={0}
-                        max={WEEKLY_GOAL_MAX_VALUE}
-                        step={1}
-                        value={values[a.key]}
-                        onChange={(e) => setKey(a.key, e.target.value)}
-                        disabled={saving}
-                        className="ml-auto h-8 w-20 text-right tabular-nums"
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {nextOverride && start === "next_week" && (
+          <p className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
+            A goal change is already scheduled for {nextWeekLabel}. Saving
+            here updates that scheduled row in place.
+          </p>
+        )}
+        {nextOverride && start === "this_week" && (
+          <p className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
+            Heads up: a separate goal change is already scheduled for{" "}
+            {nextWeekLabel}. Starting this week sets the goal now, but
+            that scheduled change still takes over on{" "}
+            {nextWeekStart
+              ? format(parseISO(nextWeekStart), "MMM d")
+              : "next Monday"}
+            .
+          </p>
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
-            {keepSame
-              ? nextOverride
-                ? "Saving clears the existing next-week override; next week will use whichever goal is in effect on Monday."
-                : "No per-AE override scheduled — next week will use whichever goal is in effect on Monday."
-              : nextOverride
-                ? "Editing the existing per-AE override for next Monday."
-                : "A per-AE override will be created for next Monday."}
+            {start === "this_week"
+              ? `Saving applies these goals starting ${thisWeekLabel} and continues until changed again.`
+              : `Saving applies these goals starting ${nextWeekLabel} and continues until changed again.`}
           </p>
           <div className="flex items-center gap-2">
             {error && (
@@ -1785,7 +1852,11 @@ function NextWeekGoalsCard({
               </span>
             )}
             <Button type="button" size="sm" onClick={submit} disabled={saving}>
-              {saving ? "Saving…" : "Save next week"}
+              {saving
+                ? "Saving…"
+                : start === "this_week"
+                  ? "Save (start this week)"
+                  : "Save (start next week)"}
             </Button>
           </div>
         </div>
