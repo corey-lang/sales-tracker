@@ -30,7 +30,10 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //   is_admin OR role === "assistant". AEs and juice_box_only are
 //   redirected. The server route enforces the same gate via
 //   `requireAdminOrAssistant`, so the UI and API agree — an assistant
-//   who reaches the page can actually import.
+//   who reaches the page can actually import. The gate is named
+//   `canImport` and applied at BOTH the page-level guard AND the
+//   Import-button site so the contract is explicit at every call
+//   point and the two layers can never drift.
 //
 // SCOPE
 //   No map, no read endpoint, no production import. CSV → preview →
@@ -248,7 +251,12 @@ export default function OfficeImportsPage() {
   useScrollToTop();
 
   // ---- Auth gate (client-side; server route enforces independently) ------
-  const allowed =
+  // Single source of truth for who is allowed to import. Mirrors the
+  // server's `requireAdminOrAssistant` exactly — `is_admin === true`
+  // OR `role === "assistant"`. Applied at both the page-level
+  // redirect AND the Import-button render so a future refactor of
+  // either layer can't silently widen or narrow access.
+  const canImport =
     !!salesperson &&
     (salesperson.is_admin === true || salesperson.role === "assistant");
 
@@ -262,10 +270,10 @@ export default function OfficeImportsPage() {
       router.replace("/juice-box");
       return;
     }
-    if (!allowed) {
+    if (!canImport) {
       router.replace("/dashboard");
     }
-  }, [loaded, salesperson, allowed, router]);
+  }, [loaded, salesperson, canImport, router]);
 
   // ---- CSV state ---------------------------------------------------------
   const [fileName, setFileName] = useState<string | null>(null);
@@ -371,7 +379,7 @@ export default function OfficeImportsPage() {
     }
   }
 
-  if (!loaded || !salesperson || !allowed) {
+  if (!loaded || !salesperson || !canImport) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -619,18 +627,31 @@ export default function OfficeImportsPage() {
                 Source label: <code className="font-mono">{SOURCE_LABEL}</code>
                 {" · "}Environment: <code className="font-mono">test</code>
               </p>
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleImport}
-                disabled={
-                  importing || rows.length === 0 || stats.tooMany
-                }
-              >
-                {importing
-                  ? "Importing…"
-                  : `Import ${stats.total} row${stats.total === 1 ? "" : "s"}`}
-              </Button>
+              {/* Explicit `canImport` gate. Mirrors the server's
+                  `requireAdminOrAssistant` so the button is visible
+                  for exactly the same callers the API will accept.
+                  Redundant with the page-level guard above today
+                  (anyone who fails canImport is redirected before
+                  this card renders), but kept here so the UI gate
+                  is impossible to miss in a future refactor. */}
+              {canImport ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleImport}
+                  disabled={
+                    importing || rows.length === 0 || stats.tooMany
+                  }
+                >
+                  {importing
+                    ? "Importing…"
+                    : `Import ${stats.total} row${stats.total === 1 ? "" : "s"}`}
+                </Button>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Importing requires admin or assistant access.
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
