@@ -17,13 +17,19 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 // only renders its own content. Non-admins are redirected away here, before
 // any admin page mounts.
 
-/** Admin sections, in nav order. Each is its own route under /admin. */
+/** Admin sections, in nav order. Each is its own route under /admin
+ *  except `/office-imports`, which lives at the top level so non-admin
+ *  assistants (who can't pass this layout's `is_admin` gate) can still
+ *  reach it via their own /more entry point. The Link still highlights
+ *  correctly here because the active-state check matches the exact
+ *  href. */
 const ADMIN_NAV = [
   { href: "/admin", label: "Dashboard" },
   { href: "/admin/coaching", label: "Weekly Focus" },
   { href: "/admin/business-cards", label: "Business Cards" },
   { href: "/admin/leaderboard", label: "Leaderboard" },
   { href: "/admin/reports/activity", label: "Activity Reports" },
+  { href: "/office-imports", label: "Office Imports (Test)" },
 ];
 
 export default function AdminLayout({

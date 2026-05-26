@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { LogOut, ShieldCheck, MapPin } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -90,6 +90,18 @@ export default function MorePage() {
             >
               <ShieldCheck aria-hidden="true" className="size-4" />
               Admin
+            </Link>
+          )}
+          {(salesperson.is_admin || salesperson.role === "assistant") && (
+            // Sandbox tool — visible to admins (already see it in the
+            // /admin nav) and to assistants (who can't pass the admin
+            // layout's is_admin gate, so this is their only entry).
+            <Link
+              href="/office-imports"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              <MapPin aria-hidden="true" className="size-4" />
+              Office Imports (Test)
             </Link>
           )}
           <Button variant="outline" onClick={handleLogout}>
