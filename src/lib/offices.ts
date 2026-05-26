@@ -127,6 +127,55 @@ export type OfficeDetail = {
 export const OFFICE_VISITS_DETAIL_LIMIT = 200;
 
 /**
+ * One row in the test AE's office list (Phase 1B).
+ *
+ * Trimmed shape of `OfficeRow` — only the fields the list UI renders,
+ * plus the visit-derived fields that decide row sort order.
+ *
+ *   * `last_visit_at` — `office_visits.visited_at` of the most recent
+ *     visit by the calling AE against this office, or null when never
+ *     visited. Drives the "visited first, never-visited last" sort.
+ *   * `visit_count`   — total visits by the calling AE against this
+ *     office. Surfaced inline so the list can show a count badge
+ *     without a follow-up fetch.
+ *
+ * Both visit fields are scoped to the calling AE (and environment="test"),
+ * not the office globally — the list is a personal "what have I done"
+ * read.
+ */
+export type OfficeListItem = {
+  id: string;
+  name: string;
+  street: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  next_action: string | null;
+  last_visit_at: string | null;
+  visit_count: number;
+};
+
+/**
+ * Hard cap on rows returned to the office-list UI. The DB query fetches
+ * a wider window (see OFFICE_LIST_QUERY_LIMIT) so the JS-side sort can
+ * promote visited offices to the top before we slice; the user only
+ * ever sees the first OFFICE_LIST_LIMIT rows. 200 keeps the response
+ * mobile-friendly (~60KB) and matches the "find one in seconds" UX —
+ * past 200, refining the search is faster than scrolling.
+ */
+export const OFFICE_LIST_LIMIT = 200;
+
+/**
+ * Pre-sort cap on rows pulled from `offices` before the JS sort runs.
+ * Larger than OFFICE_LIST_LIMIT so the top-200 returned to the UI is
+ * picked from a representative sample of the AE's full sandbox, not
+ * just whichever 200 happened to come back alphabetically. For a
+ * 2,000-row test sandbox this returns the full set; for larger sets
+ * the alphabetical DB-side order is good enough as a pre-filter.
+ */
+export const OFFICE_LIST_QUERY_LIMIT = 2_000;
+
+/**
  * Normalizes a string for dedupe-key composition: lowercase, collapse
  * non-alphanumerics to a single space, then trim. "12 Main St., Suite #4"
  * and "12 main st suite 4" both produce "12 main st suite 4" so they

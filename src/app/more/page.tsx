@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, ShieldCheck, MapPin } from "lucide-react";
+import { LogOut, ShieldCheck, MapPin, Building2 } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -99,6 +99,23 @@ export default function MorePage() {
               Admin
             </Link>
           )}
+          {/* My Offices (Test) — Phase 1B test-only office list. The
+              link only appears for `is_test === true` salespeople; the
+              server route + the /offices page itself both re-check
+              `requireTestAccount`, so this is UI discoverability only.
+              juice_box_only is excluded by the role check, and
+              `is_test` is a static account property (no live grant)
+              so the cached session value is the authority here. */}
+          {salesperson.is_test === true &&
+            salesperson.role !== "juice_box_only" && (
+              <Link
+                href="/offices"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                <Building2 aria-hidden="true" className="size-4" />
+                My Offices (Test)
+              </Link>
+            )}
           {(() => {
             // Visibility prefers LIVE permissions from
             // /api/me/permissions so grant/revoke takes effect on the
