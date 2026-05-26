@@ -26,6 +26,7 @@ import { DailyEntryForm } from "@/components/daily-entry-form";
 import { MyWeekCard } from "@/components/my-week-card";
 import { EditWeekCard } from "@/components/edit-week-card";
 import { MessagesCard } from "@/components/messages-card";
+import { RecentActivityCard } from "@/components/recent-activity-card";
 import { VerificationCenter } from "@/components/verification-center";
 
 // Home dashboard. Slimmer than the pre-nav-rollout version — the To-Do
@@ -200,6 +201,8 @@ export default function DashboardPage() {
           refreshKey={entryVersion}
           onSaved={() => setEntryVersion((n) => n + 1)}
         />
+
+        <RecentActivityCard refreshKey={entryVersion} />
 
         {quote && (
           <p className="px-3 pb-1 text-center text-xs italic text-muted-foreground/70">

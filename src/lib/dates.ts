@@ -9,12 +9,12 @@ export function formatDateMDY(input: string | Date): string {
 }
 
 /**
- * Friendly "today at 9:42 AM" / "yesterday at 9:42 AM" / fallback to
- * "MM-dd-yyyy at 9:42 AM" for older timestamps. Day boundaries and the
- * displayed time-of-day are computed in `APP_TIMEZONE` so a late-night
- * write in Denver doesn't read as "yesterday" to a browser in another zone.
+ * Internal helper shared by formatTaskMoment / formatActivityStamp. Returns
+ * the calendar-day token ("today" / "yesterday" / "MM-dd-yyyy") and the
+ * time-of-day, both computed in `APP_TIMEZONE` so a late-night write in
+ * Denver reads consistently regardless of where the browser is.
  */
-export function formatTaskMoment(iso: string): string {
+function appMomentParts(iso: string): { day: string; time: string } {
   const instant = parseISO(iso);
   const dateFmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: APP_TIMEZONE,
@@ -33,9 +33,31 @@ export function formatTaskMoment(iso: string): string {
   const todayDate = format(today, "yyyy-MM-dd");
   const yesterdayDate = format(subDays(today, 1), "yyyy-MM-dd");
   const time = timeFmt.format(instant);
-  if (tsDate === todayDate) return `today at ${time}`;
-  if (tsDate === yesterdayDate) return `yesterday at ${time}`;
-  return `${formatDateMDY(tsDate)} at ${time}`;
+  if (tsDate === todayDate) return { day: "today", time };
+  if (tsDate === yesterdayDate) return { day: "yesterday", time };
+  return { day: formatDateMDY(tsDate), time };
+}
+
+/**
+ * Friendly "today at 9:42 AM" / "yesterday at 9:42 AM" / fallback to
+ * "MM-dd-yyyy at 9:42 AM" for older timestamps. Designed to read naturally
+ * after a verb prefix ("Added today at 9:42 AM").
+ */
+export function formatTaskMoment(iso: string): string {
+  const { day, time } = appMomentParts(iso);
+  return `${day} at ${time}`;
+}
+
+/**
+ * Headline-style stamp for the Recent Activity feed: "Today 10:14 AM" /
+ * "Yesterday 4:30 PM" / "MM-dd-yyyy 4:30 PM". Capitalized so it reads as
+ * a leading timestamp on its own row.
+ */
+export function formatActivityStamp(iso: string): string {
+  const { day, time } = appMomentParts(iso);
+  const label =
+    day === "today" ? "Today" : day === "yesterday" ? "Yesterday" : day;
+  return `${label} ${time}`;
 }
 
 /**
