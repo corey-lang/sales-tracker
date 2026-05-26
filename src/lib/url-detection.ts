@@ -35,13 +35,15 @@
  *     -> "https://example.com"             (first URL; trailing `,` stripped)
  */
 
-/**
- * Greedy run of non-whitespace, non-quote, non-`<>` characters after the
- * scheme. We intentionally allow `(` and `)` inside the match and let
- * the balance pass below decide whether a trailing `)` is part of the
- * URL (Wikipedia-style) or sentence punctuation ("(https://x.com)").
- */
+/** Single-match regex used by extractFirstUrl. */
 const URL_REGEX = /\bhttps?:\/\/[^\s<>"'`]+/i;
+
+/**
+ * Source + flags for the global scanner. We construct a fresh RegExp per
+ * call site to avoid sharing `lastIndex` between concurrent callers.
+ */
+const URL_REGEX_GLOBAL_SOURCE = "\\bhttps?:\\/\\/[^\\s<>\"'`]+";
+const URL_REGEX_GLOBAL_FLAGS = "gi";
 
 /**
  * Characters that follow URLs in prose and are never part of the URL.
@@ -49,6 +51,36 @@ const URL_REGEX = /\bhttps?:\/\/[^\s<>"'`]+/i;
  * legitimately-trailing parens in URL paths are preserved.
  */
 const TRAILING_SENTENCE_PUNCT = /[\s.,;:!?'"`\]>]$/;
+
+/**
+ * Trims surrounding punctuation off a candidate URL match. Two passes:
+ *   1. Peel sentence punctuation (everything except `)`).
+ *   2. Peel UNBALANCED trailing `)` — a `)` that has no matching `(`
+ *      inside the URL. Each peel re-runs step 1 so "x.com)." → "x.com".
+ *
+ * Pure, no I/O. Exported as `extractFirstUrl` / `findAllUrls` below.
+ */
+function trimUrlPunct(raw: string): string {
+  let url = raw;
+  while (url.length > 0 && TRAILING_SENTENCE_PUNCT.test(url)) {
+    url = url.slice(0, -1);
+  }
+  while (url.endsWith(")")) {
+    let opens = 0;
+    let closes = 0;
+    for (let i = 0; i < url.length; i++) {
+      const c = url.charCodeAt(i);
+      if (c === 0x28 /* ( */) opens++;
+      else if (c === 0x29 /* ) */) closes++;
+    }
+    if (closes <= opens) break;
+    url = url.slice(0, -1);
+    while (url.length > 0 && TRAILING_SENTENCE_PUNCT.test(url)) {
+      url = url.slice(0, -1);
+    }
+  }
+  return url;
+}
 
 /**
  * Returns the first http(s) URL in `text`, with surrounding punctuation
@@ -59,37 +91,45 @@ export function extractFirstUrl(text: unknown): string | null {
   if (typeof text !== "string" || text.length === 0) return null;
   const match = text.match(URL_REGEX);
   if (!match) return null;
+  const trimmed = trimUrlPunct(match[0]);
+  return trimmed.length > 0 ? trimmed : null;
+}
 
-  let url = match[0];
+/**
+ * A single URL match: the trimmed URL plus the character offsets in the
+ * original text. `start` is the index of the first URL char; `end` is
+ * one past the last char of the trimmed URL (so any trailing prose
+ * punctuation that was stripped lives at indexes `[end, originalEnd]`).
+ */
+export type UrlMatch = { url: string; start: number; end: number };
 
-  // Step 1: peel sentence punctuation (everything except `)`) off the
-  // right edge, one char at a time, until none remains.
-  while (url.length > 0 && TRAILING_SENTENCE_PUNCT.test(url)) {
-    url = url.slice(0, -1);
-  }
-
-  // Step 2: peel UNBALANCED trailing `)`. A trailing `)` is treated as
-  // wrapper punctuation only when the URL has more `)` than `(`. This
-  // preserves URLs like
-  //   https://en.wikipedia.org/wiki/V_(disambiguation)
-  // while still cleaning up
-  //   (https://example.com)  ->  https://example.com
-  while (url.endsWith(")")) {
-    let opens = 0;
-    let closes = 0;
-    for (let i = 0; i < url.length; i++) {
-      const ch = url.charCodeAt(i);
-      if (ch === 0x28 /* ( */) opens++;
-      else if (ch === 0x29 /* ) */) closes++;
+/**
+ * Returns every http(s) URL in `text` in order, with surrounding
+ * punctuation trimmed off each href. The caller can splice the original
+ * text around these offsets — for example, the AutoLinkText component
+ * uses `(start, end]` to wrap the URL substring in an <a> while the
+ * non-URL spans stay as plain text (so any trailing punctuation stripped
+ * from the href is preserved verbatim in the visible message body).
+ */
+export function findAllUrls(text: unknown): UrlMatch[] {
+  if (typeof text !== "string" || text.length === 0) return [];
+  const out: UrlMatch[] = [];
+  // Fresh RegExp per call so we don't share lastIndex across callers.
+  const re = new RegExp(URL_REGEX_GLOBAL_SOURCE, URL_REGEX_GLOBAL_FLAGS);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const trimmed = trimUrlPunct(m[0]);
+    if (trimmed.length > 0) {
+      out.push({
+        url: trimmed,
+        start: m.index,
+        end: m.index + trimmed.length,
+      });
     }
-    if (closes <= opens) break;
-    url = url.slice(0, -1);
-    // After peeling a `)`, sentence punctuation may now be exposed
-    // (e.g. "...example.com)."). Re-run the cheap right-edge sweep.
-    while (url.length > 0 && TRAILING_SENTENCE_PUNCT.test(url)) {
-      url = url.slice(0, -1);
-    }
+    // Defensive: prevent an infinite loop on a zero-length match.
+    // Our regex requires "http(s)://" so this shouldn't fire, but
+    // future edits to the pattern shouldn't be able to wedge the loop.
+    if (re.lastIndex === m.index) re.lastIndex++;
   }
-
-  return url.length > 0 ? url : null;
+  return out;
 }

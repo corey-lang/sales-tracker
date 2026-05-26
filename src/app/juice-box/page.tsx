@@ -62,6 +62,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { LinkPreviewCard } from "@/components/link-preview-card";
+import { AutoLinkText } from "@/components/auto-link-text";
 import { extractFirstUrl } from "@/lib/url-detection";
 
 // Long-press duration (ms) to enter Reply mode from a message card.
@@ -3106,8 +3107,13 @@ function FeedCard({
           // normal (1.5) for noticeably easier reading on mobile. The
           // pl-[2.625rem] indent still aligns to the sender name because
           // avatar size + header gap are unchanged.
+          //
+          // AutoLinkText converts http(s) URLs into clickable <a> tags
+          // while keeping non-URL spans as plain text — so newlines in
+          // the source message still render normally via the
+          // whitespace-pre-wrap class above.
           <p className="whitespace-pre-wrap break-words pl-[2.625rem] text-base font-medium leading-normal text-foreground">
-            {message.message}
+            <AutoLinkText text={message.message} />
           </p>
         )}
         {previewUrl && (

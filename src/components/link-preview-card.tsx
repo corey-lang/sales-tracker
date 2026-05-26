@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ExternalLink } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
@@ -11,10 +11,16 @@ import { cn } from "@/lib/utils";
 // /api/link-preview on mount and caches results in a module-level Map so
 // the same URL pasted across many messages only resolves once.
 //
-// Failure mode is "render nothing" — a missing preview should never look
-// like an error to the user. The component returns null while loading
-// (so a feed scroll-into-view doesn't reflow when the fetch resolves)
-// and on any failure.
+// Two render modes:
+//   * Rich card — title / description / image / domain when metadata
+//     fetches successfully.
+//   * Fallback card — domain + URL only, used when metadata fails
+//     (private host, non-HTML, OG-blocked site, timeout, etc.). Keeps
+//     the link clickable so a paste of e.g. an Instagram URL never
+//     looks "broken" — it just falls back to a calmer card.
+//
+// Loading state still renders `null` so the feed doesn't reflow when a
+// fetch resolves mid-scroll.
 
 type LinkPreview = {
   url: string;
@@ -47,8 +53,16 @@ async function loadPreview(url: string): Promise<ResolvedEntry> {
         `/api/link-preview?url=${encodeURIComponent(url)}`,
       );
       if (!res.ok) {
-        // 404 = "no preview"; anything else also collapses to null so
-        // the card just doesn't render.
+        // 404 = "no preview" (expected for sites without OG metadata,
+        // private hosts, non-HTML, timeouts). Anything else also
+        // collapses to null so the card falls back to the simple form.
+        // Intentionally no client-side warn: the URL is the user's
+        // pasted content (may carry query strings / tracking params)
+        // and redacting it client-side just to log a status code adds
+        // noise. The route logs the structural digest server-side
+        // (Vercel function logs, [link-preview] prefix), and DevTools
+        // Network tab shows the response inline if a developer needs
+        // to debug a misconfigured deployment.
         PREVIEW_CACHE.set(url, null);
         return null;
       }
@@ -59,12 +73,23 @@ async function loadPreview(url: string): Promise<ResolvedEntry> {
       PREVIEW_CACHE.set(url, preview);
       return preview;
     } catch {
+      // Same reasoning as the non-OK branch: no client-side log of the
+      // raw URL or error. Silent failure → fallback card renders.
       PREVIEW_CACHE.set(url, null);
       return null;
     }
   })();
   PREVIEW_CACHE.set(url, promise);
   return promise;
+}
+
+/** Best-effort hostname extraction for the fallback card. */
+function safeDomain(raw: string): string {
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, "");
+  } catch {
+    return raw;
+  }
 }
 
 /** Initial-state seed: resolved cache hit, or "loading" otherwise. */
@@ -109,7 +134,11 @@ export function LinkPreviewCard({
     };
   }, [url]);
 
-  if (preview === "loading" || preview === null) return null;
+  if (preview === "loading") return null;
+
+  if (preview === null) {
+    return <LinkFallbackCard url={url} className={className} />;
+  }
 
   return (
     <a
@@ -152,6 +181,42 @@ export function LinkPreviewCard({
             {preview.description}
           </p>
         )}
+      </div>
+    </a>
+  );
+}
+
+/**
+ * Calm fallback rendered when /api/link-preview can't produce metadata
+ * (404, blocked host, OG-stripped page, etc.). Shows the domain + URL
+ * so the link is still clearly clickable, with the same outer surface
+ * as the rich card so the visual rhythm of the feed doesn't change.
+ */
+function LinkFallbackCard({
+  url,
+  className,
+}: {
+  url: string;
+  className?: string;
+}) {
+  const domain = useMemo(() => safeDomain(url), [url]);
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer nofollow"
+      title={url}
+      className={cn(
+        "group flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-card/60 px-3 py-2 transition-colors hover:border-primary/40 hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+        className,
+      )}
+    >
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <p className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <span className="truncate">{domain}</span>
+          <ExternalLink aria-hidden="true" className="size-3 shrink-0" />
+        </p>
+        <p className="truncate text-sm font-medium text-foreground">{url}</p>
       </div>
     </a>
   );

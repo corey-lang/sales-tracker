@@ -98,10 +98,12 @@ function admit(salespersonId: string): boolean {
 // ---------------------------------------------------------------------------
 
 export async function GET(req: Request) {
+  const startedAt = Date.now();
   try {
     const me = await requireSalesperson(req);
 
     if (!admit(me.id)) {
+      console.warn(`[link-preview] route rate-limited salesperson=${me.id}`);
       return Response.json(
         { error: "Rate limit exceeded — try again shortly." },
         {
@@ -121,15 +123,37 @@ export async function GET(req: Request) {
       throw badRequest("URL is too long.");
     }
 
+    // Structural digest only — never the raw URL, query string, or
+    // fragment. The downstream fetchLinkPreview() also self-redacts.
+    // If the value won't even parse, we tag it as "unparseable" and
+    // let the request length stand in as a coarse size signal.
+    let digest = "host=? protocol=? path_length=?";
+    try {
+      const u = new URL(raw);
+      digest = `host=${u.hostname} protocol=${u.protocol.replace(":", "")} path_length=${u.pathname.length}`;
+    } catch {
+      digest = `host=? protocol=? path_length=? raw_length=${raw.length}`;
+    }
+    console.log(
+      `[link-preview] route start salesperson=${me.id} ${digest}`,
+    );
+
     const preview = await fetchLinkPreview(raw);
+    const elapsed = Date.now() - startedAt;
     if (!preview) {
-      // 404 — the client treats this as "no preview available" and
-      // renders nothing. All failure reasons collapse to the same
-      // status so a probe can't distinguish "blocked private IP" from
-      // "non-HTML" from "timeout."
+      console.warn(
+        `[link-preview] route no-preview salesperson=${me.id} elapsed_ms=${elapsed}`,
+      );
+      // 404 — the client renders a calm fallback card (domain + URL)
+      // instead of a rich preview. All failure reasons collapse to the
+      // same status so a probe can't distinguish "blocked private IP"
+      // from "non-HTML" from "timeout."
       throw new ApiError(404, "No preview available.");
     }
 
+    console.log(
+      `[link-preview] route ok salesperson=${me.id} domain=${preview.domain} elapsed_ms=${elapsed}`,
+    );
     return Response.json(
       { preview },
       {

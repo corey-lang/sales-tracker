@@ -4,6 +4,39 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 /**
+ * Tiny prefix-tagged logger so the link-preview pipeline lights up in
+ * Vercel function logs the way [juice-box-push] and [team-messages] do.
+ * Grep-friendly.
+ *
+ * REDACTION POLICY
+ *   These logs must NEVER include: raw URLs, query strings, fragments,
+ *   tracking parameters, or any user-supplied URL contents. Safe fields
+ *   are: hostname, protocol (no `:`), pathname length (NOT query
+ *   length), status codes, IP addresses we resolved, redirect counts,
+ *   timings, DNS outcomes, content-type, byte counts, and structured
+ *   reason strings. Error objects are stringified, but they normally
+ *   only carry hostname-level info (e.g. "getaddrinfo ENOTFOUND host")
+ *   — if a new code path ever surfaces a raw URL inside an Error
+ *   message, redact at the call site before logging.
+ */
+function log(...parts: unknown[]): void {
+  console.log("[link-preview]", ...parts);
+}
+function warn(...parts: unknown[]): void {
+  console.warn("[link-preview]", ...parts);
+}
+
+/**
+ * Structural digest of a parsed URL safe to log. Only protocol scheme,
+ * hostname, and pathname length — explicitly NOT the query string,
+ * fragment, or any path content. Use when logging a URL's "shape"
+ * without leaking what the user actually pasted.
+ */
+function urlDigest(u: URL): string {
+  return `host=${u.hostname} protocol=${u.protocol.replace(":", "")} path_length=${u.pathname.length}`;
+}
+
+/**
  * Server-only link-preview fetcher used by /api/link-preview.
  *
  * MVP design:
@@ -108,14 +141,18 @@ async function resolvePublicAddress(
 ): Promise<ResolvedAddress | null> {
   const ipKind = isIP(hostname);
   if (ipKind === 4) {
-    return isBlockedIPv4(hostname)
-      ? null
-      : { address: hostname, family: 4 };
+    if (isBlockedIPv4(hostname)) {
+      warn(`resolve host=${hostname} reason=blocked-ipv4-literal`);
+      return null;
+    }
+    return { address: hostname, family: 4 };
   }
   if (ipKind === 6) {
-    return isBlockedIPv6(hostname)
-      ? null
-      : { address: hostname, family: 6 };
+    if (isBlockedIPv6(hostname)) {
+      warn(`resolve host=${hostname} reason=blocked-ipv6-literal`);
+      return null;
+    }
+    return { address: hostname, family: 6 };
   }
 
   // String hostnames: reject obviously-internal names before DNS even
@@ -129,6 +166,7 @@ async function resolvePublicAddress(
     lower.endsWith(".internal") ||
     lower.endsWith(".lan")
   ) {
+    warn(`resolve host=${hostname} reason=internal-name`);
     return null;
   }
 
@@ -136,14 +174,20 @@ async function resolvePublicAddress(
     const all = await dnsLookup(hostname, { all: true });
     for (const r of all) {
       if (r.family === 4 && !isBlockedIPv4(r.address)) {
+        log(`resolve host=${hostname} -> ${r.address}/v4 (of ${all.length})`);
         return { address: r.address, family: 4 };
       }
       if (r.family === 6 && !isBlockedIPv6(r.address)) {
+        log(`resolve host=${hostname} -> ${r.address}/v6 (of ${all.length})`);
         return { address: r.address, family: 6 };
       }
     }
+    warn(
+      `resolve host=${hostname} reason=no-public-ip count=${all.length}`,
+    );
     return null;
-  } catch {
+  } catch (err) {
+    warn(`resolve host=${hostname} reason=dns-error err=${String(err)}`);
     return null;
   }
 }
@@ -232,6 +276,9 @@ function requestPinned(
             headers.set(k.toLowerCase(), v[0]);
           }
         }
+        log(
+          `request host=${url.hostname} ip=${pin.address} status=${res.statusCode ?? "?"}`,
+        );
         resolve({
           status: res.statusCode ?? 0,
           headers,
@@ -239,7 +286,12 @@ function requestPinned(
         });
       },
     );
-    req.on("error", () => resolve(null));
+    req.on("error", (err) => {
+      warn(
+        `request host=${url.hostname} ip=${pin.address} error=${String(err)}`,
+      );
+      resolve(null);
+    });
     req.end();
   });
 }
@@ -272,7 +324,10 @@ async function fetchAndFollow(initial: URL): Promise<
   | null
 > {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => {
+    warn(`abort host=${initial.hostname} reason=timeout-${REQUEST_TIMEOUT_MS}ms`);
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   try {
     let current = initial;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -284,22 +339,38 @@ async function fetchAndFollow(initial: URL): Promise<
       // Redirect — re-validate the destination before following.
       if (res.status >= 300 && res.status < 400) {
         drain(res.body);
-        if (hop === MAX_REDIRECTS) return null;
+        if (hop === MAX_REDIRECTS) {
+          warn(`redirect host=${current.hostname} reason=max-hops`);
+          return null;
+        }
         const loc = res.headers.get("location");
-        if (!loc) return null;
+        if (!loc) {
+          warn(`redirect host=${current.hostname} reason=no-location-header`);
+          return null;
+        }
         let next: URL;
         try {
           next = new URL(loc, current);
         } catch {
+          // `loc` is the raw Location header; we deliberately don't
+          // log it because Location can contain user-influenced query
+          // strings on some sites. The hostname + "bad-location" tag
+          // is enough to triage in function logs.
+          warn(`redirect host=${current.hostname} reason=bad-location`);
           return null;
         }
         const accepted = parseAndAccept(next.toString());
-        if (!accepted) return null;
+        if (!accepted) {
+          warn(`redirect from=${current.hostname} to=${next.hostname} reason=rejected`);
+          return null;
+        }
+        log(`redirect from=${current.hostname} to=${accepted.hostname}`);
         current = accepted;
         continue;
       }
 
       if (res.status < 200 || res.status >= 300) {
+        warn(`status host=${current.hostname} status=${res.status} non-2xx`);
         drain(res.body);
         return null;
       }
@@ -307,7 +378,8 @@ async function fetchAndFollow(initial: URL): Promise<
       return { finalUrl: current, headers: res.headers, body: res.body };
     }
     return null;
-  } catch {
+  } catch (err) {
+    warn(`fetch host=${initial.hostname} error=${String(err)}`);
     return null;
   } finally {
     clearTimeout(timer);
@@ -441,8 +513,19 @@ function resolveImageUrl(raw: string | null, base: URL): string | null {
 export async function fetchLinkPreview(
   rawUrl: string,
 ): Promise<LinkPreview | null> {
+  // NB: do not log `rawUrl` — it can carry query strings, fragments,
+  // or tracking parameters from user-pasted links. Parse first and
+  // log only the structural digest (host / protocol / path length).
   const initial = parseAndAccept(rawUrl);
-  if (!initial) return null;
+  if (!initial) {
+    // Unparseable or non-http: we don't have a safe digest to log, and
+    // the rawUrl is exactly the thing we must redact. The route-level
+    // log already carries elapsed_ms + salesperson id so this failure
+    // can still be correlated with a specific request.
+    warn(`parse reason=invalid-or-non-http`);
+    return null;
+  }
+  log(`start ${urlDigest(initial)}`);
 
   const fetched = await fetchAndFollow(initial);
   if (!fetched) return null;
@@ -451,12 +534,17 @@ export async function fetchLinkPreview(
   // Content-Type gate — we only parse HTML.
   const ct = (headers.get("content-type") ?? "text/html").toLowerCase();
   if (!ct.startsWith("text/html") && !ct.startsWith("application/xhtml+xml")) {
+    warn(`content-type host=${finalUrl.hostname} ct=${ct} non-html`);
     drain(body);
     return null;
   }
 
   const text = await readBoundedBody(body);
-  if (text.length === 0) return null;
+  if (text.length === 0) {
+    warn(`body host=${finalUrl.hostname} reason=empty`);
+    return null;
+  }
+  log(`body host=${finalUrl.hostname} bytes=${text.length}`);
 
   // <head> typically lives in the first 50KB. Working off `head` (when
   // we can find the closing tag) avoids matching og-shaped strings
@@ -507,11 +595,15 @@ export async function fetchLinkPreview(
     }
   }
 
-  return {
+  const result: LinkPreview = {
     url: canonical,
     title,
     description,
     image,
     domain: finalUrl.hostname.replace(/^www\./i, ""),
   };
+  log(
+    `ok host=${finalUrl.hostname} title-len=${result.title.length} desc=${result.description ? "y" : "n"} image=${result.image ? "y" : "n"}`,
+  );
+  return result;
 }
