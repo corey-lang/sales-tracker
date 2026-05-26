@@ -157,8 +157,13 @@ export const REPLY_PREVIEW_MAX_LENGTH = 200;
  * tapping any other character is rejected by the API. Order here is also
  * the order they render in the inline emoji bar on a card.
  *
- * 👍 was added in the one-reaction-per-user revision; the DB CHECK
- * constraint in juice_box_pass4_conversations.sql is kept in lockstep.
+ * 👍 was added in the one-reaction-per-user revision. 🎉 / 🚀 / 🙌 / 🏆
+ * were appended in the culture-polish pass to give the team more
+ * Elevate-flavored ways to react (Celebrate / Momentum / Let's Go /
+ * Winner). Existing emojis kept their slots so historical reactions
+ * still render in the same position. The DB CHECK constraint is kept in
+ * lockstep — first in juice_box_pass4_conversations.sql, then expanded
+ * in juice_box_expand_reactions.sql.
  */
 export const ALLOWED_REACTIONS = [
   "👍",
@@ -170,6 +175,10 @@ export const ALLOWED_REACTIONS = [
   "❤️",
   "🧡",
   "‼️",
+  "🎉",
+  "🚀",
+  "🙌",
+  "🏆",
 ] as const;
 export type ReactionEmoji = (typeof ALLOWED_REACTIONS)[number];
 export const isAllowedReaction = (s: string): s is ReactionEmoji =>

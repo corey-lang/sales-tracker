@@ -556,10 +556,14 @@ export async function POST(req: Request) {
       await fanOutJuiceBoxPush({
         excludeSalespersonId: me.id,
         payload: {
-          // Title names the surface so OS notifications (especially when
-          // tag-collapsed on Android) stay unambiguously "Juice Box". Body
-          // names the actor.
-          title: "Juice Box",
+          // Title is the app, body is the actor + action. iOS already
+          // prefixes "from Elevate App" above the title on lock screen;
+          // using "Juice Box" here was redundant with the body's "posted
+          // in Juice Box". Using the app name cleans up the two-line
+          // notification to read like:
+          //   Elevate App
+          //   Ryan posted in Juice Box
+          title: "Elevate App",
           body: `${senderName} posted in Juice Box`,
           url: "/juice-box",
         },
