@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { Settings } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useSalesperson } from "@/lib/use-salesperson";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 
@@ -74,9 +75,27 @@ export default function AdminLayout({
             </h1>
           </div>
           <Logo width={160} height={49} priority className="shrink-0" />
-          <Button variant="outline" size="sm" onClick={handleLogout}>
-            Log out
-          </Button>
+          {/* Admins land on /admin per landingPathFor and never see the
+              /dashboard or /juice-box headers, so their only path to /more
+              (notification opt-in, account summary) lives here. Mirrors the
+              ghost-icon Settings gear used by the AE/assistant dashboard
+              and the Juice Box page header. Log out stays as the right-most
+              affordance to preserve muscle memory. */}
+          <div className="flex shrink-0 items-center gap-2">
+            <Link
+              href="/more"
+              aria-label="Account and notification settings"
+              className={buttonVariants({
+                variant: "ghost",
+                size: "icon",
+              })}
+            >
+              <Settings aria-hidden="true" className="size-5" />
+            </Link>
+            <Button variant="outline" size="sm" onClick={handleLogout}>
+              Log out
+            </Button>
+          </div>
         </header>
 
         <nav
