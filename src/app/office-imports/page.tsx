@@ -8,6 +8,7 @@ import { Upload, AlertTriangle, CheckCircle2, ArrowLeft } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
+import { useLivePermissions } from "@/lib/use-live-permissions";
 
 import {
   Card,
@@ -19,7 +20,9 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
-// Office Imports (Test) — admin/assistant sandbox tool for CSV office import.
+// Office Imports (Test) — sandbox tool for CSV office import. Access
+// is gated on `is_admin` or the per-user `can_import_offices`
+// permission (see migration #26), NOT on role membership.
 //
 // SANDBOX
 //   This page ONLY supports environment="test". The server route hard-
@@ -27,13 +30,23 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //   constraint by hard-coding environment="test" on every POST.
 //
 // ACCESS
-//   is_admin OR role === "assistant". AEs and juice_box_only are
-//   redirected. The server route enforces the same gate via
-//   `requireAdminOrAssistant`, so the UI and API agree — an assistant
-//   who reaches the page can actually import. The gate is named
-//   `canImport` and applied at BOTH the page-level guard AND the
-//   Import-button site so the contract is explicit at every call
-//   point and the two layers can never drift.
+//   `is_admin === true` OR `can_import_offices === true` on the
+//   salespeople row (see migration #26). Non-flagged users (AEs,
+//   juice_box_only, plain assistants without the flag) are redirected.
+//   The server route enforces the same gate via `requireOfficeImporter`,
+//   so UI and API agree.
+//
+//   Permission state comes from /api/me/permissions on every mount
+//   (via useLivePermissions) — NOT from the login-time session cache.
+//   This means an admin granting or revoking `can_import_offices`
+//   takes effect on the next page mount without a logout/login cycle.
+//   While the live fetch is in flight, the gate fails closed — no
+//   page render, no button — so a stale "granted" cache can never
+//   flash a button at a user whose permission was revoked.
+//
+//   The gate is named `canImport` and applied at BOTH the page-level
+//   guard AND the Import-button site so the contract is explicit at
+//   every call point and the two layers can never drift.
 //
 // SCOPE
 //   No map, no read endpoint, no production import. CSV → preview →
@@ -247,25 +260,68 @@ type ImportResult = {
 
 export default function OfficeImportsPage() {
   const router = useRouter();
-  const { salesperson, loaded } = useSalesperson();
+  const { salesperson, loaded: sessionLoaded } = useSalesperson();
+  const { permissions, loaded: permsLoaded } = useLivePermissions();
   useScrollToTop();
 
-  // ---- Auth gate (client-side; server route enforces independently) ------
-  // Single source of truth for who is allowed to import. Mirrors the
-  // server's `requireAdminOrAssistant` exactly — `is_admin === true`
-  // OR `role === "assistant"`. Applied at both the page-level
-  // redirect AND the Import-button render so a future refactor of
-  // either layer can't silently widen or narrow access.
+  // ---- Auth gate (client-side; server route is the final authority) ------
+  // Permission resolution prefers LIVE values from /api/me/permissions
+  // so a grant/revoke takes effect on the next mount without a
+  // logout/login cycle. If the live fetch fails (network blip, transient
+  // 5xx, etc.), we fall back to the cached session's flag so a valid
+  // user isn't bounced out of a working surface by a transient error.
+  //
+  // The fallback is UI-only — every write still goes through
+  // `requireOfficeImporter` on the server, which re-reads the live DB
+  // row. A user with a stale-granted cached session can SEE the
+  // button during an outage but can't actually import if their grant
+  // has been revoked: the import POST will return 403.
+  //
+  // Visibility precedence:
+  //   1. permsLoaded === true && permissions !== null
+  //        → live succeeded. Use live values verbatim.
+  //   2. permsLoaded === true && permissions === null
+  //        → live FAILED (network/server). Fall back to cached session
+  //          flags so a valid user keeps access during an outage.
+  //   3. permsLoaded === false
+  //        → live still pending. Wait — no fallback yet — so a slow
+  //          fetch can't flash a button at a recently-revoked user.
+  //
+  // juice_box_only is never granted access regardless of the resolution
+  // branch — the role-based redirect below fires first.
+  const effectivePermissions =
+    permissions ??
+    (permsLoaded && salesperson
+      ? {
+          is_admin: salesperson.is_admin === true,
+          role: salesperson.role,
+          can_import_offices: salesperson.can_import_offices === true,
+        }
+      : null);
+
   const canImport =
-    !!salesperson &&
-    (salesperson.is_admin === true || salesperson.role === "assistant");
+    !!effectivePermissions &&
+    effectivePermissions.role !== "juice_box_only" &&
+    (effectivePermissions.is_admin === true ||
+      effectivePermissions.can_import_offices === true);
+
+  // Wait for BOTH the session hydration (so we know who's logged in
+  // and can do the role-specific juice_box_only redirect) AND the
+  // live permission fetch (success OR error — `permsLoaded` flips
+  // true either way) before making any access decision. The fallback
+  // above kicks in only after permsLoaded so a slow fetch can't
+  // accidentally render via the cached path.
+  const accessReady = sessionLoaded && permsLoaded;
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!accessReady) return;
     if (!salesperson) {
       router.replace("/");
       return;
     }
+    // juice_box_only is hard-blocked regardless of cached vs live —
+    // role rarely changes at runtime and the cached value is safe to
+    // read here for redirect routing.
     if (salesperson.role === "juice_box_only") {
       router.replace("/juice-box");
       return;
@@ -273,7 +329,7 @@ export default function OfficeImportsPage() {
     if (!canImport) {
       router.replace("/dashboard");
     }
-  }, [loaded, salesperson, canImport, router]);
+  }, [accessReady, salesperson, canImport, router]);
 
   // ---- CSV state ---------------------------------------------------------
   const [fileName, setFileName] = useState<string | null>(null);
@@ -379,7 +435,7 @@ export default function OfficeImportsPage() {
     }
   }
 
-  if (!loaded || !salesperson || !canImport) {
+  if (!accessReady || !salesperson || !canImport) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -412,7 +468,14 @@ export default function OfficeImportsPage() {
           </h1>
         </div>
         <Link
-          href={salesperson.is_admin ? "/admin" : "/dashboard"}
+          // Back-link target uses the same `effectivePermissions` that
+          // gated the page render — live admin state when available,
+          // cached session as fallback during an outage. Safe to deref
+          // since we're past the canImport guard, which requires it
+          // to be non-null.
+          href={
+            effectivePermissions?.is_admin ? "/admin" : "/dashboard"
+          }
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
@@ -433,6 +496,7 @@ export default function OfficeImportsPage() {
           server-side.
         </p>
       </div>
+
 
       {/* ---- Upload card ---- */}
       <Card>
@@ -628,7 +692,7 @@ export default function OfficeImportsPage() {
                 {" · "}Environment: <code className="font-mono">test</code>
               </p>
               {/* Explicit `canImport` gate. Mirrors the server's
-                  `requireAdminOrAssistant` so the button is visible
+                  `requireOfficeImporter` so the button is visible
                   for exactly the same callers the API will accept.
                   Redundant with the page-level guard above today
                   (anyone who fails canImport is redirected before
@@ -649,7 +713,7 @@ export default function OfficeImportsPage() {
                 </Button>
               ) : (
                 <p className="text-xs text-muted-foreground">
-                  Importing requires admin or assistant access.
+                  Importing requires the office-import permission.
                 </p>
               )}
             </div>

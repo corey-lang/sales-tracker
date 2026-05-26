@@ -7,6 +7,7 @@ import { LogOut, ShieldCheck, MapPin } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
+import { useLivePermissions } from "@/lib/use-live-permissions";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,6 +21,12 @@ import { NotificationOptIn } from "@/components/notification-opt-in";
 export default function MorePage() {
   const router = useRouter();
   const { salesperson, clear, loaded } = useSalesperson();
+  // Live permission refresh — used to decide whether to show the
+  // Office Imports link. Fail-closed during the in-flight window
+  // (link stays hidden until the server confirms access). Doesn't
+  // gate the rest of /more — account info / logout / admin shortcut
+  // all derive from the cached session.
+  const { permissions, loaded: permsLoaded } = useLivePermissions();
   useScrollToTop();
 
   useEffect(() => {
@@ -92,18 +99,49 @@ export default function MorePage() {
               Admin
             </Link>
           )}
-          {(salesperson.is_admin || salesperson.role === "assistant") && (
-            // Sandbox tool — visible to admins (already see it in the
-            // /admin nav) and to assistants (who can't pass the admin
-            // layout's is_admin gate, so this is their only entry).
-            <Link
-              href="/office-imports"
-              className={buttonVariants({ variant: "outline" })}
-            >
-              <MapPin aria-hidden="true" className="size-4" />
-              Office Imports (Test)
-            </Link>
-          )}
+          {(() => {
+            // Visibility prefers LIVE permissions from
+            // /api/me/permissions so grant/revoke takes effect on the
+            // next mount of /more without a logout/login cycle. If
+            // the live fetch fails (transient network/server error),
+            // we fall back to the cached session flag so a valid user
+            // doesn't lose their link during an outage. The Office
+            // Imports page + import API both re-check the live
+            // permission, so this fallback is UI-only.
+            //
+            // juice_box_only is excluded outright regardless of
+            // resolution branch.
+            //
+            // While the live fetch is still in flight (permsLoaded
+            // false), the link stays hidden so a slow fetch can't
+            // flash an out-of-date affordance.
+            if (!permsLoaded) return null;
+            const effective =
+              permissions ??
+              (salesperson
+                ? {
+                    is_admin: salesperson.is_admin === true,
+                    role: salesperson.role,
+                    can_import_offices:
+                      salesperson.can_import_offices === true,
+                  }
+                : null);
+            if (!effective) return null;
+            if (effective.role === "juice_box_only") return null;
+            const allowed =
+              effective.is_admin === true ||
+              effective.can_import_offices === true;
+            if (!allowed) return null;
+            return (
+              <Link
+                href="/office-imports"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                <MapPin aria-hidden="true" className="size-4" />
+                Office Imports (Test)
+              </Link>
+            );
+          })()}
           <Button variant="outline" onClick={handleLogout}>
             <LogOut aria-hidden="true" className="size-4" />
             Log out
