@@ -544,12 +544,23 @@ export async function POST(req: Request) {
     console.log(
       `[team-messages] firing push fan-out sender=${me.id} message_id=${(res.data as { id: string }).id}`,
     );
+    // Personalized push body: "<First name> posted in Juice Box". Sender's
+    // first name is already in scope via the signed session and is what we
+    // wrote into team_messages.salesperson_name above, so this exposes no
+    // information the recipient couldn't already see in the feed. Trim
+    // guards against whitespace; the `|| "Someone"` fallback covers any
+    // future schema relaxation of salespeople.first_name. Message content,
+    // last names, emails, and role flags are intentionally NOT included.
+    const senderName = me.first_name?.trim() || "Someone";
     try {
       await fanOutJuiceBoxPush({
         excludeSalespersonId: me.id,
         payload: {
-          title: "Elevate AE",
-          body: "New Juice Box post 🍊",
+          // Title names the surface so OS notifications (especially when
+          // tag-collapsed on Android) stay unambiguously "Juice Box". Body
+          // names the actor.
+          title: "Juice Box",
+          body: `${senderName} posted in Juice Box`,
           url: "/juice-box",
         },
       });
