@@ -2,10 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
-import { CalendarPlus, Check, ChevronDown, Plus } from "lucide-react";
+import {
+  CalendarPlus,
+  Check,
+  ChevronDown,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
-import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
+import {
+  formatDateMDY,
+  formatTaskMoment,
+  todayInAppTimezone,
+} from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import type { AeTask } from "@/lib/ae-tasks";
 
@@ -29,6 +40,16 @@ function errorOf(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Returns true if a task has been touched since insert. The trigger fires
+ * only on UPDATE; at INSERT both timestamps come from NOW() in the same
+ * transaction, so they're bit-identical and any difference means an edit
+ * (or completion) ran against the row.
+ */
+function wasEdited(task: AeTask): boolean {
+  return task.updated_at > task.created_at;
+}
+
 export function AeTasksCard() {
   // `null` = not loaded yet; an array (possibly empty) = loaded.
   const [tasks, setTasks] = useState<AeTask[] | null>(null);
@@ -41,6 +62,14 @@ export function AeTasksCard() {
   const [completingId, setCompletingId] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
   const [expanded, setExpanded] = useState(false);
+
+  // Inline edit state. Only one task is editable at a time so a single
+  // bag of fields is enough.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDueDate, setEditDueDate] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -115,6 +144,86 @@ export function AeTasksCard() {
       setError(err instanceof Error ? err.message : "Could not complete task.");
     } finally {
       setCompletingId(null);
+    }
+  };
+
+  const startEdit = (task: AeTask) => {
+    setEditingId(task.id);
+    setEditTitle(task.title);
+    setEditDueDate(task.due_date ?? "");
+    setError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditTitle("");
+    setEditDueDate("");
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingId || savingEdit) return;
+    const title = editTitle.trim();
+    if (!title) return;
+
+    setSavingEdit(true);
+    setError(null);
+    try {
+      // Send null to clear a previously set due date; an empty string in the
+      // <input> means "no due date" for this UI.
+      const res = await apiFetch(`/api/tasks/${editingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          due_date: editDueDate ? editDueDate : null,
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as
+        | { task?: AeTask; error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(errorOf(payload, `Could not save task (${res.status})`));
+      }
+      cancelEdit();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save task.");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleDelete = async (task: AeTask) => {
+    if (deletingId) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`Delete "${task.title}"?`)
+    ) {
+      return;
+    }
+    setDeletingId(task.id);
+    setError(null);
+    try {
+      // Soft delete: status="cancelled" is filtered out everywhere the card
+      // renders tasks. Server-side ownership check happens in the PATCH route.
+      const res = await apiFetch(`/api/tasks/${task.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "cancelled" }),
+      });
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => null)) as unknown;
+        throw new Error(
+          errorOf(payload, `Could not delete task (${res.status})`),
+        );
+      }
+      if (editingId === task.id) cancelEdit();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete task.");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -287,8 +396,23 @@ export function AeTasksCard() {
                         task={task}
                         overdue={bucket.key === "overdue"}
                         busy={completingId === task.id}
-                        disabled={completingId !== null}
+                        deleting={deletingId === task.id}
+                        disabled={
+                          completingId !== null ||
+                          deletingId !== null ||
+                          (editingId !== null && editingId !== task.id)
+                        }
+                        editing={editingId === task.id}
+                        editTitle={editTitle}
+                        editDueDate={editDueDate}
+                        savingEdit={savingEdit}
+                        onEditTitleChange={setEditTitle}
+                        onEditDueDateChange={setEditDueDate}
                         onComplete={() => handleComplete(task.id)}
+                        onStartEdit={() => startEdit(task)}
+                        onCancelEdit={cancelEdit}
+                        onSaveEdit={handleSaveEdit}
+                        onDelete={() => handleDelete(task)}
                       />
                     ))}
                   </ul>
@@ -357,20 +481,108 @@ export function AeTasksCard() {
   );
 }
 
-/** A single open task with a tap-to-complete checkbox. */
+/** A single open task with a tap-to-complete checkbox and edit/delete actions. */
 function TaskRow({
   task,
   overdue,
   busy,
+  deleting,
   disabled,
+  editing,
+  editTitle,
+  editDueDate,
+  savingEdit,
+  onEditTitleChange,
+  onEditDueDateChange,
   onComplete,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onDelete,
 }: {
   task: AeTask;
   overdue: boolean;
   busy: boolean;
+  deleting: boolean;
   disabled: boolean;
+  editing: boolean;
+  editTitle: string;
+  editDueDate: string;
+  savingEdit: boolean;
+  onEditTitleChange: (v: string) => void;
+  onEditDueDateChange: (v: string) => void;
   onComplete: () => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (e: React.FormEvent) => void;
+  onDelete: () => void;
 }) {
+  const edited = wasEdited(task);
+  const stampLabel = edited
+    ? `Updated ${formatTaskMoment(task.updated_at)}`
+    : `Added ${formatTaskMoment(task.created_at)}`;
+
+  if (editing) {
+    return (
+      <li className="rounded-md px-1 py-1.5">
+        <form onSubmit={onSaveEdit} className="space-y-1.5">
+          <Input
+            aria-label="Edit task title"
+            value={editTitle}
+            onChange={(e) => onEditTitleChange(e.target.value)}
+            disabled={savingEdit}
+            maxLength={200}
+            autoFocus
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <CalendarPlus
+                aria-hidden="true"
+                className="size-3.5 shrink-0 text-muted-foreground"
+              />
+              <Input
+                aria-label="Edit due date"
+                type="date"
+                value={editDueDate}
+                onChange={(e) => onEditDueDateChange(e.target.value)}
+                disabled={savingEdit}
+                className="h-7 w-auto text-xs"
+              />
+              {editDueDate && (
+                <button
+                  type="button"
+                  onClick={() => onEditDueDateChange("")}
+                  disabled={savingEdit}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="ml-auto flex items-center gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={onCancelEdit}
+                disabled={savingEdit}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={savingEdit || editTitle.trim().length === 0}
+              >
+                {savingEdit ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        </form>
+      </li>
+    );
+  }
+
   return (
     <li className="flex items-center gap-1.5 rounded-md px-1 py-0.5 transition-colors hover:bg-muted/50">
       {/* 44px hit area for comfortable mobile tapping; the visible checkbox
@@ -404,11 +616,35 @@ function TaskRow({
             {formatDateMDY(task.due_date)}
           </p>
         )}
+        <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+          {stampLabel}
+        </p>
       </div>
-      {busy && (
+      {busy || deleting ? (
         <span className="shrink-0 self-center text-xs text-muted-foreground">
-          Saving…
+          {deleting ? "Deleting…" : "Saving…"}
         </span>
+      ) : (
+        <div className="flex shrink-0 items-center">
+          <button
+            type="button"
+            aria-label={`Edit "${task.title}"`}
+            onClick={onStartEdit}
+            disabled={disabled}
+            className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Pencil aria-hidden="true" className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label={`Delete "${task.title}"`}
+            onClick={onDelete}
+            disabled={disabled}
+            className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Trash2 aria-hidden="true" className="size-3.5" />
+          </button>
+        </div>
       )}
     </li>
   );

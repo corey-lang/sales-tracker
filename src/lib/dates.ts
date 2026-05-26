@@ -1,4 +1,4 @@
-import { format, parseISO } from "date-fns";
+import { format, parseISO, subDays } from "date-fns";
 
 // User-facing date display: mm-dd-yyyy.
 // Inputs and DB values stay yyyy-mm-dd (ISO) so they remain sortable / valid
@@ -6,6 +6,36 @@ import { format, parseISO } from "date-fns";
 export function formatDateMDY(input: string | Date): string {
   const d = typeof input === "string" ? parseISO(input) : input;
   return format(d, "MM-dd-yyyy");
+}
+
+/**
+ * Friendly "today at 9:42 AM" / "yesterday at 9:42 AM" / fallback to
+ * "MM-dd-yyyy at 9:42 AM" for older timestamps. Day boundaries and the
+ * displayed time-of-day are computed in `APP_TIMEZONE` so a late-night
+ * write in Denver doesn't read as "yesterday" to a browser in another zone.
+ */
+export function formatTaskMoment(iso: string): string {
+  const instant = parseISO(iso);
+  const dateFmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const timeFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const tsDate = dateFmt.format(instant);
+  const today = todayInAppTimezone();
+  const todayDate = format(today, "yyyy-MM-dd");
+  const yesterdayDate = format(subDays(today, 1), "yyyy-MM-dd");
+  const time = timeFmt.format(instant);
+  if (tsDate === todayDate) return `today at ${time}`;
+  if (tsDate === yesterdayDate) return `yesterday at ${time}`;
+  return `${formatDateMDY(tsDate)} at ${time}`;
 }
 
 /**
