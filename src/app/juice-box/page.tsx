@@ -61,6 +61,8 @@ import {
 } from "@/lib/juice-box-cache";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { LinkPreviewCard } from "@/components/link-preview-card";
+import { extractFirstUrl } from "@/lib/url-detection";
 
 // Long-press duration (ms) to enter Reply mode from a message card.
 // Tuned to fire before iOS Safari's text-selection menu (~600ms) so the
@@ -3016,6 +3018,10 @@ function FeedCard({
   );
   const media = teamMessageMedia(message);
   const hasText = message.message.length > 0;
+  // First http(s) URL in the body, if any. Server-side /api/link-preview
+  // fetches metadata and the card renders nothing on failure, so this is
+  // safe to compute optimistically here.
+  const previewUrl = hasText ? extractFirstUrl(message.message) : null;
 
   return (
     <Card
@@ -3103,6 +3109,12 @@ function FeedCard({
           <p className="whitespace-pre-wrap break-words pl-[2.625rem] text-base font-medium leading-normal text-foreground">
             {message.message}
           </p>
+        )}
+        {previewUrl && (
+          // Sits in the same indented column as the body so the preview
+          // reads as part of the message, not a peer card. The card
+          // self-hides if the server can't produce a preview.
+          <LinkPreviewCard url={previewUrl} className="ml-[2.625rem]" />
         )}
         {media && (
           <FeedMedia media={media} onOpen={() => onOpenMedia(media)} />
