@@ -138,14 +138,17 @@ export default function ActivityReportPage() {
     setLoad({ status: "loading" });
 
     Promise.all([
-      // Real AEs only — admins, the assistant, and the test account don't have
-      // goal progress to report on.
+      // Real AEs only — admins, the assistant, the test account, and
+      // juice_box_only guests (Travis, Rizz, Faith, …) don't have goal
+      // progress to report on. Positive `role = 'ae'` allow-list keeps any
+      // future role out automatically; is_admin / is_test stay in the
+      // predicate as belt-and-suspenders against a misconfigured row.
       supabase
         .from("salespeople")
         .select("id, first_name")
+        .eq("role", "ae")
         .eq("is_admin", false)
         .eq("is_test", false)
-        .neq("role", "assistant")
         .order("first_name", { ascending: true }),
       supabase
         .from("activity_entries")
