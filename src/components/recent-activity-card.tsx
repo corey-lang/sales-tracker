@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { formatActivityStamp } from "@/lib/dates";
+import { cn } from "@/lib/utils";
 
 import {
   Card,
@@ -51,9 +53,17 @@ function errorOf(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Default visible count before the user expands the list. The API still
+ * returns the full window — this is purely a client-side display cap to
+ * keep the card compact when the user has been busy.
+ */
+const DEFAULT_VISIBLE = 3;
+
 export function RecentActivityCard({ refreshKey }: Props) {
   const [events, setEvents] = useState<RecentActivityEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +90,15 @@ export function RecentActivityCard({ refreshKey }: Props) {
     };
   }, [refreshKey]);
 
+  const total = events?.length ?? 0;
+  const overflow = total > DEFAULT_VISIBLE;
+  const visible = events
+    ? expanded
+      ? events
+      : events.slice(0, DEFAULT_VISIBLE)
+    : null;
+  const hiddenCount = total - DEFAULT_VISIBLE;
+
   return (
     <Card size="sm">
       <CardHeader>
@@ -96,26 +115,45 @@ export function RecentActivityCard({ refreshKey }: Props) {
           >
             {error}
           </p>
-        ) : events.length === 0 ? (
+        ) : total === 0 ? (
           <p className="text-sm text-muted-foreground">
             No recent activity yet. Log your first win.
           </p>
         ) : (
-          <ul className="divide-y divide-border/60">
-            {events.map((ev) => (
-              <li
-                key={ev.id}
-                className="flex flex-col gap-0.5 py-1.5 first:pt-0 last:pb-0 sm:flex-row sm:items-baseline sm:gap-2"
+          <div className="space-y-1.5">
+            <ul className="divide-y divide-border/60">
+              {visible?.map((ev) => (
+                <li
+                  key={ev.id}
+                  className="flex flex-col gap-0.5 py-1 first:pt-0 last:pb-0 sm:flex-row sm:items-baseline sm:gap-2"
+                >
+                  <span className="shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground tabular-nums">
+                    {formatActivityStamp(ev.occurred_at)}
+                  </span>
+                  <span className="min-w-0 text-sm leading-snug break-words">
+                    {ev.text}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {overflow && (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                aria-expanded={expanded}
+                className="flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
               >
-                <span className="shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground tabular-nums">
-                  {formatActivityStamp(ev.occurred_at)}
-                </span>
-                <span className="text-sm leading-snug break-words">
-                  {ev.text}
-                </span>
-              </li>
-            ))}
-          </ul>
+                <ChevronDown
+                  aria-hidden="true"
+                  className={cn(
+                    "size-3.5 transition-transform",
+                    expanded && "rotate-180",
+                  )}
+                />
+                {expanded ? "Show Less" : `Show ${hiddenCount} More`}
+              </button>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

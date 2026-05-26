@@ -194,6 +194,8 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
+        <RecentActivityCard refreshKey={entryVersion} />
+
         <MyWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
 
         <EditWeekCard
@@ -201,8 +203,6 @@ export default function DashboardPage() {
           refreshKey={entryVersion}
           onSaved={() => setEntryVersion((n) => n + 1)}
         />
-
-        <RecentActivityCard refreshKey={entryVersion} />
 
         {quote && (
           <p className="px-3 pb-1 text-center text-xs italic text-muted-foreground/70">
