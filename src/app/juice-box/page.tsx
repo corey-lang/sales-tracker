@@ -2826,7 +2826,10 @@ function FeedList({
   }
 
   return (
-    <section className="space-y-2">
+    // space-y-2.5 (10px) instead of space-y-2 (8px) — a small bump that
+    // makes adjacent message cards read as distinct without bloating the
+    // feed when conversations get active. Polish-only.
+    <section className="space-y-2.5">
       {/* Subtle "Refreshing…" pill. Only shows after a cache-hydration
           first paint while the bootstrap fetch is still in flight — so
           the user knows the feed is being updated without a full
@@ -3052,11 +3055,18 @@ function FeedCard({
       onPointerLeave={cancelLongPress}
       onPointerMove={moveLongPress}
     >
-      <CardContent className="space-y-1 px-3">
+      {/* space-y-1.5 (6px) between header / body / reactions — a small
+          increase from space-y-1 that gives the body room to breathe at
+          its slightly larger size without making the card feel taller. */}
+      <CardContent className="space-y-1.5 px-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2.5">
             <Avatar name={message.salesperson_name} />
-            <p className="min-w-0 truncate text-[15px] leading-tight">
+            {/* Sender row uses text-base (16px) to match the body so the
+                header no longer reads visually smaller than the message
+                content. Hierarchy is preserved via font-bold on the
+                sender name + the muted timestamp. */}
+            <p className="min-w-0 truncate text-base leading-tight">
               <span className="font-bold">{message.salesperson_name}</span>
               {isMine && (
                 <span className="ml-1.5 inline-flex items-center rounded-full bg-primary/15 px-1.5 py-px align-[1px] text-[10px] font-semibold uppercase tracking-wide text-primary ring-1 ring-inset ring-primary/25">
@@ -3085,7 +3095,12 @@ function FeedCard({
           />
         )}
         {hasText && (
-          <p className="whitespace-pre-wrap pl-[2.625rem] text-[15px] font-medium leading-snug text-foreground">
+          // Body bumped from text-[15px] to text-base (16px) — the iOS
+          // browser default — and leading nudged from snug (1.375) to
+          // normal (1.5) for noticeably easier reading on mobile. The
+          // pl-[2.625rem] indent still aligns to the sender name because
+          // avatar size + header gap are unchanged.
+          <p className="whitespace-pre-wrap break-words pl-[2.625rem] text-base font-medium leading-normal text-foreground">
             {message.message}
           </p>
         )}
