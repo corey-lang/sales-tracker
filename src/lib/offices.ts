@@ -38,6 +38,10 @@ export function isOfficeEnvironment(
  * Required columns: `name` + `salesperson_id` + `environment`. Everything
  * else is nullable because real CSVs are sparse (an import may carry
  * names + addresses but no lat/lng yet — those get geocoded later).
+ *
+ * `office_notes` + `next_action` (migration #27) are the persistent
+ * "office memory" — long-term reference info and the next-step intent.
+ * Both start NULL on import; the future office-detail UI will edit them.
  */
 export type OfficeRow = {
   id: string;
@@ -53,11 +57,23 @@ export type OfficeRow = {
   source: string | null;
   dedupe_key: string;
   environment: OfficeEnvironment;
+  /** Persistent reference info. Survives across visits. */
+  office_notes: string | null;
+  /** Persistent next-step intent. Survives across visits. */
+  next_action: string | null;
   created_at: string;
   updated_at: string;
 };
 
-/** One per-rep visit log entry. */
+/**
+ * One per-rep visit log entry.
+ *
+ * `note` is the visit's free-text note — the "what happened on this
+ * trip" memory ("Dropped off donuts", "Met with Sarah and Mike",
+ * "Follow up next week"). It's per-visit and historical, distinct
+ * from the per-office persistent `office_notes` / `next_action` on
+ * `OfficeRow`.
+ */
 export type OfficeVisitRow = {
   id: string;
   office_id: string;
@@ -77,6 +93,38 @@ export type OfficeImportBatchRow = {
   row_count: number;
   created_at: string;
 };
+
+/**
+ * Aggregate "open this office" payload — what the future office-detail
+ * surface (and any map detail popover) will fetch in one round trip.
+ *
+ * Composed of:
+ *   * The office row itself, including the persistent `office_notes`
+ *     and `next_action` memory.
+ *   * The visit log, newest-first. May be capped by the read route at
+ *     a sane upper bound (the future UI's "Visit History" timeline
+ *     paginates via a separate older-history call if needed).
+ *   * `last_visit_at` — the `visited_at` of the most recent visit, or
+ *     null when the office has never been visited. Derived so the UI
+ *     doesn't have to peek into the visits array.
+ *   * `visit_count` — the AUTHORITATIVE count of visits, NOT
+ *     visits.length. The read route uses Postgres COUNT(*) so this
+ *     stays accurate even if visits was capped.
+ */
+export type OfficeDetail = {
+  office: OfficeRow;
+  visits: OfficeVisitRow[];
+  last_visit_at: string | null;
+  visit_count: number;
+};
+
+/**
+ * Visible cap on the visits returned in OfficeDetail. The
+ * authoritative `visit_count` is reported separately, so the UI can
+ * show "27 visits" even when only the most-recent 200 ship inline.
+ * Older history can be fetched on demand by a future paginated route.
+ */
+export const OFFICE_VISITS_DETAIL_LIMIT = 200;
 
 /**
  * Normalizes a string for dedupe-key composition: lowercase, collapse
