@@ -28,11 +28,9 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //
 // ACCESS
 //   is_admin OR role === "assistant". AEs and juice_box_only are
-//   redirected. The route handler enforces requireAdmin separately, so
-//   a non-admin assistant cannot actually import even if they reach
-//   the page — they'll see a 403 in the result card. (Future work:
-//   widen the route to admins + assistants if/when assistants get
-//   import responsibility.)
+//   redirected. The server route enforces the same gate via
+//   `requireAdminOrAssistant`, so the UI and API agree — an assistant
+//   who reaches the page can actually import.
 //
 // SCOPE
 //   No map, no read endpoint, no production import. CSV → preview →

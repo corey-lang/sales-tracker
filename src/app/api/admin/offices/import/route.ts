@@ -6,7 +6,7 @@ import {
   badRequest,
   handleApiError,
   parseBody,
-  requireAdmin,
+  requireAdminOrAssistant,
 } from "@/lib/server/auth";
 import {
   OFFICES_TABLE,
@@ -32,9 +32,14 @@ import {
 //   can be lifted in a one-line route change when the feature ships.
 //
 // ACCESS
-//   requireAdmin(req) — non-admins (AEs, assistant, juice_box_only)
-//   are rejected outright. Identity comes from the signed session;
-//   `uploaded_by` is the admin's id, never a client-supplied value.
+//   requireAdminOrAssistant(req) — admins AND assistants can import.
+//   AEs and juice_box_only are rejected outright (403). Identity comes
+//   from the signed session; `uploaded_by` is the caller's id, never
+//   a client-supplied value.
+//   Note: the URL still lives under `/api/admin/` because the existing
+//   page references it and a rename would be churn beyond this fix.
+//   The gate, not the URL prefix, is the source of truth for who can
+//   call this route.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -223,7 +228,7 @@ function resolveRowSalesperson(
 
 export async function POST(req: Request) {
   try {
-    const me = await requireAdmin(req);
+    const me = await requireAdminOrAssistant(req);
     const body = await parseBody(req, RequestSchema);
 
     // SANDBOX GUARD — see header comment.

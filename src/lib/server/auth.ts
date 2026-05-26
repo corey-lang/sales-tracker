@@ -287,6 +287,35 @@ export async function requireReviewer(
   return me;
 }
 
+/**
+ * Requires the caller to be EITHER `is_admin = true` OR `role === "assistant"`.
+ *
+ * Distinct from `requireReviewer` in two ways:
+ *   * The gate is `is_admin || role==='assistant'` rather than role-only,
+ *     so a Tonja-style admin-assistant passes via either branch and a
+ *     future non-admin assistant still passes via the role branch.
+ *   * Semantically tied to admin tooling (sandbox imports, future
+ *     admin/assistant utilities) rather than business-card review.
+ *
+ * juice_box_only is rejected outright as belt-and-braces — even if
+ * `is_admin` were ever misconfigured on such a row, the role check
+ * fires first.
+ */
+export async function requireAdminOrAssistant(
+  req: Request,
+): Promise<AuthedSalesperson> {
+  const me = await requireSalesperson(req);
+  if (me.role === "juice_box_only") {
+    throw forbidden("This action is not available for your account.");
+  }
+  if (!me.is_admin && me.role !== "assistant") {
+    throw forbidden(
+      "Admin or assistant access is required for this action.",
+    );
+  }
+  return me;
+}
+
 /** A business-card scan, resolved + access-checked for the request's caller. */
 export type ScanAccess = {
   me: AuthedSalesperson;
