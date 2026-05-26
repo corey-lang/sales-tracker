@@ -167,6 +167,10 @@ export type AuthedSalesperson = {
   is_admin: boolean;
   /** True for the seeded test account — routes use this to stay test-safe. */
   is_test: boolean;
+  /** Scoped permission for the office-import surface (migration #26).
+   *  Admins bypass this flag entirely; non-admins must have it set to
+   *  reach `/api/admin/offices/import`. See `requireOfficeImporter`. */
+  can_import_offices: boolean;
 };
 
 function extractToken(req: Request): string | null {
@@ -199,12 +203,14 @@ export async function requireSalesperson(
     throw unauthorized("Invalid or expired session. Please sign in again.");
   }
 
-  // role + is_test are re-read from the DB — never trusted from the token or
-  // the client. is_test is the authoritative test-account flag.
+  // role + is_test + can_import_offices are re-read from the DB — never
+  // trusted from the token or the client. is_test is the authoritative
+  // test-account flag; can_import_offices is the scoped grant for the
+  // office-import surface.
   const supabase = getServerSupabase();
   const res = await supabase
     .from("salespeople")
-    .select("id, first_name, role, is_test")
+    .select("id, first_name, role, is_test, can_import_offices")
     .eq("id", payload.sub)
     .maybeSingle();
 
@@ -220,6 +226,7 @@ export async function requireSalesperson(
     first_name: string;
     role: unknown;
     is_test: boolean | null;
+    can_import_offices: boolean | null;
   };
   const role: UserRole = isUserRole(row.role) ? row.role : "ae";
 
@@ -229,6 +236,7 @@ export async function requireSalesperson(
     role,
     is_admin: role === "admin",
     is_test: isTestAccount(row),
+    can_import_offices: row.can_import_offices === true,
   };
 }
 
@@ -288,29 +296,33 @@ export async function requireReviewer(
 }
 
 /**
- * Requires the caller to be EITHER `is_admin = true` OR `role === "assistant"`.
+ * Requires the caller to be allowed to import offices.
  *
- * Distinct from `requireReviewer` in two ways:
- *   * The gate is `is_admin || role==='assistant'` rather than role-only,
- *     so a Tonja-style admin-assistant passes via either branch and a
- *     future non-admin assistant still passes via the role branch.
- *   * Semantically tied to admin tooling (sandbox imports, future
- *     admin/assistant utilities) rather than business-card review.
+ * Gate: `is_admin === true` OR `can_import_offices === true`.
+ *   * Admins always pass (bypass the per-user flag).
+ *   * Non-admins must have the scoped `salespeople.can_import_offices`
+ *     permission set (see migration #26).
+ *   * `juice_box_only` is rejected outright as belt-and-braces, even if
+ *     `can_import_offices` were ever misconfigured on such a row.
+ *   * Plain assistants without the flag are rejected — assistant role
+ *     alone is NOT enough anymore (Tonja gets in via the flag).
  *
- * juice_box_only is rejected outright as belt-and-braces — even if
- * `is_admin` were ever misconfigured on such a row, the role check
- * fires first.
+ * Replaces the prior `requireAdminOrAssistant` helper, which granted
+ * the import surface to ALL assistants by role. The narrower per-user
+ * permission keeps role membership and capabilities orthogonal so we
+ * can grant import access to specific users without granting the rest
+ * of the assistant capability bundle.
  */
-export async function requireAdminOrAssistant(
+export async function requireOfficeImporter(
   req: Request,
 ): Promise<AuthedSalesperson> {
   const me = await requireSalesperson(req);
   if (me.role === "juice_box_only") {
     throw forbidden("This action is not available for your account.");
   }
-  if (!me.is_admin && me.role !== "assistant") {
+  if (!me.is_admin && !me.can_import_offices) {
     throw forbidden(
-      "Admin or assistant access is required for this action.",
+      "Office import access is required for this action.",
     );
   }
   return me;

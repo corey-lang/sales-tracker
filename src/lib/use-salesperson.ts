@@ -15,6 +15,12 @@ export type StoredSalesperson = {
    *  session, even though the UI no longer gates anything on it. Optional for
    *  back-compat with sessions written before this field was shipped. */
   is_test?: boolean;
+  /** Scoped permission for the office-import surface (see migration #26).
+   *  Optional for back-compat with sessions issued before the column shipped;
+   *  the UI treats missing as `false`. Server routes re-read the canonical
+   *  value from `salespeople.can_import_offices` on every request, so this
+   *  client copy is only a UX hint — never the source of truth. */
+  can_import_offices?: boolean;
   role: UserRole;
   /** Signed session token issued by /api/auth/login; sent on every API call. */
   token: string;
@@ -41,11 +47,19 @@ function hydrate(raw: unknown): StoredSalesperson | null {
       : "ae";
   const is_test =
     typeof obj.is_test === "boolean" ? obj.is_test : undefined;
+  // Optional — sessions issued before the column shipped won't carry it.
+  // Missing reads as undefined; the UI compares with `=== true` so the
+  // unset case stays safe-default "no access".
+  const can_import_offices =
+    typeof obj.can_import_offices === "boolean"
+      ? obj.can_import_offices
+      : undefined;
   return {
     id: obj.id,
     first_name: obj.first_name,
     is_admin,
     is_test,
+    can_import_offices,
     role,
     token: obj.token,
   };

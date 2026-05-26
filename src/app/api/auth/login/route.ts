@@ -39,7 +39,9 @@ export async function POST(req: Request) {
     // theme/feature previews without relying on a name match.
     const res = await supabase
       .from("salespeople")
-      .select("id, first_name, admin_pin, role, is_test")
+      .select(
+        "id, first_name, admin_pin, role, is_test, can_import_offices",
+      )
       .eq("first_name", name)
       .maybeSingle();
 
@@ -56,6 +58,7 @@ export async function POST(req: Request) {
       admin_pin: string | null;
       role: unknown;
       is_test: boolean | null;
+      can_import_offices: boolean | null;
     };
     const role: UserRole = isUserRole(row.role) ? row.role : "ae";
     const isAdmin = role === "admin";
@@ -88,6 +91,11 @@ export async function POST(req: Request) {
         first_name: row.first_name,
         is_admin: isAdmin,
         is_test: row.is_test === true,
+        // Scoped permission flag — sent in the session payload so the
+        // UI can gate office-import surfaces client-side. Server route
+        // re-reads from the DB on every request via requireSalesperson,
+        // so this client copy is only a UX hint.
+        can_import_offices: row.can_import_offices === true,
         role,
       },
       token,

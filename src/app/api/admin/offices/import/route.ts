@@ -6,7 +6,7 @@ import {
   badRequest,
   handleApiError,
   parseBody,
-  requireAdminOrAssistant,
+  requireOfficeImporter,
 } from "@/lib/server/auth";
 import {
   OFFICES_TABLE,
@@ -32,10 +32,12 @@ import {
 //   can be lifted in a one-line route change when the feature ships.
 //
 // ACCESS
-//   requireAdminOrAssistant(req) — admins AND assistants can import.
-//   AEs and juice_box_only are rejected outright (403). Identity comes
-//   from the signed session; `uploaded_by` is the caller's id, never
-//   a client-supplied value.
+//   requireOfficeImporter(req) — admins pass automatically; anyone
+//   else needs the per-user `salespeople.can_import_offices` flag
+//   (migration #26). AEs without the flag, plain assistants without
+//   the flag, and juice_box_only are all rejected outright (403).
+//   Identity comes from the signed session; `uploaded_by` is the
+//   caller's id, never a client-supplied value.
 //   Note: the URL still lives under `/api/admin/` because the existing
 //   page references it and a rename would be churn beyond this fix.
 //   The gate, not the URL prefix, is the source of truth for who can
@@ -228,7 +230,7 @@ function resolveRowSalesperson(
 
 export async function POST(req: Request) {
   try {
-    const me = await requireAdminOrAssistant(req);
+    const me = await requireOfficeImporter(req);
     const body = await parseBody(req, RequestSchema);
 
     // SANDBOX GUARD — see header comment.
