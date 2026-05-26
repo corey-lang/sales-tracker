@@ -215,7 +215,15 @@ export async function requireSalesperson(
     .maybeSingle();
 
   if (res.error) {
-    throw new ApiError(500, `Identity lookup failed: ${res.error.message}`);
+    // Provider error text never reaches the caller — it can include
+    // schema names, connection state, or query fragments. Logged
+    // server-side with the `[auth]` prefix; caller sees a sanitized
+    // 500. Matches the posture in /api/admin/offices/import and
+    // /api/offices/[id].
+    console.warn(
+      `[auth] identity lookup failed sub=${payload.sub} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not verify your session.");
   }
   if (!res.data) {
     throw unauthorized("This account no longer exists. Please sign in again.");
@@ -328,6 +336,34 @@ export async function requireOfficeImporter(
   return me;
 }
 
+/**
+ * Requires the caller to be the test account (Phase 1A office-detail surface).
+ *
+ * Gate: `is_test === true` AND role !== "juice_box_only".
+ *   * The single seeded test account passes. Admins who happen to be flagged
+ *     `is_test` (i.e. impersonating via the test account row) also pass.
+ *   * Real AEs are rejected — the office-detail UI is sandboxed until the
+ *     production rollout. Plain admins without `is_test` are rejected too;
+ *     to test, an admin signs in as the test account.
+ *   * `juice_box_only` is rejected outright as belt-and-braces.
+ *
+ * This helper is the only place the test-only office surface enforces its
+ * audience. Lifting to production = swap this for `requireAeToolAccess` (or
+ * a new ownership-only helper) at every call site.
+ */
+export async function requireTestAccount(
+  req: Request,
+): Promise<AuthedSalesperson> {
+  const me = await requireSalesperson(req);
+  if (me.role === "juice_box_only") {
+    throw forbidden("This action is not available for your account.");
+  }
+  if (!me.is_test) {
+    throw forbidden("This surface is only available to the test account.");
+  }
+  return me;
+}
+
 /** A business-card scan, resolved + access-checked for the request's caller. */
 export type ScanAccess = {
   me: AuthedSalesperson;
@@ -365,7 +401,10 @@ export async function requireScanAccess(
     .maybeSingle();
 
   if (res.error) {
-    throw new ApiError(500, `Scan lookup failed: ${res.error.message}`);
+    console.warn(
+      `[auth] scan lookup failed scan_id=${scanId} caller=${me.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not load that scan.");
   }
   if (!res.data) {
     throw notFound("Scan not found.");

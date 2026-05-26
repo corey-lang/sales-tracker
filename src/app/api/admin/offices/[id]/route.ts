@@ -156,7 +156,14 @@ export async function GET(
           : visits.length,
     };
 
-    return Response.json({ detail });
+    // `private, no-store` matches /api/offices/[id] + /api/me/permissions
+    // — office detail can mutate at any moment (notes edits, fresh
+    // visits) and the response is per-caller, so neither shared caches
+    // nor the browser should keep a copy.
+    return Response.json(
+      { detail },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
   } catch (err) {
     return handleApiError(err);
   }
