@@ -61,6 +61,15 @@ export type OfficeRow = {
   office_notes: string | null;
   /** Persistent next-step intent. Survives across visits. */
   next_action: string | null;
+  /** Contact phone (`_Phone` in Badger). Refreshed on every import —
+   *  contact info is factual source-system data, not AE-edited. */
+  office_phone: string | null;
+  /** Contact email (`_Email` in Badger). Refreshed on every import. */
+  office_email: string | null;
+  /** Opaque Badger-side UUID (`_CustomerId`). Stored so future surfaces
+   *  can deep-link back to the Badger record; not yet part of the
+   *  dedupe key — see offices_badger_fields.sql. */
+  external_badger_id: string | null;
   created_at: string;
   updated_at: string;
 };

@@ -71,19 +71,43 @@ type FieldName =
   | "state"
   | "zip"
   | "latitude"
-  | "longitude";
+  | "longitude"
+  // Badger persistence fields (offices_badger_fields.sql + #27 columns).
+  | "office_phone"
+  | "office_email"
+  | "external_badger_id"
+  | "office_notes"
+  | "next_action";
 
 /**
  * Header aliases for fuzzy CSV column matching. Lowercase, trimmed
  * comparison. Order within an alias list doesn't matter — the first
- * column to match wins. Unknown headers are simply ignored, so a CSV
- * with extra columns ("Notes", "Owner ID", "Place ID") doesn't break
- * the import.
+ * column to match wins. Unknown headers fall through to the
+ * "ignored" bucket in the preview banner so a renamed column doesn't
+ * silently drop data without the user seeing it called out.
  *
- * The list is biased toward what Badger Maps exports out of the box
- * ("Location Name", "Address Line 1", "Zip/Postal Code", etc.) plus the
- * shorter forms an admin might type when prepping a CSV by hand
- * ("Office Name", "Street", "Zip").
+ * The list covers three shapes of source CSV:
+ *   * What an admin types by hand ("Office Name", "Street", "Zip").
+ *   * Badger Maps' standard export ("Location Name", "Address Line 1",
+ *     "Zip/Postal Code", "Account Owner").
+ *   * Badger Maps' UNDERSCORE-PREFIXED export. This is the shape
+ *     Badger uses when exporting from a saved view — the underscores
+ *     mark fields that came from the location record itself (vs.
+ *     derived joins) and show up verbatim in the CSV header row.
+ *     The full Badger surface — `_Name`, `_Address`, `_Latitude`,
+ *     `_Longitude`, `_Phone`, `_Email`, `_CustomerId`, `_Notes`,
+ *     `_FollowUp` — is mapped to schema columns after
+ *     offices_badger_fields.sql (migration #29). `_Notes` and
+ *     `_FollowUp` are forwarded but the import route only SEEDS them
+ *     on first create — re-imports never overwrite AE edits, even
+ *     when the CSV column carries a different value.
+ *
+ * Remaining Badger saved-view columns that don't have a schema home
+ * (`Residential?`, `Frequency`, `Contact`, `Brochure Dropoff`,
+ * `Import Date`, `_Address Line 2`) live in `ACKNOWLEDGED_HEADERS`
+ * below so the preview can show them as "we see this but don't
+ * store it yet" rather than dumping them into the generic Ignored
+ * list.
  */
 const HEADER_ALIASES: Record<FieldName, readonly string[]> = {
   salesperson_id: [
@@ -117,17 +141,28 @@ const HEADER_ALIASES: Record<FieldName, readonly string[]> = {
     "account name",
     "company",
     "company name",
+    // Badger saved-view export shape.
+    "_name",
   ],
   street: [
     "street",
     "address",
     "street address",
+    "full address",
     // Badger uses "Address Line 1" / "Address Line 2"; we consume
     // line 1 as the street and ignore line 2 (rare apartment/suite
     // detail that the dedupe key would normalize away anyway).
     "address line 1",
     "address 1",
     "address1",
+    // Badger saved-view export shape. NOTE: `_Address` is the FULL
+    // address as one string ("12 Main St, Orem, UT 84057"). We store
+    // the whole string in `street` because the schema's `street`
+    // column is sized for it (TEXT) and the dedupe key normalizes
+    // street + zip — putting the full address in `street` actually
+    // makes dedupe MORE stable across exports that have/don't have
+    // the city/state split out. The preview banner explains this.
+    "_address",
   ],
   city: ["city", "town"],
   state: [
@@ -145,9 +180,48 @@ const HEADER_ALIASES: Record<FieldName, readonly string[]> = {
     "zip/postal code",
     "postcode",
   ],
-  latitude: ["latitude", "lat"],
-  longitude: ["longitude", "lng", "lon", "long"],
+  latitude: ["latitude", "lat", "_latitude"],
+  longitude: ["longitude", "lng", "lon", "long", "_longitude"],
+  // Badger contact + identity fields. These now have schema homes
+  // (offices_badger_fields.sql adds office_phone, office_email,
+  // external_badger_id) so they map and import like any other field.
+  // Aliases stay narrow on purpose — the spec called out Badger as
+  // the only target, and "flexible header detection" is explicitly
+  // out of scope.
+  office_phone: ["_phone", "phone"],
+  office_email: ["_email", "email"],
+  external_badger_id: ["_customerid", "_customer id", "customer id"],
+  // Notes / next_action — schema columns existed already (#27). The
+  // server SEEDS these on first create only and never overwrites
+  // them on re-import, so AE edits made through the office-detail
+  // UI are preserved.
+  office_notes: ["_notes", "notes"],
+  next_action: ["_followup", "_follow up", "follow up", "next action"],
 };
+
+/**
+ * Headers we RECOGNIZE but intentionally do not import into the
+ * current schema. Lowercased + trimmed. Shown in the preview banner
+ * as "Recognized but not stored yet" so the user knows their column
+ * was seen — distinct from genuinely unknown headers which still
+ * fall into the "Ignored" group.
+ *
+ * Why each entry sits here (vs. HEADER_ALIASES):
+ *   The remaining Badger saved-view columns (`residential?`,
+ *   `frequency`, `contact`, `brochure dropoff`, `import date`,
+ *   `_address line 2`) don't map to anything in `offices`. Listing
+ *   them keeps the preview banner honest: the user sees we noticed
+ *   the column, we just don't have a column to put it in.
+ */
+const ACKNOWLEDGED_HEADERS: ReadonlySet<string> = new Set([
+  "residential?",
+  "residential",
+  "frequency",
+  "contact",
+  "brochure dropoff",
+  "import date",
+  "_address line 2",
+]);
 
 const MAX_ROWS = 5_000;
 const PREVIEW_LIMIT = 50;
@@ -271,6 +345,37 @@ function mapHeaders(headers: string[]): Array<FieldName | null> {
   });
 }
 
+/**
+ * Per-column classification for the preview banner.
+ *
+ *   "recognized"   — column maps to a field we actually import.
+ *   "acknowledged" — column is a known Badger saved-view field but
+ *                    the schema doesn't store it yet (e.g.
+ *                    `Residential?`, `Frequency`, `Contact`,
+ *                    `Brochure Dropoff`, `Import Date`,
+ *                    `_Address Line 2`). Surfaced separately so the
+ *                    user sees "we noticed this but didn't save it"
+ *                    rather than the same treatment as a typo'd
+ *                    header.
+ *   "unknown"      — column is truly unrecognized — likely a typo or
+ *                    a one-off custom field. Ignored, no destination.
+ *
+ * Order of precedence matches the order checked above: recognized
+ * (HEADER_ALIASES) takes priority over acknowledged so a header that
+ * appears in both gets imported, not skipped.
+ */
+type HeaderClass = "recognized" | "acknowledged" | "unknown";
+
+function classifyHeader(
+  header: string,
+  mapped: FieldName | null,
+): HeaderClass {
+  if (mapped) return "recognized";
+  const lower = header.toLowerCase().trim();
+  if (ACKNOWLEDGED_HEADERS.has(lower)) return "acknowledged";
+  return "unknown";
+}
+
 type ParsedRow = Partial<Record<FieldName, string>>;
 
 /** Builds a sparse field-keyed object from a CSV row + header map. */
@@ -370,6 +475,14 @@ type ApiRow = {
   zip?: string;
   latitude?: number;
   longitude?: number;
+  // Badger persistence fields. office_notes / next_action are
+  // forwarded but the server only seeds them on first create
+  // (never on update) so AE edits are preserved on re-imports.
+  office_phone?: string;
+  office_email?: string;
+  external_badger_id?: string;
+  office_notes?: string;
+  next_action?: string;
 };
 
 /**
@@ -409,6 +522,14 @@ function toApiRow(row: ParsedRow): ApiRow {
     const n = Number(row.longitude);
     if (Number.isFinite(n)) out.longitude = n;
   }
+  // Badger persistence fields. Forwarded verbatim — server-side Zod
+  // re-validates length caps, and notes/next_action are seeded by
+  // the server only on first create.
+  if (row.office_phone) out.office_phone = row.office_phone;
+  if (row.office_email) out.office_email = row.office_email;
+  if (row.external_badger_id) out.external_badger_id = row.external_badger_id;
+  if (row.office_notes) out.office_notes = row.office_notes;
+  if (row.next_action) out.next_action = row.next_action;
   return out;
 }
 
@@ -704,15 +825,19 @@ export default function OfficeImportsPage() {
     );
   }
 
-  // Recognized columns banner — helps the admin see which of their CSV
-  // columns we'll consume vs ignore. Unrecognized columns are listed
-  // explicitly so a misspelled header doesn't silently drop a field.
-  const recognized = headers
-    .map((h, i) => ({ header: h, field: headerMap[i] }))
-    .filter((c) => c.field !== null);
-  const ignored = headers
-    .map((h, i) => ({ header: h, field: headerMap[i] }))
-    .filter((c) => c.field === null);
+  // Header classification banner — helps the admin see which of their
+  // CSV columns we'll consume, which we KNOW about but don't store
+  // yet (Badger _Phone / _Email / _Notes / etc.), and which are truly
+  // unknown. Splitting "acknowledged" out of "ignored" prevents the
+  // common Badger export from looking like the user has typos in
+  // half their headers.
+  const classified = headers.map((h, i) => ({
+    header: h,
+    cls: classifyHeader(h, headerMap[i]),
+  }));
+  const recognized = classified.filter((c) => c.cls === "recognized");
+  const acknowledged = classified.filter((c) => c.cls === "acknowledged");
+  const ignored = classified.filter((c) => c.cls === "unknown");
 
   return (
     <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 p-4 sm:p-6">
@@ -811,19 +936,36 @@ export default function OfficeImportsPage() {
         <CardHeader>
           <CardTitle>Upload CSV</CardTitle>
           <CardDescription>
-            Required: <strong>Office Name</strong>{" "}
-            (column also accepted as <em>Location Name</em>,{" "}
-            <em>Office</em>, <em>Account Name</em>, <em>Company</em>).
-            Optional: <em>Address / Street / Address Line 1</em>,{" "}
-            <em>City</em>,{" "}
-            <em>State / State Code / State/Province</em>,{" "}
+            Required: <strong>Office Name</strong> (also accepted as{" "}
+            <em>Location Name</em>, <em>Office</em>,{" "}
+            <em>Account Name</em>, <em>Company</em>, or Badger&apos;s{" "}
+            <em>_Name</em>). Optional:{" "}
+            <em>Address / Street / Address Line 1 / Full Address</em>{" "}
+            (or Badger&apos;s <em>_Address</em>, stored as-is when
+            city/state/zip aren&apos;t split into their own columns),{" "}
+            <em>City</em>, <em>State / State Code / State/Province</em>,{" "}
             <em>Zip / Zip Code / Zip/Postal Code</em>,{" "}
-            <em>Latitude</em>,{" "}
-            <em>Longitude</em>. AE column accepted as{" "}
-            <em>AE Name / Salesperson / Account Owner</em>,{" "}
-            or <em>Salesperson ID / Owner ID</em>. Unknown columns are
-            ignored. Re-importing the same office updates it in place;
-            existing notes/next-actions are preserved.
+            <em>Latitude</em> (or <em>_Latitude</em>),{" "}
+            <em>Longitude</em> (or <em>_Longitude</em>). AE column accepted
+            as <em>AE Name / Salesperson / Account Owner</em>, or{" "}
+            <em>Salesperson ID / Owner ID</em>.
+            <br />
+            <strong>Badger</strong> saved-view exports import directly:
+            <em> _Name</em>, <em>_Address</em>, <em>_Latitude</em>,{" "}
+            <em>_Longitude</em>, <em>_Phone</em>, <em>_Email</em>,{" "}
+            <em>_CustomerId</em>, <em>_Notes</em>, <em>_FollowUp</em>
+            {" "}all land in the office row. Other Badger columns
+            (<em>Residential?</em>, <em>Frequency</em>,{" "}
+            <em>Contact</em>, <em>Brochure Dropoff</em>,{" "}
+            <em>Import Date</em>) are recognized but not stored yet;
+            the preview banner calls them out so nothing disappears
+            silently.
+            <br />
+            Re-importing the same office updates address, coordinates,
+            phone, email, and external id in place. <em>_Notes</em> and{" "}
+            <em>_FollowUp</em> are seeded only on first create — AE
+            edits made later through the office UI are preserved on
+            every re-import.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -915,8 +1057,10 @@ export default function OfficeImportsPage() {
               </p>
             )}
 
-            {(recognized.length > 0 || ignored.length > 0) && (
-              <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            {(recognized.length > 0 ||
+              acknowledged.length > 0 ||
+              ignored.length > 0) && (
+              <div className="space-y-1 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                 {recognized.length > 0 && (
                   <p>
                     <span className="font-medium text-foreground">
@@ -925,10 +1069,21 @@ export default function OfficeImportsPage() {
                     {recognized.map((c) => c.header).join(", ")}
                   </p>
                 )}
-                {ignored.length > 0 && (
-                  <p className="mt-1">
+                {acknowledged.length > 0 && (
+                  <p>
                     <span className="font-medium text-foreground">
-                      Ignored:
+                      Recognized but not stored yet:
+                    </span>{" "}
+                    {acknowledged.map((c) => c.header).join(", ")}
+                    {" — "}
+                    these Badger columns are known to the importer but
+                    the schema doesn&apos;t have a place for them yet.
+                  </p>
+                )}
+                {ignored.length > 0 && (
+                  <p>
+                    <span className="font-medium text-foreground">
+                      Ignored (unknown):
                     </span>{" "}
                     {ignored.map((c) => c.header).join(", ")}
                   </p>

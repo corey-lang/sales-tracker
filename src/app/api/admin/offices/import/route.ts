@@ -27,9 +27,16 @@ import {
 //      (so Badger CSVs that don't carry per-row AE columns import).
 //   3. UPSERTs the office on (salesperson_id, environment, dedupe_key)
 //      — duplicates UPDATE in place rather than skipping, so a re-
-//      import propagates address corrections, lat/lng fills, etc.
+//      import propagates address corrections, lat/lng fills,
+//      phone/email/external_badger_id refreshes, etc.
 //      Persistent user memory (`office_notes`, `next_action`) is
-//      intentionally NOT in the upsert payload so it survives re-imports.
+//      intentionally NOT in the upsert payload — instead a follow-up
+//      "seed notes" UPDATE runs ONLY for rows the upsert just
+//      created. Re-imports never touch those columns, so AE edits
+//      made through the office-detail UI are preserved. The seed
+//      pass lets the first Badger import populate notes/next_action
+//      from `_Notes` / `_FollowUp` without giving the importer a
+//      future foot-gun.
 //
 // SUMMARY SHAPE
 //   The route returns four buckets so the UI can show separate counts:
@@ -94,12 +101,28 @@ const RawRowSchema = z.object({
   salesperson_id: z.uuid().optional(),
   salesperson_first_name: z.string().trim().min(1).max(64).optional(),
   name: NON_EMPTY(200),
-  street: OPTIONAL_STRING(200),
+  // `street` cap raised so Badger's combined `_Address` string
+  // ("212 South Main Street, Spanish Fork, UT, 84660") fits when the
+  // CSV doesn't split city/state/zip into their own columns.
+  street: OPTIONAL_STRING(500),
   city: OPTIONAL_STRING(100),
   state: OPTIONAL_STRING(64),
   zip: OPTIONAL_STRING(20),
   latitude: OPTIONAL_NUMBER,
   longitude: OPTIONAL_NUMBER,
+  // Badger contact + identity fields. All optional, all factual data
+  // from the source system → refreshed on every import. The dedupe
+  // key still derives from name+street+zip — external_badger_id is
+  // stored but not yet promoted to the conflict key.
+  office_phone: OPTIONAL_STRING(64),
+  office_email: OPTIONAL_STRING(254),
+  external_badger_id: OPTIONAL_STRING(128),
+  // Persistent "office memory" — Badger `_Notes` / `_FollowUp`. These
+  // are written ONLY on first create for a given dedupe key (see the
+  // seed-notes pass after the chunked upsert) so re-imports never
+  // clobber AE edits made through the future office-detail UI.
+  office_notes: OPTIONAL_STRING(10_000),
+  next_action: OPTIONAL_STRING(2_000),
 });
 
 type ParsedRow = z.infer<typeof RawRowSchema>;
@@ -152,6 +175,50 @@ type RowError = {
  * round-trips, not five thousand.
  */
 const UPSERT_CHUNK_SIZE = 500;
+
+/**
+ * Columns added by migration #29 (offices_badger_fields.sql). If a
+ * deploy ships this route code without running the migration first,
+ * EVERY chunked upsert fails with a "column does not exist" /
+ * PostgREST schema-cache-miss error because the payload includes
+ * these three keys. Without special handling each row in each chunk
+ * gets bucketed as a generic "Database insert failed" — accurate but
+ * useless to the admin debugging it.
+ *
+ * `isMissingBadgerColumnError` recognizes that specific failure mode
+ * by name-matching on the error message, so the route can short-
+ * circuit with a single clear migration-required response instead.
+ */
+const BADGER_MIGRATION_COLUMNS = [
+  "office_phone",
+  "office_email",
+  "external_badger_id",
+] as const;
+
+const MIGRATION_REQUIRED_MESSAGE =
+  "Office import schema is out of date. Run supabase/offices_badger_fields.sql before importing Badger CSV files.";
+
+/**
+ * True when `err` looks like the migration-required failure mode
+ * (a missing-column error that names one of the migration's three
+ * new columns).
+ *
+ * Detection strategy: name-match on `err.message`. PostgREST's
+ * schema-cache-miss text and PG's `column "X" of relation "Y" does
+ * not exist` text both quote the column name, and there's no other
+ * realistic path to "Database insert failed mentioning office_phone"
+ * — the column doesn't appear in app code anywhere else that the
+ * import route writes to. Checked WITHOUT requiring a specific
+ * error code so we don't miss the case across PostgREST version
+ * shifts (PGRST204 vs 42703 etc.).
+ */
+function isMissingBadgerColumnError(
+  err: { message?: string | null } | null | undefined,
+): boolean {
+  if (!err?.message) return false;
+  const msg = err.message.toLowerCase();
+  return BADGER_MIGRATION_COLUMNS.some((c) => msg.includes(c));
+}
 
 /** Salesperson lookup result — mapped to id. Null = not found. */
 type SalespersonResolver = {
@@ -430,10 +497,24 @@ export async function POST(req: Request) {
       source: string;
       dedupe_key: string;
       environment: OfficeEnvironment;
+      // Factual contact + identity columns are part of the upsert
+      // payload — they get refreshed on every import. (office_notes
+      // and next_action are deliberately NOT part of the upsert and
+      // are handled in the seed-notes pass below.)
+      office_phone: string | null;
+      office_email: string | null;
+      external_badger_id: string | null;
+    };
+    /** Notes payload kept alongside each queued upsert. Applied
+     *  AFTER the upsert in a separate pass so it only lands on
+     *  newly-created rows — see the seed-notes loop below. */
+    type SeedNotes = {
+      office_notes: string | null;
+      next_action: string | null;
     };
     const byKey = new Map<
       string,
-      { idx: number; payload: UpsertPayload }
+      { idx: number; payload: UpsertPayload; notes: SeedNotes }
     >();
     for (const { idx, row } of parsed) {
       const salespersonId = resolveRowSalesperson(row, resolver, defaults);
@@ -472,6 +553,13 @@ export async function POST(req: Request) {
         source: body.source,
         dedupe_key: dedupeKey,
         environment,
+        office_phone: row.office_phone,
+        office_email: row.office_email,
+        external_badger_id: row.external_badger_id,
+      };
+      const notes: SeedNotes = {
+        office_notes: row.office_notes,
+        next_action: row.next_action,
       };
 
       const existing = byKey.get(key);
@@ -484,7 +572,7 @@ export async function POST(req: Request) {
           reason: `Duplicate of row ${idx} in this CSV — kept the later one.`,
         });
       }
-      byKey.set(key, { idx, payload });
+      byKey.set(key, { idx, payload, notes });
     }
 
     // Run the upsert in chunks. Each call returns the rows it touched
@@ -513,6 +601,22 @@ export async function POST(req: Request) {
         .select("id, created_at, updated_at");
 
       if (upsertRes.error) {
+        // Migration-missing short-circuit. If the upsert failed
+        // because office_phone / office_email / external_badger_id
+        // don't exist on `offices`, EVERY chunk will fail with the
+        // same root cause — bucketing N rows as "Database insert
+        // failed" would bury the actual problem (admin needs to run
+        // the migration) under a wall of generic per-row errors.
+        // Throw once with a clear actionable message; the outer
+        // handleApiError serializes it as a 500. The seed-notes
+        // pass below is skipped because we never reach it.
+        if (isMissingBadgerColumnError(upsertRes.error)) {
+          console.warn(
+            `[offices-import] migration #29 missing batch=${batchId} code=${upsertRes.error.code ?? "?"} msg=${upsertRes.error.message}`,
+          );
+          throw new ApiError(500, MIGRATION_REQUIRED_MESSAGE);
+        }
+
         // The whole chunk failed — report every row in it as a
         // database error (not a skip; the importer's input was
         // structurally valid, the DB rejected the write). Continue
@@ -539,6 +643,15 @@ export async function POST(req: Request) {
       // came back shorter than expected (rare — should only happen
       // on partial constraint failures we can't see), report the
       // tail as errors.
+      //
+      // Notes seed list — collected here per chunk and applied below.
+      // Only newly-created rows get the seed, so re-imports never
+      // touch AE-edited office_notes / next_action.
+      const seeds: Array<{
+        id: string;
+        row: number;
+        notes: SeedNotes;
+      }> = [];
       for (let j = 0; j < chunk.length; j++) {
         const result = rows[j];
         if (!result) {
@@ -550,11 +663,55 @@ export async function POST(req: Request) {
         }
         // Trigger bumps updated_at on UPDATE; on INSERT the column
         // defaults set both columns to the same NOW() instant.
-        if (result.created_at === result.updated_at) {
-          created++;
-        } else {
-          updated++;
+        const isCreated = result.created_at === result.updated_at;
+        if (isCreated) created++;
+        else updated++;
+
+        // Notes seed: only on first create AND only when the source
+        // row actually carried a non-empty value for either field.
+        // The upsert path itself never includes these columns, so the
+        // newly-created row sits with notes=NULL until we run the
+        // follow-up UPDATE; on subsequent imports the row exists
+        // (isCreated=false) and the seed is skipped, preserving any
+        // AE edits.
+        if (
+          isCreated &&
+          (chunk[j].notes.office_notes !== null ||
+            chunk[j].notes.next_action !== null)
+        ) {
+          seeds.push({
+            id: result.id,
+            row: chunk[j].idx,
+            notes: chunk[j].notes,
+          });
         }
+      }
+
+      // Apply notes seeds in parallel. Each is a single-row UPDATE
+      // scoped to the freshly-inserted id. Failures here are
+      // non-fatal — the office row itself is already saved; an extra
+      // UPDATE failing just means the notes didn't seed on this
+      // import. Logged server-side so the admin can re-run if needed.
+      if (seeds.length > 0) {
+        const seedFields = (n: SeedNotes) => {
+          const out: { office_notes?: string; next_action?: string } = {};
+          if (n.office_notes !== null) out.office_notes = n.office_notes;
+          if (n.next_action !== null) out.next_action = n.next_action;
+          return out;
+        };
+        await Promise.all(
+          seeds.map(async (s) => {
+            const updRes = await supabase
+              .from(OFFICES_TABLE)
+              .update(seedFields(s.notes))
+              .eq("id", s.id);
+            if (updRes.error) {
+              console.warn(
+                `[offices-import] notes seed failed batch=${batchId} row=${s.row} id=${s.id} code=${updRes.error.code ?? "?"} msg=${updRes.error.message}`,
+              );
+            }
+          }),
+        );
       }
     }
 
