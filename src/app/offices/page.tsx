@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ChevronRight,
+  Locate,
   MapPin,
   Search,
   X,
@@ -213,13 +214,26 @@ export default function OfficesListPage() {
         </span>
       </header>
 
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-          My Offices
-        </h1>
-        <p className="text-xs text-muted-foreground">
-          Sandbox office list — visible only to the test account.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+            My Offices
+          </h1>
+          <p className="text-xs text-muted-foreground">
+            Sandbox office list — visible only to the test account.
+          </p>
+        </div>
+        {/* "Nearby" entry point — opens the geolocation-driven
+            /offices/nearby surface. Lives in the header so it's
+            visible without scrolling and doesn't compete with the
+            search input for the primary thumb position. */}
+        <Link
+          href="/offices/nearby"
+          className={buttonVariants({ variant: "outline", size: "sm" })}
+        >
+          <Locate aria-hidden="true" className="size-4" />
+          Nearby
+        </Link>
       </div>
 
       {/* Search box — name / city / zip. */}

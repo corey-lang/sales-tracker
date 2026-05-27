@@ -172,6 +172,49 @@ export type OfficeListItem = {
 };
 
 /**
+ * Allowed radii (miles) for the /offices/nearby search. Closed set
+ * so the UI's segmented control + server-side Zod schema stay in
+ * lockstep — adding a new option means changing one constant.
+ */
+export const NEARBY_RADIUS_OPTIONS = [5, 10, 25] as const;
+export type NearbyRadius = (typeof NEARBY_RADIUS_OPTIONS)[number];
+
+/** Default radius for the first paint of /offices/nearby. */
+export const NEARBY_DEFAULT_RADIUS: NearbyRadius = 10;
+
+/** Hard cap on offices returned by /api/offices/nearby. Mobile cards
+ *  are roughly 1 KB each on the wire; 100 keeps payloads small while
+ *  still covering the realistic AE-day "what's around me" pattern. */
+export const NEARBY_RESULT_LIMIT = 100;
+
+/**
+ * One row of the /api/offices/nearby response. Trimmed shape of
+ * OfficeRow + the visit-derived "last visit" timestamp + a computed
+ * `distance_miles` so the UI never recomputes geometry client-side.
+ *
+ * Offices without coordinates are EXCLUDED from this response — the
+ * server filter pins `latitude IS NOT NULL AND longitude IS NOT NULL`
+ * so the type can hold non-null number fields without `| null`.
+ */
+export type NearbyOfficeItem = {
+  id: string;
+  name: string;
+  street: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  latitude: number;
+  longitude: number;
+  /** Great-circle distance from the search origin, in miles. */
+  distance_miles: number;
+  /** Most-recent visit by the calling AE against this office, or
+   *  null when never visited. */
+  last_visit_at: string | null;
+  next_action: string | null;
+  next_action_due_date: string | null;
+};
+
+/**
  * Hard cap on rows returned to the office-list UI. The DB query fetches
  * a wider window (see OFFICE_LIST_QUERY_LIMIT) so the JS-side sort can
  * promote visited offices to the top before we slice; the user only

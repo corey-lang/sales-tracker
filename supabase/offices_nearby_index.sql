@@ -1,0 +1,75 @@
+-- ===========================================================================
+-- offices — partial index supporting the bounding-box "nearby" query.
+-- ===========================================================================
+-- WHAT THIS IS
+--   A B-tree index on (salesperson_id, environment, latitude, longitude)
+--   filtered to rows with coordinates. Speeds up the bounding-box
+--   pre-filter in `GET /api/offices/nearby` when an AE's sandbox
+--   contains thousands of geocoded offices.
+--
+-- WHY THIS SHAPE
+--   The nearby route always pins `salesperson_id` AND
+--   `environment = 'test'` AND `latitude IS NOT NULL` AND
+--   `longitude IS NOT NULL`, then range-filters latitude and
+--   longitude against the bounding box. Putting all four predicate
+--   columns in the index (with the per-row CHECK in the WHERE
+--   clause keeping the index narrow) lets Postgres use an index
+--   scan instead of a full sequential scan of the AE's office
+--   block.
+--
+--   The lat/lng ordering is intentional: lat is checked first in
+--   the query (gte/lte), so leading the trailing index columns by
+--   lat gives the planner the most leverage. lng is the secondary
+--   range column.
+--
+-- IS THIS NEEDED FOR CORRECTNESS?
+--   No. The route's paged candidate fetch is correct without this
+--   index — it just gets faster. For per-AE sandboxes in the
+--   hundreds (current scale), the existing
+--   `idx_offices_salesperson_env` index is plenty. This migration
+--   is the right call when one or more AEs grow to a few thousand
+--   geocoded offices — typical of dense metros — and the
+--   sequential scan starts showing up in the route's p95.
+--
+--   It is APPROPRIATE to apply this migration eagerly even at
+--   current scale; the storage cost is trivial (a partial index on
+--   geocoded rows only) and the route's plan stays predictable as
+--   the data grows.
+--
+-- WHY NOT POSTGIS YET
+--   PostGIS would let us replace the bounding-box dance with a
+--   single `ST_DWithin(geog, point, miles_in_meters)` query keyed
+--   off a GiST spatial index — meaningfully simpler and faster.
+--   We're deferring until the per-AE office counts (or query
+--   latency) actually warrant the extension. The route comments
+--   document the trigger condition.
+--
+-- IDEMPOTENT
+--   CREATE INDEX IF NOT EXISTS. Safe to re-run on a fresh DB AND
+--   on an already-migrated one.
+-- ===========================================================================
+
+CREATE INDEX IF NOT EXISTS idx_offices_salesperson_env_coords
+  ON offices(salesperson_id, environment, latitude, longitude)
+  WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+
+-- ===========================================================================
+-- VERIFICATION
+-- ===========================================================================
+-- SELECT indexname, indexdef
+-- FROM pg_indexes
+-- WHERE tablename = 'offices'
+--   AND indexname = 'idx_offices_salesperson_env_coords';
+--   -- expect one row; indexdef shows the partial WHERE predicate.
+--
+-- -- Plan check (replace the literal lat/lng with the actual bbox
+-- -- the route is computing; the index should be selected over a
+-- -- seq scan once the AE has >~1k geocoded offices):
+-- EXPLAIN ANALYZE
+-- SELECT id FROM offices
+-- WHERE salesperson_id = '<ae-uuid>'
+--   AND environment = 'test'
+--   AND latitude IS NOT NULL AND longitude IS NOT NULL
+--   AND latitude BETWEEN 40.10 AND 40.55
+--   AND longitude BETWEEN -111.80 AND -111.40
+-- ORDER BY id LIMIT 1000;
