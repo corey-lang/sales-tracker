@@ -1,0 +1,44 @@
+-- ===========================================================================
+-- Juice Box — multi-image attachments per post.
+-- ===========================================================================
+-- WHAT THIS IS
+--   Adds a `media_attachments` JSONB column to team_messages so a single
+--   image post can carry MULTIPLE images. The original media_* columns
+--   stay populated with the FIRST attachment so historical single-image
+--   posts continue to render unchanged and so the reply-preview placeholder
+--   logic (which keys off media_type) keeps working without modification.
+--
+-- SHAPE
+--   media_attachments is a JSONB array of objects, one per attached image:
+--     [
+--       {
+--         "url":          text,
+--         "storage_path": text,
+--         "width":        int  | null,
+--         "height":       int  | null,
+--         "alt":          text | null
+--       },
+--       ...
+--     ]
+--   NULL on every text-only post, every GIF post, and on historical
+--   single-image posts written before this migration ran. Server reads
+--   treat NULL + media_type='image' as "single image, render from media_*".
+--
+-- ACCESS
+--   No change to RLS, no change to the juice-box-media bucket policy.
+--   Every attached image URL is still produced by the per-user
+--   signed-upload route (/api/juice-box/media/sign-upload) and validated
+--   by /api/team-messages POST against the caller's id prefix.
+--
+-- Idempotent: ADD COLUMN IF NOT EXISTS.
+-- ===========================================================================
+
+ALTER TABLE team_messages
+  ADD COLUMN IF NOT EXISTS media_attachments JSONB;
+
+-- ===========================================================================
+-- VERIFICATION
+-- ===========================================================================
+-- SELECT column_name, data_type FROM information_schema.columns
+-- WHERE table_name = 'team_messages' AND column_name = 'media_attachments';
+--   -- expect one row, data_type = jsonb.
