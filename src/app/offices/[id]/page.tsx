@@ -1,9 +1,18 @@
 "use client";
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, AlertTriangle, History, MapPin } from "lucide-react";
+import {
+  ArrowLeft,
+  AlertTriangle,
+  CheckCircle2,
+  History,
+  MapPin,
+  Navigation,
+  Pencil,
+  X,
+} from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
 import { useSalesperson } from "@/lib/use-salesperson";
@@ -24,28 +33,29 @@ import { Button, buttonVariants } from "@/components/ui/button";
 // ---------------------------------------------------------------------------
 // Office Detail — Phase 1A test-only surface.
 //
-// Flow:
-//   Office → Read Notes → Update Next Action → Log Visit → Move on.
+// Layout, top → bottom:
+//   1. Header (Back + Test pill)
+//   2. Sandbox banner
+//   3. Office identity card (name, address, visit summary)
+//   4. PRIMARY ACTIONS — Log Visit + Open Maps
+//   5. Office Notes (long-term office memory)
+//   6. Next Action (text + optional due date + optional "Add to To-Dos")
+//   7. Visit History (newest first, every entry editable)
+//
+// Log Visit + Open Maps live near the top because they're the most-used
+// actions when an AE pulls up an office — the spec calls Log Visit out
+// explicitly as needing to be immediately visible.
 //
 // Access (mirrors /api/offices/[id]):
 //   * `is_test === true` salesperson — passes.
 //   * juice_box_only — redirected to /juice-box.
 //   * Anyone else — redirected to /dashboard.
-//
-// Live permission state comes from /api/me/permissions, but `is_test` is not
-// part of that payload (it's a static account property — granting / revoking
-// the test flag at runtime isn't a use case). The cached session's `is_test`
-// is the authority for visibility; the server still re-checks via
-// `requireTestAccount` on every read + write.
-//
-// Sandbox banner is intentionally loud — this surface MUST NOT silently
-// graduate to real AEs.
 // ---------------------------------------------------------------------------
 
 type DetailResponse = { detail: OfficeDetail };
 type PatchResponse = { office: OfficeRow };
 type VisitResponse = { visit: OfficeVisitRow };
-type ApiError = { error?: string };
+type ApiErrorShape = { error?: string };
 
 function formatAddress(office: OfficeRow): string {
   const parts = [
@@ -66,6 +76,74 @@ function visitSummary(detail: OfficeDetail): string {
   return `Last visit ${last}`;
 }
 
+/**
+ * Builds a Google Maps "search" URL for an office. Falls back to lat/lng
+ * when no address text is available. The universal `/maps/search`
+ * endpoint lets the OS choose Maps app vs. browser (iOS will offer
+ * Apple Maps if it's the user's default — better UX than hard-pinning
+ * to one client).
+ */
+function mapsUrl(office: OfficeRow): string | null {
+  const address = formatAddress(office).replace(/\s·\s/g, ", ");
+  if (address.length > 0) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+      `${office.name} ${address}`,
+    )}`;
+  }
+  if (office.latitude !== null && office.longitude !== null) {
+    return `https://www.google.com/maps/search/?api=1&query=${office.latitude},${office.longitude}`;
+  }
+  return null;
+}
+
+/**
+ * Local datetime → `YYYY-MM-DDTHH:MM` for use in a
+ * `<input type="datetime-local">` value. Required because the input
+ * doesn't accept full ISO 8601 (with seconds/TZ); it wants the local-
+ * wall-clock fragment only. We round to the minute so the input
+ * doesn't flash a sub-minute value at the user.
+ */
+function toDateTimeLocalValue(date: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
+/**
+ * Parses a `<input type="datetime-local">` value (local wall clock,
+ * no TZ) into a UTC ISO string the API accepts. Returns null when
+ * the input is empty or unparseable so the caller can decide whether
+ * to send it.
+ */
+function fromDateTimeLocalValue(value: string): string | null {
+  if (!value) return null;
+  // new Date("YYYY-MM-DDTHH:MM") is interpreted as local time per
+  // the ECMAScript spec for datetime-local strings. `.toISOString()`
+  // then renders the UTC equivalent.
+  const ts = new Date(value);
+  if (Number.isNaN(ts.getTime())) return null;
+  return ts.toISOString();
+}
+
+/** YYYY-MM-DD → readable "Jun 5, 2026" without pulling in a date lib here. */
+function formatDueDate(value: string | null): string | null {
+  if (!value) return null;
+  // Parse manually so the user's local TZ doesn't shift the date.
+  const [yStr, mStr, dStr] = value.split("-");
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (!y || !m || !d) return null;
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 export default function OfficeDetailPage({
   params,
 }: {
@@ -74,8 +152,6 @@ export default function OfficeDetailPage({
   const { id: officeId } = use(params);
   const router = useRouter();
   const { salesperson, loaded: sessionLoaded } = useSalesperson();
-  // Live permissions only used here to confirm role state; is_test
-  // remains a static account property read from the cached session.
   const { loaded: permsLoaded } = useLivePermissions();
   useScrollToTop();
 
@@ -117,11 +193,22 @@ export default function OfficeDetailPage({
   const [notesError, setNotesError] = useState<string | null>(null);
 
   const [nextActionDraft, setNextActionDraft] = useState("");
+  const [nextActionDueDraft, setNextActionDueDraft] = useState("");
+  const [createTodo, setCreateTodo] = useState(false);
   const [savingNextAction, setSavingNextAction] = useState(false);
-  const [nextActionError, setNextActionError] = useState<string | null>(
+  const [nextActionError, setNextActionError] = useState<string | null>(null);
+  /** Soft, non-blocking success / partial-success message under the
+   *  Next Action card. Used for the "saved, but To-Do failed" copy. */
+  const [nextActionNotice, setNextActionNotice] = useState<string | null>(
     null,
   );
 
+  // Log Visit — datetime defaults to "now" each time the card mounts.
+  // The user can adjust the value before saving. Re-defaulted after
+  // each successful log so the next visit starts fresh at the new now.
+  const [visitWhen, setVisitWhen] = useState<string>(() =>
+    toDateTimeLocalValue(new Date()),
+  );
   const [visitNote, setVisitNote] = useState("");
   const [loggingVisit, setLoggingVisit] = useState(false);
   const [visitError, setVisitError] = useState<string | null>(null);
@@ -132,7 +219,7 @@ export default function OfficeDetailPage({
     try {
       const res = await apiFetch(`/api/offices/${officeId}`);
       const data = (await res.json().catch(() => null)) as
-        | (DetailResponse & ApiError)
+        | (DetailResponse & ApiErrorShape)
         | null;
       if (!res.ok || !data?.detail) {
         setLoadError(data?.error ?? `Could not load office (${res.status}).`);
@@ -142,6 +229,7 @@ export default function OfficeDetailPage({
       setDetail(data.detail);
       setNotesDraft(data.detail.office.office_notes ?? "");
       setNextActionDraft(data.detail.office.next_action ?? "");
+      setNextActionDueDraft(data.detail.office.next_action_due_date ?? "");
       setLoadState("ready");
     } catch {
       setLoadError("Network error while loading this office.");
@@ -149,13 +237,6 @@ export default function OfficeDetailPage({
     }
   }, [officeId]);
 
-  // Initial load: wait for the access gate to resolve so we don't fire
-  // a 401-bound request before the session hydrates. The page-level
-  // redirect handles the !canView case; we only fetch when we'll
-  // actually render the detail. loadDetail starts with a synchronous
-  // setState (to flip into the loading branch); calling it from the
-  // effect body is the canonical fetch-on-mount pattern even though
-  // the lint rule flags it.
   useEffect(() => {
     if (!accessReady || !canView) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -164,21 +245,16 @@ export default function OfficeDetailPage({
 
   // ---- Save handlers -----------------------------------------------------
 
-  async function saveOfficeField(
-    field: "office_notes" | "next_action",
-    value: string,
+  async function patchOffice(
+    payload: Record<string, string | null>,
   ): Promise<OfficeRow | null> {
-    // Empty / whitespace-only clears the column (sent as empty string;
-    // the server normalizes to null). Trimming on the client keeps the
-    // optimistic state aligned with what the server will store.
-    const payload: Record<string, string> = { [field]: value };
     const res = await apiFetch(`/api/offices/${officeId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const data = (await res.json().catch(() => null)) as
-      | (PatchResponse & ApiError)
+      | (PatchResponse & ApiErrorShape)
       | null;
     if (!res.ok || !data?.office) {
       throw new Error(data?.error ?? `Save failed (${res.status}).`);
@@ -191,7 +267,7 @@ export default function OfficeDetailPage({
     setSavingNotes(true);
     setNotesError(null);
     try {
-      const updated = await saveOfficeField("office_notes", notesDraft);
+      const updated = await patchOffice({ office_notes: notesDraft });
       if (updated && detail) {
         setDetail({ ...detail, office: updated });
         setNotesDraft(updated.office_notes ?? "");
@@ -205,15 +281,65 @@ export default function OfficeDetailPage({
     }
   }
 
+  /**
+   * Saves the next-action text + optional due date. When `createTodo`
+   * is checked AND the office save succeeds, a SEPARATE POST to
+   * /api/tasks creates an AE To-Do with the same title + due date.
+   * A To-Do failure is non-blocking — the office row is already saved,
+   * and the user sees a soft notice telling them to add it manually.
+   */
   async function handleSaveNextAction() {
     if (savingNextAction) return;
     setSavingNextAction(true);
     setNextActionError(null);
+    setNextActionNotice(null);
     try {
-      const updated = await saveOfficeField("next_action", nextActionDraft);
+      const updated = await patchOffice({
+        next_action: nextActionDraft,
+        // Empty string → null (clear the date). The server accepts
+        // null explicitly; a stripped non-empty value passes Zod.
+        next_action_due_date: nextActionDueDraft || null,
+      });
       if (updated && detail) {
         setDetail({ ...detail, office: updated });
         setNextActionDraft(updated.next_action ?? "");
+        setNextActionDueDraft(updated.next_action_due_date ?? "");
+      }
+
+      // AE To-Do dual-write. Decoupled from the office save: a To-Do
+      // failure shows a soft notice but doesn't roll back the office.
+      const trimmedTitle = nextActionDraft.trim();
+      if (createTodo && trimmedTitle.length > 0) {
+        try {
+          const officeName = detail?.office.name ?? "Office";
+          const taskRes = await apiFetch("/api/tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmedTitle,
+              description: `From office: ${officeName}`,
+              ...(nextActionDueDraft
+                ? { due_date: nextActionDueDraft }
+                : {}),
+            }),
+          });
+          if (!taskRes.ok) {
+            setNextActionNotice(
+              "Next Action saved, but the To-Do could not be created. You can add it manually from To-Dos.",
+            );
+          } else {
+            setNextActionNotice(
+              "Next Action saved and added to your To-Dos.",
+            );
+            // Auto-clear the checkbox so a follow-up save doesn't
+            // unintentionally create a second To-Do.
+            setCreateTodo(false);
+          }
+        } catch {
+          setNextActionNotice(
+            "Next Action saved, but the To-Do could not be created. You can add it manually from To-Dos.",
+          );
+        }
       }
     } catch (err) {
       setNextActionError(
@@ -229,13 +355,20 @@ export default function OfficeDetailPage({
     setLoggingVisit(true);
     setVisitError(null);
     try {
+      // Convert the local-wall-clock value to ISO. If the user cleared
+      // the input we fall back to NOW server-side by omitting the field.
+      const visitedAtIso = fromDateTimeLocalValue(visitWhen);
+
       const res = await apiFetch(`/api/offices/${officeId}/visits`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ visit_note: visitNote }),
+        body: JSON.stringify({
+          visit_note: visitNote,
+          ...(visitedAtIso ? { visited_at: visitedAtIso } : {}),
+        }),
       });
       const data = (await res.json().catch(() => null)) as
-        | (VisitResponse & ApiError)
+        | (VisitResponse & ApiErrorShape)
         | null;
       if (!res.ok || !data?.visit) {
         setVisitError(
@@ -243,17 +376,23 @@ export default function OfficeDetailPage({
         );
         return;
       }
-      // Apply the new visit locally without a full refetch. The detail
-      // route returns visits newest-first, so we prepend; `last_visit_at`
-      // becomes the new visit's timestamp; visit_count increments.
+
+      // Apply locally without a refetch. Sort visits by visited_at desc
+      // so a back-dated entry slots into the right position.
       if (detail) {
+        const merged = [data.visit, ...detail.visits].sort((a, b) =>
+          b.visited_at.localeCompare(a.visited_at),
+        );
         setDetail({
           ...detail,
-          visits: [data.visit, ...detail.visits],
-          last_visit_at: data.visit.visited_at,
+          visits: merged,
+          last_visit_at: merged[0].visited_at,
           visit_count: detail.visit_count + 1,
         });
       }
+
+      // Reset form for the next log: fresh "now" + cleared note.
+      setVisitWhen(toDateTimeLocalValue(new Date()));
       setVisitNote("");
     } catch {
       setVisitError("Network error while logging this visit.");
@@ -261,6 +400,57 @@ export default function OfficeDetailPage({
       setLoggingVisit(false);
     }
   }
+
+  /**
+   * Inline edit save for a single visit. Re-applied locally on success
+   * (server is authoritative for the row's exact ISO string). Errors
+   * surface inline in the row's edit form, not at the page level.
+   */
+  const handleEditVisit = useCallback(
+    async (
+      visitId: string,
+      payload: { visited_at?: string; visit_note?: string | null },
+    ): Promise<{ ok: true; visit: OfficeVisitRow } | { ok: false; error: string }> => {
+      try {
+        const res = await apiFetch(
+          `/api/offices/${officeId}/visits/${visitId}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        const data = (await res.json().catch(() => null)) as
+          | (VisitResponse & ApiErrorShape)
+          | null;
+        if (!res.ok || !data?.visit) {
+          return {
+            ok: false,
+            error: data?.error ?? `Could not update visit (${res.status}).`,
+          };
+        }
+        setDetail((current) => {
+          if (!current) return current;
+          const nextVisits = current.visits
+            .map((v) => (v.id === data.visit.id ? data.visit : v))
+            // Resort in case visited_at changed.
+            .sort((a, b) => b.visited_at.localeCompare(a.visited_at));
+          return {
+            ...current,
+            visits: nextVisits,
+            last_visit_at: nextVisits[0]?.visited_at ?? null,
+          };
+        });
+        return { ok: true, visit: data.visit };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while updating this visit.",
+        };
+      }
+    },
+    [officeId],
+  );
 
   // ---- Render guards -----------------------------------------------------
 
@@ -284,7 +474,7 @@ export default function OfficeDetailPage({
     return (
       <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-4 p-4">
         <Link
-          href="/dashboard"
+          href="/offices"
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
@@ -311,14 +501,16 @@ export default function OfficeDetailPage({
   const address = formatAddress(office);
   const notesDirty = notesDraft !== (office.office_notes ?? "");
   const nextActionDirty =
-    nextActionDraft !== (office.next_action ?? "");
+    nextActionDraft !== (office.next_action ?? "") ||
+    nextActionDueDraft !== (office.next_action_due_date ?? "");
+  const mapsHref = mapsUrl(office);
 
   return (
     <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
-      {/* Header — Back + sandbox tag. Office name is the page title. */}
+      {/* Header — Back to /offices + sandbox tag. */}
       <header className="flex flex-wrap items-center justify-between gap-2">
         <Link
-          href="/dashboard"
+          href="/offices"
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
@@ -329,7 +521,7 @@ export default function OfficeDetailPage({
         </span>
       </header>
 
-      {/* Sandbox banner — same posture as /office-imports. */}
+      {/* Sandbox banner. */}
       <div
         role="note"
         className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
@@ -340,7 +532,7 @@ export default function OfficeDetailPage({
         </p>
       </div>
 
-      {/* Office identity card — name, address, stats. */}
+      {/* Office identity card. */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">{office.name}</CardTitle>
@@ -378,13 +570,78 @@ export default function OfficeDetailPage({
         </CardContent>
       </Card>
 
-      {/* Office notes — long-term memory. Auto-resize via min-h. */}
+      {/* PRIMARY ACTIONS — Log Visit + Open Maps, near the top so they're
+          immediately visible without scrolling. Log Visit is the
+          most-used action and is the visible default. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Log visit</CardTitle>
+          <CardDescription>{visitSummary(detail)}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-1.5">
+            <label
+              htmlFor="visit-when"
+              className="block text-xs font-medium uppercase tracking-wide text-muted-foreground"
+            >
+              When
+            </label>
+            <input
+              id="visit-when"
+              type="datetime-local"
+              value={visitWhen}
+              onChange={(e) => setVisitWhen(e.target.value)}
+              disabled={loggingVisit}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Defaults to now. Adjust if you&apos;re logging this later.
+            </p>
+          </div>
+          <textarea
+            id="visit-note"
+            className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            value={visitNote}
+            onChange={(e) => setVisitNote(e.target.value)}
+            placeholder="What happened on this visit? (optional)"
+            disabled={loggingVisit}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleLogVisit}
+              disabled={loggingVisit}
+            >
+              {loggingVisit ? "Logging…" : "Log visit"}
+            </Button>
+            {mapsHref && (
+              <a
+                href={mapsHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                <Navigation aria-hidden="true" className="size-4" />
+                Open Maps
+              </a>
+            )}
+            {visitError && (
+              <span role="alert" className="text-xs text-destructive">
+                {visitError}
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Office notes — long-term office memory. */}
       <Card>
         <CardHeader>
           <CardTitle>Office notes</CardTitle>
           <CardDescription>
-            Persistent reference info (broker name, meeting cadence, who to
-            ask for).
+            Persistent reference info (broker name, meeting cadence, who
+            to ask for).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
@@ -414,15 +671,17 @@ export default function OfficeDetailPage({
         </CardContent>
       </Card>
 
-      {/* Next action — the actionable to-do. */}
+      {/* Next action — office-level follow-up. Single text + optional
+          due date + optional "also add to AE To-Dos" hook. */}
       <Card>
         <CardHeader>
           <CardTitle>Next action</CardTitle>
           <CardDescription>
-            The single next step for this office.
+            The single next step for this office (drop donuts, schedule
+            office meeting, teach A2L class…).
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent className="space-y-3">
           <textarea
             id="next-action"
             className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -431,6 +690,38 @@ export default function OfficeDetailPage({
             placeholder="e.g. Drop off donuts week of 6/3 · Follow up on A2L class"
             disabled={savingNextAction}
           />
+          <div className="grid gap-1.5 sm:max-w-[14rem]">
+            <label
+              htmlFor="next-action-due"
+              className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+            >
+              Due date (optional)
+            </label>
+            <input
+              id="next-action-due"
+              type="date"
+              value={nextActionDueDraft}
+              onChange={(e) => setNextActionDueDraft(e.target.value)}
+              disabled={savingNextAction}
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          </div>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={createTodo}
+              onChange={(e) => setCreateTodo(e.target.checked)}
+              disabled={savingNextAction || nextActionDraft.trim().length === 0}
+              className="mt-0.5"
+            />
+            <span>
+              Also add to my AE To-Dos
+              <span className="block text-[11px] text-muted-foreground">
+                Creates a separate To-Do task with the same title{" "}
+                {nextActionDueDraft ? "and due date" : ""}.
+              </span>
+            </span>
+          </label>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
@@ -446,43 +737,19 @@ export default function OfficeDetailPage({
               </span>
             )}
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Log visit — the moment-of-action capture. */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Log visit</CardTitle>
-          <CardDescription>{visitSummary(detail)}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <textarea
-            id="visit-note"
-            className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            value={visitNote}
-            onChange={(e) => setVisitNote(e.target.value)}
-            placeholder="What happened on this visit? (optional)"
-            disabled={loggingVisit}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleLogVisit}
-              disabled={loggingVisit}
+          {nextActionNotice && (
+            <p
+              role="status"
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
             >
-              {loggingVisit ? "Logging…" : "Log visit"}
-            </Button>
-            {visitError && (
-              <span role="alert" className="text-xs text-destructive">
-                {visitError}
-              </span>
-            )}
-          </div>
+              <CheckCircle2 aria-hidden="true" className="size-3.5" />
+              {nextActionNotice}
+            </p>
+          )}
         </CardContent>
       </Card>
 
-      {/* Visit history — most recent first. */}
+      {/* Visit history — most recent first, each entry editable. */}
       <Card>
         <CardHeader>
           <CardTitle className="inline-flex items-center gap-1.5">
@@ -508,21 +775,179 @@ export default function OfficeDetailPage({
           ) : (
             <ul className="divide-y divide-border/60">
               {detail.visits.map((v) => (
-                <li key={v.id} className="py-2 first:pt-0 last:pb-0">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    {formatActivityStamp(v.visited_at)}
-                  </p>
-                  {v.note && (
-                    <p className="mt-0.5 whitespace-pre-wrap text-sm">
-                      {v.note}
-                    </p>
-                  )}
-                </li>
+                <VisitHistoryRow
+                  key={v.id}
+                  visit={v}
+                  onSave={handleEditVisit}
+                />
               ))}
             </ul>
           )}
         </CardContent>
       </Card>
+
+      {/* Optional read-only reminder of the next action's due date. */}
+      {office.next_action && office.next_action_due_date && (
+        <p className="px-1 text-[11px] text-muted-foreground">
+          Next action due {formatDueDate(office.next_action_due_date)}
+        </p>
+      )}
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// VisitHistoryRow — one row, inline-editable.
+//
+// Read mode: shows the visit's timestamp + note (if any) + a small
+// pencil button. Tapping the pencil flips the row into edit mode with
+// a datetime input + textarea + Save/Cancel.
+//
+// State is local to the row so a save-in-flight on one row doesn't
+// affect the others. The parent owns the canonical `visits` array and
+// re-renders the row with the new server-confirmed value on success.
+// ---------------------------------------------------------------------------
+function VisitHistoryRow({
+  visit,
+  onSave,
+}: {
+  visit: OfficeVisitRow;
+  onSave: (
+    visitId: string,
+    payload: { visited_at?: string; visit_note?: string | null },
+  ) => Promise<
+    { ok: true; visit: OfficeVisitRow } | { ok: false; error: string }
+  >;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [whenDraft, setWhenDraft] = useState("");
+  const [noteDraft, setNoteDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed the drafts every time the row enters edit mode so opening
+  // the form after a previous save reflects the current state.
+  const openEdit = useCallback(() => {
+    setWhenDraft(toDateTimeLocalValue(new Date(visit.visited_at)));
+    setNoteDraft(visit.note ?? "");
+    setError(null);
+    setEditing(true);
+  }, [visit.note, visit.visited_at]);
+
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    setError(null);
+  }, []);
+
+  // Memo so the row title doesn't recompute the date string on every
+  // keystroke in the note input.
+  const displayWhen = useMemo(
+    () => formatActivityStamp(visit.visited_at),
+    [visit.visited_at],
+  );
+
+  if (!editing) {
+    return (
+      <li className="py-2 first:pt-0 last:pb-0">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-muted-foreground">
+              {displayWhen}
+            </p>
+            {visit.note && (
+              <p className="mt-0.5 whitespace-pre-wrap text-sm">
+                {visit.note}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={openEdit}
+            aria-label="Edit visit"
+            className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Pencil aria-hidden="true" className="size-3.5" />
+          </button>
+        </div>
+      </li>
+    );
+  }
+
+  return (
+    <li className="py-2 first:pt-0 last:pb-0">
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (saving) return;
+          setSaving(true);
+          setError(null);
+          const visitedAtIso = fromDateTimeLocalValue(whenDraft);
+          // Always send both fields — if the user cleared the note,
+          // null clears the column server-side; if they cleared the
+          // when input we send the previously-loaded value back so we
+          // never accidentally "clear" the timestamp (which the route
+          // would reject anyway since visited_at is NOT NULL).
+          const payload: {
+            visited_at?: string;
+            visit_note?: string | null;
+          } = {
+            visit_note: noteDraft,
+          };
+          if (visitedAtIso) payload.visited_at = visitedAtIso;
+          const result = await onSave(visit.id, payload);
+          setSaving(false);
+          if (result.ok) {
+            setEditing(false);
+          } else {
+            setError(result.error);
+          }
+        }}
+        className="space-y-2"
+      >
+        <div className="grid gap-1">
+          <label
+            htmlFor={`visit-when-${visit.id}`}
+            className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+          >
+            When
+          </label>
+          <input
+            id={`visit-when-${visit.id}`}
+            type="datetime-local"
+            value={whenDraft}
+            onChange={(e) => setWhenDraft(e.target.value)}
+            disabled={saving}
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+          />
+        </div>
+        <textarea
+          value={noteDraft}
+          onChange={(e) => setNoteDraft(e.target.value)}
+          disabled={saving}
+          placeholder="What happened on this visit? (optional)"
+          className="w-full min-h-[60px] rounded-md border border-input bg-background p-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="submit" size="sm" disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={cancelEdit}
+            disabled={saving}
+          >
+            <X aria-hidden="true" className="size-3.5" />
+            Cancel
+          </Button>
+          {error && (
+            <span role="alert" className="text-xs text-destructive">
+              {error}
+            </span>
+          )}
+        </div>
+      </form>
+    </li>
   );
 }

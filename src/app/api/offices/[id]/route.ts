@@ -57,7 +57,9 @@ const UuidSchema = z.uuid();
 const OFFICE_COLUMNS =
   "id, salesperson_id, import_batch_id, name, street, city, state, zip, " +
   "latitude, longitude, source, dedupe_key, environment, " +
-  "office_notes, next_action, created_at, updated_at";
+  "office_notes, next_action, next_action_due_date, " +
+  "office_phone, office_email, external_badger_id, " +
+  "created_at, updated_at";
 
 const VISIT_COLUMNS =
   "id, office_id, salesperson_id, note, visited_at, environment, created_at";
@@ -153,15 +155,16 @@ export async function GET(
 // PATCH
 // ---------------------------------------------------------------------------
 
-// office_notes and next_action are both free-text and both optional. A
-// PATCH request must include AT LEAST one of them — sending an empty
-// body is a 400 (no-op writes are pointless and obscure real bugs).
-// Strings are trimmed; empty/whitespace-only payloads clear the column
-// (stored as NULL). Caps mirror the import route's persistent-text caps.
+// office_notes, next_action, and next_action_due_date are all
+// independently optional. A PATCH request must include AT LEAST one
+// of them — sending an empty body is a 400 (no-op writes are
+// pointless and obscure real bugs). Strings are trimmed;
+// empty/whitespace-only payloads clear the column (stored as NULL).
+// Caps mirror the import route's persistent-text caps.
 const OFFICE_NOTES_MAX = 4000;
 const NEXT_ACTION_MAX = 500;
 
-// Helper: trim a possibly-null/undefined value to text-or-null.
+// Helper: trim a possibly-null/undefined string to text-or-null.
 // Returns `undefined` when the field wasn't supplied (so we can skip
 // writing it), `null` when explicitly cleared, or the trimmed string.
 function normalizePatchField(
@@ -181,16 +184,29 @@ function normalizePatchField(
   return trimmed;
 }
 
+/** YYYY-MM-DD date strings only. Real calendar dates required. */
+const dueDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "next_action_due_date must be in YYYY-MM-DD format.")
+  .refine(
+    (v) => !Number.isNaN(Date.parse(v)),
+    "next_action_due_date is not a real date.",
+  );
+
 const PatchSchema = z
   .object({
     office_notes: z.string().max(OFFICE_NOTES_MAX).nullable().optional(),
     next_action: z.string().max(NEXT_ACTION_MAX).nullable().optional(),
+    next_action_due_date: dueDateSchema.nullable().optional(),
   })
   .refine(
     (body) =>
-      body.office_notes !== undefined || body.next_action !== undefined,
+      body.office_notes !== undefined ||
+      body.next_action !== undefined ||
+      body.next_action_due_date !== undefined,
     {
-      message: "Provide office_notes and/or next_action.",
+      message:
+        "Provide office_notes, next_action, and/or next_action_due_date.",
       path: ["office_notes"],
     },
   );
@@ -212,9 +228,12 @@ export async function PATCH(
 
     // Build the update payload from only the fields the caller supplied.
     // `undefined` means "don't touch this column"; `null` means "clear it";
-    // a trimmed non-empty string is stored as-is.
-    const update: { office_notes?: string | null; next_action?: string | null } =
-      {};
+    // a trimmed non-empty string / valid date is stored as-is.
+    const update: {
+      office_notes?: string | null;
+      next_action?: string | null;
+      next_action_due_date?: string | null;
+    } = {};
     const notes = normalizePatchField(
       body.office_notes,
       OFFICE_NOTES_MAX,
@@ -227,15 +246,24 @@ export async function PATCH(
     );
     if (notes !== undefined) update.office_notes = notes;
     if (nextAction !== undefined) update.next_action = nextAction;
+    // `next_action_due_date` is a YYYY-MM-DD string or null — Zod has
+    // already validated the shape. We pass it straight through so the
+    // route stays uniform with the other PATCH fields.
+    if (body.next_action_due_date !== undefined) {
+      update.next_action_due_date = body.next_action_due_date;
+    }
 
-    // Defense in depth: if both ended up undefined (shouldn't happen
-    // given the Zod refine above) bail rather than issuing a no-op
-    // UPDATE that fires the updated_at trigger.
+    // Defense in depth: if all three ended up undefined (shouldn't
+    // happen given the Zod refine above) bail rather than issuing a
+    // no-op UPDATE that fires the updated_at trigger.
     if (
       update.office_notes === undefined &&
-      update.next_action === undefined
+      update.next_action === undefined &&
+      update.next_action_due_date === undefined
     ) {
-      throw badRequest("Provide office_notes and/or next_action.");
+      throw badRequest(
+        "Provide office_notes, next_action, and/or next_action_due_date.",
+      );
     }
 
     const supabase = getServerSupabase();

@@ -111,6 +111,7 @@ type OfficeBaseRow = {
   state: string | null;
   zip: string | null;
   next_action: string | null;
+  next_action_due_date: string | null;
 };
 
 type VisitTimestampRow = {
@@ -135,7 +136,9 @@ export async function GET(req: Request) {
     // Base query: this AE's sandbox offices, alphabetical pre-fetch.
     let officeQuery = supabase
       .from(OFFICES_TABLE)
-      .select("id, name, street, city, state, zip, next_action")
+      .select(
+        "id, name, street, city, state, zip, next_action, next_action_due_date",
+      )
       .eq("salesperson_id", me.id)
       .eq("environment", "test")
       .order("name", { ascending: true })
@@ -208,6 +211,7 @@ export async function GET(req: Request) {
         state: o.state,
         zip: o.zip,
         next_action: o.next_action,
+        next_action_due_date: o.next_action_due_date,
         last_visit_at: v?.last ?? null,
         visit_count: v?.count ?? 0,
       };

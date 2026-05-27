@@ -61,6 +61,11 @@ export type OfficeRow = {
   office_notes: string | null;
   /** Persistent next-step intent. Survives across visits. */
   next_action: string | null;
+  /** Optional due date paired with `next_action`. YYYY-MM-DD; nullable
+   *  even when `next_action` is set (a follow-up may not yet be
+   *  scheduled). Stored as DATE in Postgres — see
+   *  offices_next_action_due_date.sql for why we don't use TIMESTAMPTZ. */
+  next_action_due_date: string | null;
   /** Contact phone (`_Phone` in Badger). Refreshed on every import —
    *  contact info is factual source-system data, not AE-edited. */
   office_phone: string | null;
@@ -160,6 +165,8 @@ export type OfficeListItem = {
   state: string | null;
   zip: string | null;
   next_action: string | null;
+  /** Paired with `next_action`. YYYY-MM-DD or null. */
+  next_action_due_date: string | null;
   last_visit_at: string | null;
   visit_count: number;
 };

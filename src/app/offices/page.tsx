@@ -66,6 +66,23 @@ function formatCityState(item: OfficeListItem): string {
   return parts.join(" ");
 }
 
+/** YYYY-MM-DD → "Jun 5, 2026" without pulling in a date lib here.
+ *  Returns null for malformed input so the caller can skip rendering. */
+function formatDueDate(value: string | null): string | null {
+  if (!value) return null;
+  const [yStr, mStr, dStr] = value.split("-");
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (!y || !m || !d) return null;
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 export default function OfficesListPage() {
   const router = useRouter();
   const { salesperson, loaded: sessionLoaded } = useSalesperson();
@@ -335,6 +352,17 @@ export default function OfficesListPage() {
                               Next:
                             </span>{" "}
                             {item.next_action}
+                            {(() => {
+                              const due = formatDueDate(
+                                item.next_action_due_date,
+                              );
+                              return due ? (
+                                <span className="text-muted-foreground">
+                                  {" "}
+                                  · due {due}
+                                </span>
+                              ) : null;
+                            })()}
                           </p>
                         )}
                       </div>
