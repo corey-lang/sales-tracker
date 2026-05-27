@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -38,9 +38,11 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //   1. Header (Back + Test pill)
 //   2. Sandbox banner
 //   3. SNAPSHOT CARD — name, clickable address (Directions), visit
-//      stats, primary actions (Log Visit + Directions). The Log Visit
-//      form is COLLAPSED by default and expands inline within this
-//      card when the user taps "Log visit."
+//      stats, three primary actions: [Log visit] (one-tap, no form —
+//      the most-used AE workflow), [Log visit + note] (opens the
+//      inline form with datetime + note), [Directions] (anchor to
+//      Maps). The inline form is COLLAPSED by default and only
+//      appears when the user explicitly taps the +note button.
 //   4. Office Notes — preview by default (current notes or empty
 //      copy) + Edit button. Textarea + Save/Cancel only on demand.
 //   5. Next Action — preview by default (current next action + due
@@ -218,6 +220,28 @@ export default function OfficeDetailPage({
   const [visitNote, setVisitNote] = useState("");
   const [loggingVisit, setLoggingVisit] = useState(false);
   const [visitError, setVisitError] = useState<string | null>(null);
+
+  // One-tap "Log visit" path — no note, no time picker. The most
+  // common AE action is "I stopped by the office," so this is the
+  // primary button in the snapshot card. Separate in-flight flag
+  // from `loggingVisit` so the inline form's button state and the
+  // quick button can be reasoned about independently; both guard
+  // each other to prevent a duplicate visit on a rapid double-tap.
+  const [loggingQuickVisit, setLoggingQuickVisit] = useState(false);
+  /** Auto-clearing confirmation pill ("Visit logged."). */
+  const [quickVisitNotice, setQuickVisitNotice] = useState<string | null>(
+    null,
+  );
+  const quickVisitNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(() => {
+    return () => {
+      if (quickVisitNoticeTimerRef.current) {
+        clearTimeout(quickVisitNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   // ---- Section open/close ------------------------------------------------
   // Each "card" defaults to a compact preview so the page feels like a
@@ -462,6 +486,75 @@ export default function OfficeDetailPage({
   }
 
   /**
+   * One-tap visit log. Sends an empty body — the server defaults
+   * `visited_at` to NOW() and `note` to NULL — so this is the lowest-
+   * friction path for "I stopped by." Same local-state merge as the
+   * form path.
+   *
+   * Duplicate-submit guard: refuses to fire when either visit path
+   * is already in flight. Both buttons in the snapshot card also
+   * disable themselves on either flag so a rapid double-tap (where
+   * React hasn't re-rendered between presses) can't slip through.
+   */
+  async function handleQuickLogVisit() {
+    if (loggingQuickVisit || loggingVisit) return;
+    setLoggingQuickVisit(true);
+    setVisitError(null);
+    setQuickVisitNotice(null);
+    try {
+      const res = await apiFetch(`/api/offices/${officeId}/visits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Intentional empty body. Server's Zod schema accepts this:
+        // both fields are optional, and omitting `visited_at` falls
+        // through to the column DEFAULT NOW() on the offices_visits
+        // table. Empty `visit_note` is normalized to NULL.
+        body: JSON.stringify({}),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | (VisitResponse & ApiErrorShape)
+        | null;
+      if (!res.ok || !data?.visit) {
+        setVisitError(
+          data?.error ?? `Could not log visit (${res.status}).`,
+        );
+        return;
+      }
+
+      // Local merge mirrors the form path: prepend, re-sort by
+      // visited_at desc, bump count + last_visit_at.
+      if (detail) {
+        const merged = [data.visit, ...detail.visits].sort((a, b) =>
+          b.visited_at.localeCompare(a.visited_at),
+        );
+        setDetail({
+          ...detail,
+          visits: merged,
+          last_visit_at: merged[0].visited_at,
+          visit_count: detail.visit_count + 1,
+        });
+      }
+
+      // Soft success pill, auto-clears after a beat so the user
+      // gets a "yep, saved" hit without the page feeling cluttered.
+      // Any previous timer is cleared first so back-to-back logs
+      // don't extend the fade window unpredictably.
+      if (quickVisitNoticeTimerRef.current) {
+        clearTimeout(quickVisitNoticeTimerRef.current);
+      }
+      setQuickVisitNotice("Visit logged.");
+      quickVisitNoticeTimerRef.current = setTimeout(() => {
+        setQuickVisitNotice(null);
+        quickVisitNoticeTimerRef.current = null;
+      }, 2500);
+    } catch {
+      setVisitError("Network error while logging this visit.");
+    } finally {
+      setLoggingQuickVisit(false);
+    }
+  }
+
+  /**
    * Inline edit save for a single visit. Re-applied locally on success
    * (server is authoritative for the row's exact ISO string). Errors
    * surface inline in the row's edit form, not at the page level.
@@ -661,18 +754,32 @@ export default function OfficeDetailPage({
           </dl>
 
           {/* Primary action row.
-              Default state: just two buttons — Log visit (opens the
-              inline form) + Directions (anchor). No textareas on
-              first paint. */}
+              Default state: three buttons — Log visit (one-tap),
+              Log visit + note (opens the inline form), Directions
+              (anchor). The one-tap path is the most-used AE action
+              ("I stopped by") and lives first / filled-style so it
+              has the largest touch target on phones. The form path
+              keeps the same inline editor it's always had. */}
           {!visitOpen && (
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 size="sm"
-                onClick={openLogVisit}
-                disabled={loggingVisit}
+                onClick={handleQuickLogVisit}
+                // Both flags disable both buttons so a rapid double-
+                // tap or a tap-while-form-open can't double-submit.
+                disabled={loggingQuickVisit || loggingVisit}
               >
-                Log visit
+                {loggingQuickVisit ? "Logging…" : "Log visit"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={openLogVisit}
+                disabled={loggingQuickVisit || loggingVisit}
+              >
+                Log visit + note
               </Button>
               {mapsHref && (
                 <a
@@ -687,6 +794,30 @@ export default function OfficeDetailPage({
                   <Navigation aria-hidden="true" className="size-4" />
                   Directions
                 </a>
+              )}
+              {/* Auto-clearing success pill after a one-tap log.
+                  `role="status"` (implicit `aria-live="polite"`) so
+                  screen readers announce the confirmation without
+                  interrupting whatever the user is reading. */}
+              {quickVisitNotice && (
+                <p
+                  role="status"
+                  className="basis-full inline-flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400"
+                >
+                  <CheckCircle2 aria-hidden="true" className="size-3.5" />
+                  {quickVisitNotice}
+                </p>
+              )}
+              {/* Quick-log errors surface here. The inline form's
+                  error span only renders when visitOpen, so without
+                  this catch a quick-log failure would be silent. */}
+              {visitError && (
+                <p
+                  role="alert"
+                  className="basis-full text-xs text-destructive"
+                >
+                  {visitError}
+                </p>
               )}
               <p className="basis-full text-[11px] text-muted-foreground">
                 {visitSummary(detail)}
