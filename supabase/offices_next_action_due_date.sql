@@ -1,0 +1,56 @@
+-- ===========================================================================
+-- offices — optional due date on the per-office next action.
+-- ===========================================================================
+-- WHAT THIS IS
+--   Adds a single nullable DATE column to `offices`:
+--
+--     next_action_due_date DATE NULL
+--
+--   The column is paired with the existing `next_action TEXT NULL` from
+--   migration #27. Together they form one office-level follow-up:
+--
+--     next_action            "Drop donuts next Friday"
+--     next_action_due_date   2026-06-05
+--
+--   Both nullable, both independently clearable. The UI surface treats
+--   the date as optional adornment to the text — clearing the text
+--   should also clear the date, but the route enforces only that both
+--   columns can be set/cleared independently; product-level coupling
+--   lives in the office-detail page.
+--
+-- WHY DATE, NOT TIMESTAMPTZ
+--   Office follow-ups read as calendar days ("Drop off donuts Friday"),
+--   not as timestamps. DATE avoids timezone ambiguity (a TIMESTAMPTZ
+--   chosen at 11pm local could render as the wrong day for a teammate
+--   reviewing the office in a different TZ — vanishingly rare for a
+--   single-team app but trivially avoidable).
+--
+-- WHY NOT A SEPARATE next_actions TABLE
+--   An office only ever has one active next action at a time — the
+--   UX treats it as a singleton field, not a list. A separate table
+--   would be the right call when next_actions become a queue with
+--   history; that's a future migration when the product needs it.
+--
+-- AE TO-DO HOOK
+--   "Also add this to my AE To-Dos" is intentionally a CLIENT-side
+--   dual-write — the office-detail page calls POST /api/tasks after
+--   PATCH /api/offices/[id] succeeds. The two systems stay decoupled:
+--   no FK from offices to ae_tasks, no flag on the office row that
+--   says "I'm also a task." A teammate later wiping a task or
+--   completing one has no effect on the office row, and vice-versa.
+--
+-- IDEMPOTENT
+--   ADD COLUMN IF NOT EXISTS. Safe to re-run.
+-- ===========================================================================
+
+ALTER TABLE offices
+  ADD COLUMN IF NOT EXISTS next_action_due_date DATE;
+
+-- ===========================================================================
+-- VERIFICATION
+-- ===========================================================================
+-- SELECT column_name, data_type, is_nullable
+-- FROM information_schema.columns
+-- WHERE table_name = 'offices'
+--   AND column_name = 'next_action_due_date';
+--   -- expect one row, data_type=date, is_nullable=YES.
