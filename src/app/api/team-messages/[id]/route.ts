@@ -1,5 +1,10 @@
 import { getServerSupabase } from "@/lib/supabase/server";
-import { handleApiError, notFound, requireAdmin } from "@/lib/server/auth";
+import {
+  ApiError,
+  handleApiError,
+  notFound,
+  requireAdmin,
+} from "@/lib/server/auth";
 import { TEAM_MESSAGES_TABLE, type TeamMessage } from "@/lib/team-messages";
 
 // Juice Box — admin moderation. Soft-delete a single post.
@@ -13,14 +18,14 @@ import { TEAM_MESSAGES_TABLE, type TeamMessage } from "@/lib/team-messages";
 export const runtime = "nodejs";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider";
+  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
 
 export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id } = await params;
     const supabase = getServerSupabase();
 
@@ -35,7 +40,13 @@ export async function DELETE(
       .select(MESSAGE_COLUMNS);
 
     if (res.error) {
-      throw new Error(`Failed to delete message: ${res.error.message}`);
+      // Provider error text never reaches the caller — it can include
+      // schema names, connection state, or query fragments. Logged
+      // server-side with the message id; caller sees a sanitized 500.
+      console.warn(
+        `[team-messages] delete failed admin=${me.id} message_id=${id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+      );
+      throw new ApiError(500, "Couldn't delete that message.");
     }
     if (!res.data || res.data.length === 0) {
       throw notFound("Message not found.");

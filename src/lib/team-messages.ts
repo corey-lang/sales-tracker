@@ -48,6 +48,29 @@ export type TeamMessageMedia = {
   provider: string | null;
 };
 
+/**
+ * One image attached to a Juice Box post. Persisted as an element of the
+ * `media_attachments` JSONB array on team_messages (see
+ * juice_box_multi_image.sql). Only image posts use this; GIF posts and
+ * text-only posts have `media_attachments` = null.
+ *
+ * For posts created BEFORE juice_box_multi_image.sql ran, the array is
+ * also null even when `media_type='image'` — the single image is in the
+ * `media_*` columns. `teamMessageMediaList` papers over that difference.
+ */
+export type TeamMessageAttachment = {
+  url: string;
+  storage_path: string;
+  width: number | null;
+  height: number | null;
+  alt: string | null;
+};
+
+/** Hard cap on attachments per post. Mirrors the server-side Zod check
+ *  in /api/team-messages POST. Picked to keep the upload+post round trip
+ *  tractable on a phone and the rendered grid readable in the feed. */
+export const MAX_IMAGES_PER_POST = 10;
+
 export type TeamMessage = {
   id: string;
   created_at: string;
@@ -69,7 +92,9 @@ export type TeamMessage = {
   reply_to_message_preview: string | null;
   /** Media attachment fields. All null on text-only posts; the two
    *  required halves (type, url) are CHECK-paired in the DB so the wire
-   *  shape is always consistent. */
+   *  shape is always consistent. For multi-image posts the FIRST image
+   *  is mirrored into these columns so historical readers + the
+   *  reply-preview placeholder logic keep working unchanged. */
   media_type: MediaType | null;
   media_url: string | null;
   media_thumb_url: string | null;
@@ -77,6 +102,11 @@ export type TeamMessage = {
   media_height: number | null;
   media_alt: string | null;
   media_provider: string | null;
+  /** Multi-image attachments. Non-null only on image posts written after
+   *  juice_box_multi_image.sql ran; null on every text-only post, every
+   *  GIF post, and on historical single-image posts (the latter render
+   *  from `media_*` via teamMessageMediaList's fallback branch). */
+  media_attachments: TeamMessageAttachment[] | null;
 };
 
 /** Returns the post's media as a single slice if it has one, else null. */
@@ -91,6 +121,34 @@ export function teamMessageMedia(m: TeamMessage): TeamMessageMedia | null {
     alt: m.media_alt,
     provider: m.media_provider,
   };
+}
+
+/**
+ * Returns every media slice attached to the post in display order — the
+ * unified shape the feed and lightbox iterate over. Resolution order:
+ *
+ *   1. If `media_attachments` is non-empty, expand each entry into an
+ *      image-typed slice. This is the multi-image path.
+ *   2. Otherwise if `media_type` + `media_url` are set, return a single-
+ *      element list built from the `media_*` columns. This covers GIFs
+ *      (which never use attachments) and historical single-image posts
+ *      written before juice_box_multi_image.sql.
+ *   3. Otherwise return [] (text-only post).
+ */
+export function teamMessageMediaList(m: TeamMessage): TeamMessageMedia[] {
+  if (m.media_attachments && m.media_attachments.length > 0) {
+    return m.media_attachments.map((a) => ({
+      type: "image" as const,
+      url: a.url,
+      thumb_url: null,
+      width: a.width,
+      height: a.height,
+      alt: a.alt,
+      provider: "supabase",
+    }));
+  }
+  const single = teamMessageMedia(m);
+  return single ? [single] : [];
 }
 
 /** Max client-accepted file size for image uploads. Mirrors the bucket's

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
+  ApiError,
   badRequest,
   handleApiError,
   parseBody,
@@ -11,11 +12,14 @@ import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
 import { fanOutJuiceBoxPush } from "@/lib/server/push";
 import {
   FEED_PAGE_SIZE,
+  JUICE_BOX_MEDIA_BUCKET,
+  MAX_IMAGES_PER_POST,
   MESSAGE_MAX_LENGTH,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_REACTIONS_TABLE,
   type TeamMessage,
+  type TeamMessageAttachment,
   type TeamMessageReaction,
   type TeamMessageReactionRow,
   type TeamMessageReactor,
@@ -97,7 +101,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider";
+  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
+
+// One image attachment as posted by the client. `url` is the public URL
+// minted by /api/juice-box/media/sign-upload; dimensions are read off
+// the file before posting. Alt is optional and capped to a sane length.
+const ImagePayloadSchema = z.object({
+  url: z.url(),
+  width: z.number().int().positive().max(20000),
+  height: z.number().int().positive().max(20000),
+  alt: z.string().max(500).optional(),
+});
 
 const CreateMessageSchema = z
   .object({
@@ -107,34 +121,32 @@ const CreateMessageSchema = z
       .trim()
       .max(MESSAGE_MAX_LENGTH, `Keep posts under ${MESSAGE_MAX_LENGTH} characters.`),
     reply_to_message_id: z.uuid().optional(),
-    // Image attachment — declared by sending image_url (the public URL
-    // produced by the signed-upload route). Dimensions read by the
-    // client from the file before posting; alt text optional.
-    image_url: z.url().optional(),
-    image_width: z.number().int().positive().max(20000).optional(),
-    image_height: z.number().int().positive().max(20000).optional(),
-    image_alt: z.string().max(500).optional(),
+    // Image attachments. One or many; each URL is independently
+    // validated against the caller's signed-upload prefix below. Single
+    // and multi-image posts share the same wire shape — the client
+    // always sends a 1+ element array.
+    images: z
+      .array(ImagePayloadSchema)
+      .min(1)
+      .max(
+        MAX_IMAGES_PER_POST,
+        `Keep posts under ${MAX_IMAGES_PER_POST} images.`,
+      )
+      .optional(),
     // GIF attachment — declared by sending gif_id only. Server re-
     // fetches the asset from the provider and derives every other
     // media_* field from that response.
     gif_id: z.string().min(1).max(128).optional(),
   })
-  .refine((d) => !(d.image_url && d.gif_id), {
-    message: "A post can't have both an image and a GIF.",
+  .refine((d) => !(d.images && d.gif_id), {
+    message: "A post can't have both images and a GIF.",
     path: ["gif_id"],
   })
   .refine(
-    (d) => d.message.length > 0 || d.image_url || d.gif_id,
+    (d) => d.message.length > 0 || (d.images && d.images.length > 0) || d.gif_id,
     {
       message: "A message or media attachment is required.",
       path: ["message"],
-    },
-  )
-  .refine(
-    (d) => !d.image_url || (d.image_width && d.image_height),
-    {
-      message: "Image dimensions are required.",
-      path: ["image_width"],
     },
   );
 
@@ -298,7 +310,14 @@ export async function GET(req: Request) {
 
     const res = await query;
     if (res.error) {
-      throw new Error(`Failed to load messages: ${res.error.message}`);
+      // Provider error text never reaches the caller — it can include
+      // schema names, connection state, or query fragments. Logged
+      // server-side with the `[team-messages]` prefix; caller sees a
+      // sanitized 500. Same posture as src/lib/server/auth.ts.
+      console.warn(
+        `[team-messages] feed load failed caller=${me.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+      );
+      throw new ApiError(500, "Couldn't load the feed.");
     }
 
     const messages = ((res.data ?? []) as TeamMessage[]).slice().reverse();
@@ -316,9 +335,11 @@ export async function GET(req: Request) {
         .order("created_at", { ascending: true });
 
       if (reactionsRes.error) {
-        throw new Error(
-          `Failed to load reactions: ${reactionsRes.error.message}`,
+        // Same sanitization posture as the messages query above.
+        console.warn(
+          `[team-messages] reactions load failed caller=${me.id} code=${reactionsRes.error.code ?? "?"} msg=${reactionsRes.error.message}`,
         );
+        throw new ApiError(500, "Couldn't load the feed.");
       }
 
       reactionsByMessage = aggregateReactions(
@@ -370,7 +391,13 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       if (parentRes.error) {
-        throw new Error(`Failed to look up parent: ${parentRes.error.message}`);
+        // Don't surface the raw provider error to the caller — it can
+        // include schema/connection details. Logged server-side with
+        // the parent id for debugging; caller sees a sanitized 500.
+        console.warn(
+          `[team-messages] reply parent lookup failed caller=${me.id} parent_id=${body.reply_to_message_id} code=${parentRes.error.code ?? "?"} msg=${parentRes.error.message}`,
+        );
+        throw new ApiError(500, "Couldn't load the post you're replying to.");
       }
       if (!parentRes.data || parentRes.data.is_deleted) {
         throw badRequest("The post you tried to reply to is no longer available.");
@@ -402,8 +429,17 @@ export async function POST(req: Request) {
     // Build media fields server-side. For image posts we DERIVE the
     // storage path from a validated URL; for GIFs we RE-FETCH the asset
     // from the provider by id and copy fields directly. The client's
-    // only contributions are `image_url` + intrinsic dims (image) or
-    // `gif_id` (gif) — every other persisted field is server-truth.
+    // only contributions are the image array (each entry: url + intrinsic
+    // dims + optional alt) or `gif_id` (gif) — every other persisted
+    // field is server-truth.
+    //
+    // MULTI-IMAGE STORAGE
+    //   For image posts the canonical list lives in `media_attachments`
+    //   (JSONB array). The FIRST image is ALSO mirrored into the
+    //   `media_*` columns so historical readers (admin tooling, the
+    //   reply-preview placeholder logic that keys off media_type, any
+    //   cached client running an older bundle) keep working unchanged.
+    //   For single-image posts the array has exactly one element.
     let mediaFields: {
       media_type: "image" | "gif" | null;
       media_url: string | null;
@@ -413,6 +449,7 @@ export async function POST(req: Request) {
       media_alt: string | null;
       media_provider: string | null;
       media_storage_path: string | null;
+      media_attachments: TeamMessageAttachment[] | null;
     } = {
       media_type: null,
       media_url: null,
@@ -422,26 +459,49 @@ export async function POST(req: Request) {
       media_alt: null,
       media_provider: null,
       media_storage_path: null,
+      media_attachments: null,
     };
 
-    if (body.image_url) {
-      const storagePath = deriveImageStoragePath(body.image_url, me.id);
-      if (!storagePath) {
-        // Either the URL isn't ours, isn't shaped like our signed-upload
-        // output, or — most likely — belongs to a DIFFERENT user's
-        // path prefix. All cases produce the same generic message so
-        // we don't leak internal validation details.
-        throw badRequest("Image must be uploaded through this app.");
+    if (body.images && body.images.length > 0) {
+      // Validate every URL belongs to THIS user's signed-upload prefix
+      // BEFORE we build the persisted row. Reject the whole post on
+      // the first bad entry — partial inserts here would leak the
+      // ones we accepted into the feed even though the user's intent
+      // was clearly the full batch.
+      const attachments: TeamMessageAttachment[] = [];
+      for (const img of body.images) {
+        const storagePath = deriveImageStoragePath(img.url, me.id);
+        if (!storagePath) {
+          // Either the URL isn't ours, isn't shaped like our signed-
+          // upload output, or — most likely — belongs to a DIFFERENT
+          // user's path prefix. Same generic message as the single-
+          // image path used to give so we don't leak internal
+          // validation details.
+          throw badRequest("Image must be uploaded through this app.");
+        }
+        attachments.push({
+          url: img.url,
+          storage_path: storagePath,
+          width: img.width,
+          height: img.height,
+          alt: img.alt ?? null,
+        });
       }
+      const first = attachments[0];
       mediaFields = {
         media_type: "image",
-        media_url: body.image_url,
+        // Mirror the first image into media_* so the reply-preview
+        // lookup (which only selects media_type) keeps detecting this
+        // as an image post, and so historical clients render the
+        // first image without understanding media_attachments.
+        media_url: first.url,
         media_thumb_url: null,
-        media_width: body.image_width ?? null,
-        media_height: body.image_height ?? null,
-        media_alt: body.image_alt ?? null,
+        media_width: first.width,
+        media_height: first.height,
+        media_alt: first.alt,
         media_provider: "supabase",
-        media_storage_path: storagePath,
+        media_storage_path: first.storage_path,
+        media_attachments: attachments,
       };
     } else if (body.gif_id) {
       const gif = await fetchGiphyById(body.gif_id);
@@ -473,6 +533,9 @@ export async function POST(req: Request) {
         media_alt: gif.alt,
         media_provider: "giphy",
         media_storage_path: null,
+        // GIFs never use the attachments array — single asset, single
+        // remote URL, validated by re-fetch above.
+        media_attachments: null,
       };
     }
 
@@ -491,6 +554,7 @@ export async function POST(req: Request) {
       media_alt: string | null;
       media_provider: string | null;
       media_storage_path: string | null;
+      media_attachments: TeamMessageAttachment[] | null;
     } = {
       salesperson_id: me.id,
       salesperson_name: me.first_name,
@@ -510,7 +574,39 @@ export async function POST(req: Request) {
       .single();
 
     if (res.error || !res.data) {
-      throw new Error(res.error?.message ?? "Failed to post message.");
+      // Don't surface the raw provider error to the caller. Logged
+      // server-side with the caller id for debugging; caller sees a
+      // sanitized 500.
+      console.warn(
+        `[team-messages] insert failed caller=${me.id} code=${res.error?.code ?? "?"} msg=${res.error?.message ?? "no row returned"}`,
+      );
+      // Best-effort cleanup of the just-uploaded image objects so a
+      // failed insert doesn't leave orphan blobs in the bucket. The
+      // signed-upload route already minted these; the service-role
+      // client below can delete them by path. Swallow any cleanup
+      // error — the insert failure is the user-visible problem and
+      // an orphan object is recoverable later if needed.
+      //
+      // ORPHAN TRADEOFF
+      //   This cleans up the post-creation-failure case only. If the
+      //   user closes the tab between signed-upload success and the
+      //   POST to this route (or the network drops mid-POST), the
+      //   objects remain in storage with no row referencing them.
+      //   That class of orphan is intentionally deferred — fixing it
+      //   would require a server-side TTL cleanup job or a client-
+      //   side cleanup endpoint, neither of which is in scope here.
+      if (mediaFields.media_attachments && mediaFields.media_attachments.length > 0) {
+        const paths = mediaFields.media_attachments.map((a) => a.storage_path);
+        const cleanup = await supabase.storage
+          .from(JUICE_BOX_MEDIA_BUCKET)
+          .remove(paths);
+        if (cleanup.error) {
+          console.warn(
+            `[team-messages] orphan cleanup failed caller=${me.id} paths=${paths.length} msg=${cleanup.error.message}`,
+          );
+        }
+      }
+      throw new ApiError(500, "Couldn't post your message.");
     }
 
     const message: TeamMessageWithReactions = {

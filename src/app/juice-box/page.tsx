@@ -14,7 +14,10 @@ import { useRouter } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
   ArrowDown,
+  ChevronLeft,
+  ChevronRight,
   CornerUpLeft,
+  Download,
   ImagePlus,
   Loader2,
   MoreVertical,
@@ -37,6 +40,7 @@ import {
   ALLOWED_REACTIONS,
   FEED_PAGE_SIZE,
   JUICE_BOX_MEDIA_BUCKET,
+  MAX_IMAGES_PER_POST,
   MEDIA_ALLOWED_IMAGE_MIME_TYPES,
   MEDIA_MAX_FILE_SIZE_BYTES,
   MESSAGE_MAX_LENGTH,
@@ -45,7 +49,7 @@ import {
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_REACTIONS_CHANNEL,
   TEAM_MESSAGE_REACTIONS_TABLE,
-  teamMessageMedia,
+  teamMessageMediaList,
   type ReactionEmoji,
   type TeamMessage,
   type TeamMessageMedia,
@@ -791,10 +795,20 @@ function JuiceBoxFeed({
   );
 
   // Lightbox state — set when the user taps any inline image/GIF in the
-  // feed. The full TeamMessageMedia slice is passed so the lightbox can
-  // size itself to the asset's intrinsic aspect ratio.
-  const [lightbox, setLightbox] = useState<TeamMessageMedia | null>(null);
+  // feed. We carry the whole media list for the post + the index the
+  // user tapped so multi-image posts can paginate left/right inside the
+  // lightbox without re-opening. For single-image / GIF posts the list
+  // is one entry and the chevrons stay hidden.
+  const [lightbox, setLightbox] = useState<{
+    items: TeamMessageMedia[];
+    index: number;
+  } | null>(null);
   const closeLightbox = useCallback(() => setLightbox(null), []);
+  const openLightbox = useCallback(
+    (items: TeamMessageMedia[], index: number) =>
+      setLightbox({ items, index }),
+    [],
+  );
 
   // "Jump to latest" pill visibility. Mirrors FeedList's nearBottomRef
   // via onNearBottomChange — the pill renders only when the user is
@@ -1341,7 +1355,7 @@ function JuiceBoxFeed({
         onShowReactionDetails={(messageId, emoji) =>
           setReactionDetails({ messageId, emoji })
         }
-        onOpenMedia={setLightbox}
+        onOpenMedia={openLightbox}
         initialIds={initialIds}
         forceScrollRef={forceScrollRef}
         lastReadAt={lastReadAt}
@@ -1409,31 +1423,45 @@ function JuiceBoxFeed({
         />
       )}
       {lightbox && (
-        <MediaLightbox media={lightbox} onClose={closeLightbox} />
+        <MediaLightbox
+          items={lightbox.items}
+          index={lightbox.index}
+          onIndexChange={(next) =>
+            setLightbox((prev) => (prev ? { ...prev, index: next } : prev))
+          }
+          onClose={closeLightbox}
+        />
       )}
     </>
   );
 }
 
 /**
- * Composer state for a pending attachment. Image flow stores the local
- * File + an objectURL preview until the user hits Post (which triggers
- * an upload). GIF flow already has the provider id from the picker,
- * so no upload step — we just stash the picked GifResult for preview
- * and submit its `id` to the server, which re-fetches the asset.
+ * One pending image in the composer. We hold the raw File + an objectURL
+ * preview until the user hits Post (which triggers a per-file signed
+ * upload). `width`/`height` are populated asynchronously once the
+ * preview Image() loads; both are nullable until then.
+ *
+ * `id` is a stable per-attachment key (random UUID) so React lists +
+ * the X-to-remove button track each pending image across re-orderings.
+ */
+type PendingImage = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  width: number | null;
+  height: number | null;
+};
+
+/**
+ * Composer state for a pending attachment. Multi-image flow stores an
+ * array of PendingImage; the GIF flow stores a single GifResult since
+ * GIFs are mutually exclusive with images (server-side too — the POST
+ * route refuses a payload that mixes the two).
  */
 type PendingMedia =
-  | {
-      kind: "image";
-      file: File;
-      previewUrl: string;
-      width: number | null;
-      height: number | null;
-    }
-  | {
-      kind: "gif";
-      gif: GifResult;
-    };
+  | { kind: "images"; items: PendingImage[] }
+  | { kind: "gif"; gif: GifResult };
 
 // ---------------------------------------------------------------------------
 // GIF picker module-level cache
@@ -1531,11 +1559,17 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     error !== null ||
     gifPickerOpen;
 
-  // Revoke any objectURL when the attached image changes or the
+  // Revoke any objectURL when the attached images change or the
   // composer unmounts, so we don't leak blob handles between attaches.
+  // For multi-image posts this revokes every preview in the batch on
+  // teardown; per-image revocation also happens on remove (see
+  // removeImage / clearMedia below) so individual previews don't leak
+  // between picks.
   useEffect(() => {
     return () => {
-      if (media?.kind === "image") URL.revokeObjectURL(media.previewUrl);
+      if (media?.kind === "images") {
+        for (const img of media.items) URL.revokeObjectURL(img.previewUrl);
+      }
     };
   }, [media]);
 
@@ -1561,59 +1595,130 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     };
   }, []);
 
-  /** Local-only validation + preview generation for an image pick. */
-  const attachImageFile = (file: File) => {
-    if (!(MEDIA_ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) {
-      setError("Pick a JPG, PNG, WebP, or GIF image.");
-      return;
+  /**
+   * Local-only validation + preview generation for a batch of image
+   * picks. Each file in `files` runs the same MIME / size checks the
+   * single-image flow used; the first failure short-circuits and
+   * reports its problem (so the user gets a precise error rather than
+   * silent omission). Successful picks are APPENDED to the current
+   * pending list when the existing media is also images — otherwise
+   * (no media, or a GIF was attached) the new list replaces whatever
+   * was there.
+   *
+   * Caps the cumulative count at MAX_IMAGES_PER_POST (same limit the
+   * server enforces) so the user can't queue more than the route will
+   * accept. Reads intrinsic dims off an Image() per-file so the
+   * inserted record carries width/height; the async load updates
+   * media state by matching `previewUrl` so reorders or removes can't
+   * apply stale dims to the wrong entry.
+   */
+  const attachImageFiles = (files: File[]) => {
+    if (files.length === 0) return;
+
+    for (const file of files) {
+      if (!(MEDIA_ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) {
+        setError("Pick JPG, PNG, WebP, or GIF images.");
+        return;
+      }
+      if (file.size > MEDIA_MAX_FILE_SIZE_BYTES) {
+        const mb = Math.round(MEDIA_MAX_FILE_SIZE_BYTES / (1024 * 1024));
+        setError(`Each image must be under ${mb} MB.`);
+        return;
+      }
     }
-    if (file.size > MEDIA_MAX_FILE_SIZE_BYTES) {
-      const mb = Math.round(MEDIA_MAX_FILE_SIZE_BYTES / (1024 * 1024));
-      setError(`Image is too large — keep it under ${mb} MB.`);
-      return;
-    }
-    const previewUrl = URL.createObjectURL(file);
-    // Drop any prior pending media (image OR gif). Read intrinsic dims
-    // off an Image() so the inserted record carries width/height.
+
+    const newImages: PendingImage[] = files.map((file) => ({
+      // crypto.randomUUID is available in every browser we support
+      // (Chrome 92+, Safari 15.4+, Firefox 95+). The id only needs
+      // to be unique within this composer mount.
+      id: crypto.randomUUID(),
+      file,
+      previewUrl: URL.createObjectURL(file),
+      width: null,
+      height: null,
+    }));
+
     setMedia((prev) => {
-      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
-      return {
-        kind: "image",
-        file,
-        previewUrl,
-        width: null,
-        height: null,
-      };
+      const existing = prev?.kind === "images" ? prev.items : [];
+      const combined = [...existing, ...newImages];
+      if (combined.length > MAX_IMAGES_PER_POST) {
+        // Revoke the previews we won't keep so the blob handles
+        // don't dangle. We trim from the END of the new picks (the
+        // earliest existing images are preserved) since that matches
+        // a user mental model of "I added too many, drop the latest."
+        const overflow = combined.length - MAX_IMAGES_PER_POST;
+        const dropped = combined.slice(MAX_IMAGES_PER_POST);
+        for (const img of dropped) URL.revokeObjectURL(img.previewUrl);
+        setError(
+          `You can attach up to ${MAX_IMAGES_PER_POST} images per post. Dropped the last ${overflow}.`,
+        );
+        return { kind: "images", items: combined.slice(0, MAX_IMAGES_PER_POST) };
+      }
+      // Replacing a GIF? revoke nothing — GIFs don't hold blob handles.
+      return { kind: "images", items: combined };
     });
     setError(null);
-    const img = new window.Image();
-    img.onload = () => {
-      setMedia((cur) =>
-        cur?.kind === "image" && cur.previewUrl === previewUrl
-          ? { ...cur, width: img.naturalWidth, height: img.naturalHeight }
-          : cur,
-      );
-    };
-    img.src = previewUrl;
+
+    // Resolve intrinsic dimensions for each new pick. Matched back to
+    // the right pending entry by previewUrl so async loads in any
+    // order land on the correct record (or are dropped if the user
+    // removed that entry before its onload fired).
+    for (const img of newImages) {
+      const probe = new window.Image();
+      probe.onload = () => {
+        setMedia((cur) => {
+          if (cur?.kind !== "images") return cur;
+          let changed = false;
+          const next = cur.items.map((it) => {
+            if (it.previewUrl !== img.previewUrl) return it;
+            changed = true;
+            return {
+              ...it,
+              width: probe.naturalWidth,
+              height: probe.naturalHeight,
+            };
+          });
+          return changed ? { kind: "images", items: next } : cur;
+        });
+      };
+      probe.src = img.previewUrl;
+    }
   };
 
   const onImageInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    // Reset so picking the same file twice re-fires onChange.
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    // Reset so picking the same files twice re-fires onChange.
     e.target.value = "";
-    if (file) attachImageFile(file);
+    if (files.length > 0) attachImageFiles(files);
+  };
+
+  /** Remove a single pending image by id; clears media entirely when the
+   *  last image is removed so the composer collapses back to text-only. */
+  const removeImage = (id: string) => {
+    setMedia((prev) => {
+      if (prev?.kind !== "images") return prev;
+      const dropped = prev.items.find((it) => it.id === id);
+      if (dropped) URL.revokeObjectURL(dropped.previewUrl);
+      const remaining = prev.items.filter((it) => it.id !== id);
+      if (remaining.length === 0) return null;
+      return { kind: "images", items: remaining };
+    });
   };
 
   const clearMedia = () => {
     setMedia((prev) => {
-      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
+      if (prev?.kind === "images") {
+        for (const img of prev.items) URL.revokeObjectURL(img.previewUrl);
+      }
       return null;
     });
   };
 
   const onGifSelected = (gif: GifResult) => {
     setMedia((prev) => {
-      if (prev?.kind === "image") URL.revokeObjectURL(prev.previewUrl);
+      if (prev?.kind === "images") {
+        for (const img of prev.items) URL.revokeObjectURL(img.previewUrl);
+      }
       return { kind: "gif", gif };
     });
     setError(null);
@@ -1671,29 +1776,50 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
     setSending(true);
     setError(null);
 
-    // The wire shape is intentionally minimal: for images we send the
-    // public URL + intrinsic dims, for GIFs we send only the provider
-    // id. The server derives every other media_* field (storage_path
-    // from the URL, every GIF field by re-fetching the provider by id)
-    // so a manually-crafted POST can't smuggle in foreign URLs.
-    type ImagePayload = {
-      image_url: string;
-      image_width?: number;
-      image_height?: number;
-      image_alt?: string;
+    // The wire shape is intentionally minimal: for images we send each
+    // public URL + intrinsic dims as an `images` array, for GIFs we
+    // send only the provider id. The server derives every other media
+    // field (storage_path from each URL, every GIF field by re-
+    // fetching the provider by id) so a manually-crafted POST can't
+    // smuggle in foreign URLs.
+    type ImagesPayload = {
+      images: Array<{
+        url: string;
+        width: number;
+        height: number;
+        alt?: string;
+      }>;
     };
     type GifPayload = { gif_id: string };
-    let mediaPayload: ImagePayload | GifPayload | null = null;
+    let mediaPayload: ImagesPayload | GifPayload | null = null;
 
     try {
-      if (media?.kind === "image") {
-        const { publicUrl } = await uploadImage(media.file);
-        mediaPayload = {
-          image_url: publicUrl,
-          image_width: media.width ?? undefined,
-          image_height: media.height ?? undefined,
-          image_alt: media.file.name,
-        };
+      if (media?.kind === "images") {
+        // Upload images sequentially so we don't slam the device's
+        // mobile upload bandwidth and so the user-visible failure on
+        // a bad pick reports the FIRST bad pick rather than whichever
+        // of N parallel uploads raced to fail first.
+        const uploaded: Array<{
+          url: string;
+          width: number;
+          height: number;
+          alt?: string;
+        }> = [];
+        for (const img of media.items) {
+          const { publicUrl } = await uploadImage(img.file);
+          // If dims didn't resolve in time (probe.onload still in
+          // flight when the user hit Post), fall back to 1×1 — the
+          // server requires positive integers but the rendered card
+          // re-computes layout from the loaded <img> anyway, so the
+          // dim metadata is only used as a CLS hint.
+          uploaded.push({
+            url: publicUrl,
+            width: img.width ?? 1,
+            height: img.height ?? 1,
+            alt: img.file.name,
+          });
+        }
+        mediaPayload = { images: uploaded };
       } else if (media?.kind === "gif") {
         mediaPayload = { gif_id: media.gif.id };
       }
@@ -1755,12 +1881,16 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
       <CardContent className="px-3">
         <form onSubmit={handleSubmit} className="space-y-2">
           {/* Media preview only appears when something is attached
-              (which always implies isExpanded via the derivation). */}
+              (which always implies isExpanded via the derivation). The
+              preview component handles both shapes: a horizontal
+              thumbnail strip for the images batch (with per-thumb X
+              to remove), and a single-row preview for a picked GIF. */}
           {media && (
             <MediaAttachmentPreview
               media={media}
               disabled={sending}
-              onRemove={clearMedia}
+              onRemoveImage={removeImage}
+              onClear={clearMedia}
             />
           )}
           {/* Two layouts share the same textarea + buttons-container
@@ -1811,9 +1941,19 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  aria-label="Attach an image"
+                  aria-label={
+                    media?.kind === "images"
+                      ? media.items.length >= MAX_IMAGES_PER_POST
+                        ? `Image limit reached (${MAX_IMAGES_PER_POST})`
+                        : "Attach more images"
+                      : "Attach images"
+                  }
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={sending}
+                  disabled={
+                    sending ||
+                    (media?.kind === "images" &&
+                      media.items.length >= MAX_IMAGES_PER_POST)
+                  }
                   className="inline-flex size-8 items-center justify-center rounded-md bg-muted/60 text-foreground/85 ring-1 ring-border transition-colors hover:bg-muted hover:text-primary hover:ring-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <ImagePlus aria-hidden="true" className="size-4" />
@@ -1883,6 +2023,12 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
           <input
             ref={fileInputRef}
             type="file"
+            // `multiple` lets the user select several images at once
+            // from the native picker. iOS Photos and Android Files
+            // both honor this; the per-file MIME / size checks in
+            // attachImageFiles still run, and the cumulative cap is
+            // MAX_IMAGES_PER_POST.
+            multiple
             accept={MEDIA_ALLOWED_IMAGE_MIME_TYPES.join(",")}
             onChange={onImageInputChange}
             className="sr-only"
@@ -1902,46 +2048,95 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
 }
 
 /**
- * Thumbnail strip rendered above the composer textarea when the user has
- * attached an image OR a GIF. Tight inline preview with an X overlay.
+ * Composer preview for whatever's currently attached.
+ *
+ *   GIF: small row with one thumbnail + label + X to clear.
+ *   Images: horizontally-scrollable thumbnail strip, each with its own
+ *           X to remove. The image-attach button on the row below
+ *           appends MORE images while under the cap, so this strip is
+ *           the source of truth for "what's about to be posted."
+ *
+ * The strip uses `overflow-x-auto` so 4+ images on a narrow phone
+ * scroll horizontally without breaking the composer layout; the
+ * thumbnails are a fixed 14×14 (rem) to keep the row visually compact.
  */
 function MediaAttachmentPreview({
   media,
   disabled,
-  onRemove,
+  onRemoveImage,
+  onClear,
 }: {
   media: PendingMedia;
   disabled: boolean;
-  onRemove: () => void;
+  /** Remove a single image from the pending batch (images flow only). */
+  onRemoveImage: (id: string) => void;
+  /** Drop the entire attachment (used by the GIF row's X — GIFs are atomic). */
+  onClear: () => void;
 }) {
-  const src = media.kind === "image" ? media.previewUrl : media.gif.preview_url;
-  const alt = media.kind === "image" ? media.file.name : media.gif.alt;
-  const label = media.kind === "image" ? "Image" : "GIF";
+  if (media.kind === "gif") {
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 p-1.5">
+        <div className="relative shrink-0">
+          {/* eslint-disable-next-line @next/next/no-img-element -- GIPHY CDN host */}
+          <img
+            src={media.gif.preview_url}
+            alt={media.gif.alt}
+            className="size-14 rounded-sm object-cover"
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            GIF attached
+          </p>
+          <p className="line-clamp-1 text-xs text-foreground/80">
+            {media.gif.alt}
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-label="Remove attachment"
+          onClick={onClear}
+          disabled={disabled}
+          className="-mr-0.5 -mt-0.5 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <X aria-hidden="true" className="size-3.5" />
+        </button>
+      </div>
+    );
+  }
+
+  const { items } = media;
   return (
-    <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 p-1.5">
-      <div className="relative shrink-0">
-        {/* eslint-disable-next-line @next/next/no-img-element -- object URL / CDN host; next/image remotePatterns isn't worth wiring up for a small preview thumb */}
-        <img
-          src={src}
-          alt={alt}
-          className="size-14 rounded-sm object-cover"
-        />
+    <div className="rounded-md border border-border bg-muted/30 p-1.5">
+      <p className="mb-1 px-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        {items.length === 1
+          ? "1 image attached"
+          : `${items.length} images attached`}
+      </p>
+      <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+        {items.map((img) => (
+          <div key={img.id} className="relative shrink-0">
+            {/* eslint-disable-next-line @next/next/no-img-element -- object URL preview */}
+            <img
+              src={img.previewUrl}
+              alt={img.file.name}
+              className="size-14 rounded-sm object-cover ring-1 ring-border"
+            />
+            <button
+              type="button"
+              aria-label={`Remove ${img.file.name}`}
+              onClick={() => onRemoveImage(img.id)}
+              disabled={disabled}
+              // Floating X over the corner of each thumb. Slightly
+              // larger tap target on touch via the absolute-positioned
+              // icon button (24×24 visual / generous hit area).
+              className="absolute -right-1 -top-1 inline-flex size-5 items-center justify-center rounded-full bg-background text-foreground/80 shadow ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <X aria-hidden="true" className="size-3" />
+            </button>
+          </div>
+        ))}
       </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          {label} attached
-        </p>
-        <p className="line-clamp-1 text-xs text-foreground/80">{alt}</p>
-      </div>
-      <button
-        type="button"
-        aria-label="Remove attachment"
-        onClick={onRemove}
-        disabled={disabled}
-        className="-mr-0.5 -mt-0.5 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <X aria-hidden="true" className="size-3.5" />
-      </button>
     </div>
   );
 }
@@ -2453,8 +2648,10 @@ function FeedList({
   /** Fired when the user taps a chip — opens the reactor-list popover. */
   onShowReactionDetails: (messageId: string, emoji: string) => void;
   /** Fired when the user taps an inline image/GIF in the feed — opens
-   *  the lightbox at JuiceBoxFeed level. */
-  onOpenMedia: (media: TeamMessageMedia) => void;
+   *  the lightbox at JuiceBoxFeed level. The handler receives the full
+   *  list of media slices for the post + the index the user tapped so
+   *  the lightbox can paginate through a multi-image post. */
+  onOpenMedia: (items: TeamMessageMedia[], index: number) => void;
   initialIds: Set<string> | null;
   forceScrollRef: React.RefObject<boolean>;
   /** Live server-confirmed last_read_at for the current user; positions
@@ -2922,7 +3119,7 @@ function FeedCard({
   reactions: TeamMessageReaction[];
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
   onShowReactionDetails: (messageId: string, emoji: string) => void;
-  onOpenMedia: (media: TeamMessageMedia) => void;
+  onOpenMedia: (items: TeamMessageMedia[], index: number) => void;
 }) {
   const timeAgo = useMemo(
     () => formatDistanceToNow(new Date(message.created_at), { addSuffix: true }),
@@ -3017,7 +3214,7 @@ function FeedCard({
   const hasReply = Boolean(
     message.reply_to_message_id && message.reply_to_message_preview,
   );
-  const media = teamMessageMedia(message);
+  const mediaList = teamMessageMediaList(message);
   const hasText = message.message.length > 0;
   // First http(s) URL in the body, if any. Server-side /api/link-preview
   // fetches metadata and the card renders nothing on failure, so this is
@@ -3122,8 +3319,11 @@ function FeedCard({
           // self-hides if the server can't produce a preview.
           <LinkPreviewCard url={previewUrl} className="ml-[2.625rem]" />
         )}
-        {media && (
-          <FeedMedia media={media} onOpen={() => onOpenMedia(media)} />
+        {mediaList.length > 0 && (
+          <FeedMedia
+            items={mediaList}
+            onOpen={(index) => onOpenMedia(mediaList, index)}
+          />
         )}
         {error && (
           <p className="pl-[2.625rem] text-xs text-destructive">{error}</p>
@@ -3183,63 +3383,236 @@ function QuotedReply({
 }
 
 /**
- * Inline image / GIF rendered below the message text. Width is capped by
- * the body column; intrinsic `width`/`height` attrs are passed so the
- * browser can reserve the right aspect-ratio box and avoid CLS. The
- * card itself is `select-none` on mobile (kills iOS long-press menu),
- * so we explicitly disable text-selection on the underlying <img> too
- * and use `draggable={false}` to keep long-press = reply intact.
+ * Derives a download filename for a Juice Box image. We prefer the
+ * basename of the URL path (which is "<uuid>.<ext>" for our Supabase
+ * uploads — opaque but harmless), falling back to the alt text or a
+ * generic name when the URL doesn't parse. Strips query strings and
+ * forces an extension so the saved file has a sensible suffix even
+ * when the browser would otherwise drop it.
+ */
+function deriveDownloadFilename(media: TeamMessageMedia): string {
+  try {
+    const parsed = new URL(media.url);
+    const tail = parsed.pathname.split("/").filter(Boolean).pop();
+    if (tail && tail.length > 0) return tail;
+  } catch {
+    // Fall through to the fallback below.
+  }
+  const ext = media.type === "gif" ? ".gif" : ".jpg";
+  const safeAlt = (media.alt ?? "").replace(/[^a-z0-9._-]+/gi, "_").slice(0, 64);
+  return safeAlt.length > 0 ? `${safeAlt}${ext}` : `juice-box${ext}`;
+}
+
+/**
+ * Save an image to the user's device. We can't just rely on
+ * `<a download>` because the storage URLs are cross-origin (the
+ * download hint is ignored cross-origin and the browser just navigates
+ * to the image). Strategy:
+ *
+ *   1. fetch the image → Blob (Supabase storage and GIPHY both allow
+ *      cross-origin GETs from a browser).
+ *   2. Create a same-origin object URL and click a synthetic anchor
+ *      with `download` set — that gets honored.
+ *   3. If the fetch fails for any reason (CORS edge case, offline,
+ *      etc.), open the URL in a new tab as a graceful fallback so the
+ *      user can save it via the browser's own image context menu.
+ */
+async function downloadMediaToDevice(media: TeamMessageMedia): Promise<void> {
+  const filename = deriveDownloadFilename(media);
+  try {
+    const res = await fetch(media.url, { credentials: "omit" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    // Some browsers require the anchor to be in the DOM for the
+    // synthetic click to count as a user-initiated download.
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Give the browser a tick to start the download before revoking.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch {
+    // Fallback: open in a new tab so the user can long-press / right-
+    // click to save. noopener+noreferrer mirror our usual a target=_blank.
+    window.open(media.url, "_blank", "noopener,noreferrer");
+  }
+}
+
+/**
+ * Inline image grid rendered below the message text.
+ *   1 image: single full-width preview (matches the prior single-image
+ *            layout 1:1 so the feed feels unchanged for those posts).
+ *   2+ images: 2-column grid of square-cropped thumbnails. Each
+ *            thumbnail is independently tappable to open the lightbox
+ *            at that index.
+ *
+ * Every image carries a small floating Download button so anyone in
+ * the team can save a copy of a teammate's image without a context-
+ * menu detour. The button is `e.stopPropagation()`'d so tapping it
+ * never bubbles into the open-lightbox click.
+ *
+ * Width is capped by the body column; intrinsic `width`/`height` attrs
+ * are passed on the single-image path so the browser can reserve the
+ * right aspect-ratio box and avoid CLS. The card itself is
+ * `select-none` on mobile (kills iOS long-press menu) so we also
+ * disable text-selection on the underlying <img> and set
+ * `draggable={false}` to keep long-press = reply intact.
  */
 function FeedMedia({
-  media,
+  items,
   onOpen,
 }: {
-  media: TeamMessageMedia;
-  onOpen: () => void;
+  items: TeamMessageMedia[];
+  onOpen: (index: number) => void;
 }) {
+  if (items.length === 1) {
+    const media = items[0];
+    return (
+      <div className="pl-[2.625rem]">
+        <div className="relative inline-block max-w-[min(20rem,100%)]">
+          <button
+            type="button"
+            onClick={() => onOpen(0)}
+            aria-label={`Open ${media.type === "gif" ? "GIF" : "image"} full screen`}
+            className="block w-full overflow-hidden rounded-md border border-border/60 bg-muted/40 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
+            <img
+              src={media.thumb_url ?? media.url}
+              alt={media.alt ?? ""}
+              width={media.width ?? undefined}
+              height={media.height ?? undefined}
+              loading="lazy"
+              draggable={false}
+              className="h-auto w-full max-h-80 object-contain"
+            />
+          </button>
+          <DownloadMediaButton media={media} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pl-[2.625rem]">
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={`Open ${media.type === "gif" ? "GIF" : "image"} full screen`}
-        className="block max-w-[min(20rem,100%)] overflow-hidden rounded-md border border-border/60 bg-muted/40 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
-        <img
-          src={media.thumb_url ?? media.url}
-          alt={media.alt ?? ""}
-          width={media.width ?? undefined}
-          height={media.height ?? undefined}
-          loading="lazy"
-          draggable={false}
-          className="h-auto w-full max-h-80 object-contain"
-        />
-      </button>
+      <div className="grid max-w-[min(24rem,100%)] grid-cols-2 gap-1.5">
+        {items.map((media, i) => (
+          <div key={`${media.url}-${i}`} className="relative">
+            <button
+              type="button"
+              onClick={() => onOpen(i)}
+              aria-label={`Open image ${i + 1} of ${items.length} full screen`}
+              className="block aspect-square w-full overflow-hidden rounded-md border border-border/60 bg-muted/40 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
+              <img
+                src={media.thumb_url ?? media.url}
+                alt={media.alt ?? ""}
+                loading="lazy"
+                draggable={false}
+                className="size-full object-cover"
+              />
+            </button>
+            <DownloadMediaButton media={media} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 /**
- * Fullscreen viewer for an inline image / GIF. Backdrop tap, the X
- * button, or Escape all close. Scaled to fit the viewport while
- * respecting iOS safe areas at top/bottom; aspect ratio comes from the
- * intrinsic width/height attrs on the <img>.
+ * Subtle floating Download button used in both the inline grid and the
+ * lightbox. Renders as a small icon-only chip in the top-right corner
+ * of its container; click triggers downloadMediaToDevice which prefers
+ * the in-browser download path and falls back to opening the image in
+ * a new tab.
+ *
+ * stopPropagation is critical here — without it, taps in the inline
+ * grid would also fire the surrounding "open lightbox" button.
  */
-function MediaLightbox({
+function DownloadMediaButton({
   media,
-  onClose,
+  large,
 }: {
   media: TeamMessageMedia;
+  /** Slightly larger variant used inside the lightbox. */
+  large?: boolean;
+}) {
+  const [working, setWorking] = useState(false);
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (working) return;
+    setWorking(true);
+    try {
+      await downloadMediaToDevice(media);
+    } finally {
+      setWorking(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      onPointerDown={(e) => e.stopPropagation()}
+      disabled={working}
+      aria-label={`Download ${media.type === "gif" ? "GIF" : "image"}`}
+      title="Download"
+      className={cn(
+        "absolute right-1.5 top-1.5 inline-flex items-center justify-center rounded-full bg-black/55 text-white shadow ring-1 ring-white/15 backdrop-blur-sm transition-colors hover:bg-black/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
+        large ? "size-9" : "size-7",
+      )}
+    >
+      {working ? (
+        <Loader2 aria-hidden="true" className={large ? "size-4 animate-spin" : "size-3.5 animate-spin"} />
+      ) : (
+        <Download aria-hidden="true" className={large ? "size-4" : "size-3.5"} />
+      )}
+    </button>
+  );
+}
+
+/**
+ * Fullscreen viewer for an inline image / GIF. Backdrop tap, the X
+ * button, or Escape all close. For multi-image posts the chevrons
+ * paginate between items; ←/→ on the keyboard do the same. Scaled to
+ * fit the viewport while respecting iOS safe areas at top/bottom;
+ * aspect ratio comes from the intrinsic width/height attrs on the
+ * <img>. The Download button is the same component the inline grid
+ * uses, anchored to the top-right just under the close X.
+ */
+function MediaLightbox({
+  items,
+  index,
+  onIndexChange,
+  onClose,
+}: {
+  items: TeamMessageMedia[];
+  index: number;
+  onIndexChange: (next: number) => void;
   onClose: () => void;
 }) {
+  // Clamp defensively — handler-side prevents out-of-range writes but
+  // the items array could shrink between renders in pathological cases.
+  const safeIndex = Math.max(0, Math.min(index, items.length - 1));
+  const media = items[safeIndex];
+  const hasMany = items.length > 1;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      else if (hasMany && e.key === "ArrowLeft") {
+        onIndexChange((safeIndex - 1 + items.length) % items.length);
+      } else if (hasMany && e.key === "ArrowRight") {
+        onIndexChange((safeIndex + 1) % items.length);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onIndexChange, safeIndex, items.length, hasMany]);
 
   return (
     <div
@@ -3267,15 +3640,57 @@ function MediaLightbox({
       >
         <X aria-hidden="true" className="size-5" />
       </button>
-      {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
-      <img
-        src={media.url}
-        alt={media.alt ?? ""}
-        width={media.width ?? undefined}
-        height={media.height ?? undefined}
-        className="relative max-h-full max-w-full object-contain"
-        draggable={false}
-      />
+      {hasMany && (
+        <>
+          <button
+            type="button"
+            aria-label="Previous image"
+            onClick={(e) => {
+              e.stopPropagation();
+              onIndexChange((safeIndex - 1 + items.length) % items.length);
+            }}
+            className="absolute left-3 top-1/2 z-10 inline-flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition-colors hover:bg-black/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <ChevronLeft aria-hidden="true" className="size-6" />
+          </button>
+          <button
+            type="button"
+            aria-label="Next image"
+            onClick={(e) => {
+              e.stopPropagation();
+              onIndexChange((safeIndex + 1) % items.length);
+            }}
+            className="absolute right-3 top-1/2 z-10 inline-flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition-colors hover:bg-black/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <ChevronRight aria-hidden="true" className="size-6" />
+          </button>
+          <span
+            className="absolute left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/40 px-2.5 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm"
+            style={{ top: "calc(0.95rem + env(safe-area-inset-top))" }}
+          >
+            {safeIndex + 1} / {items.length}
+          </span>
+        </>
+      )}
+      {/* Wrapper so the Download chip can absolute-position relative to
+          the image rather than the whole dialog (which would float it
+          in dead corners on portrait phones). */}
+      <div className="relative max-h-full max-w-full">
+        {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage / GIPHY host */}
+        <img
+          // `key` resets the <img> on index changes so the browser
+          // unloads the previous frame cleanly and the new image
+          // doesn't briefly inherit the prior aspect ratio.
+          key={media.url}
+          src={media.url}
+          alt={media.alt ?? ""}
+          width={media.width ?? undefined}
+          height={media.height ?? undefined}
+          className="relative max-h-[85vh] max-w-full object-contain"
+          draggable={false}
+        />
+        <DownloadMediaButton media={media} large />
+      </div>
     </div>
   );
 }

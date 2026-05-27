@@ -57,8 +57,13 @@ const CACHE_KEY_PREFIX = "juice-box:feed:";
  * Bump on any change to CachedFeedMessage / CachedFeed shape that would
  * make older blobs misrender. Bumping silently invalidates the cache
  * on read; no migration code needed.
+ *
+ * v2: `TeamMessage` gained `media_attachments` for multi-image posts.
+ *     v1 blobs don't carry the field — the rendering helper
+ *     (teamMessageMediaList) treats missing as null so rendering is
+ *     fine, but bumping is the conservative choice.
  */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 
 /**
  * Cache TTL. 12 hours hits the spec target — long enough that returning
