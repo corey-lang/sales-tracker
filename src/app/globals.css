@@ -175,3 +175,39 @@
     0 0 24px -4px color-mix(in oklab, var(--color-primary) 50%, transparent);
   transition: box-shadow 200ms ease-out;
 }
+
+/* ============================================================================
+   Leaflet — restore tile + marker image sizing that Tailwind preflight breaks.
+   ----------------------------------------------------------------------------
+   The Nearby Offices map (src/components/nearby-offices-map.tsx) uses
+   Leaflet's default `<img>`-based tile rendering. Tailwind v4's preflight
+   applies `img, video { max-width: 100% }` and `img { height: auto }` to
+   every `<img>` on the page — Leaflet sets explicit inline width/height
+   attributes on tile + marker imgs, and the preflight reset OVERRIDES
+   those, so tiles collapse / misalign and the map looks like an empty
+   dark rectangle (the wrapper border is visible, the content isn't).
+
+   The override below is the canonical Leaflet+Tailwind fix: scoped to
+   elements INSIDE a `.leaflet-container` only, so nothing else on the
+   page changes. `!important` is required to outrank Tailwind preflight,
+   which itself uses a selector of similar specificity. Once Leaflet
+   tiles can size themselves from their inline width/height attrs, the
+   map renders correctly.
+
+   Also restores `display: block` on Leaflet's icon images — preflight
+   doesn't change display, but a defensive line here makes the override
+   self-contained and easy to grep for.
+   ============================================================================ */
+.leaflet-container img {
+  max-width: none !important;
+}
+.leaflet-container img.leaflet-tile,
+.leaflet-container img.leaflet-marker-icon,
+.leaflet-container img.leaflet-marker-shadow {
+  /* Inline width/height attributes from Leaflet win once the
+     preflight `max-width: 100%` is out of the way. `height: auto`
+     would interfere; setting it back to the inline attribute via
+     `unset` lets Leaflet's positioning math stay correct. */
+  height: unset;
+  max-width: none !important;
+}

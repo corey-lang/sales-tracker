@@ -134,6 +134,36 @@ function MapRecenter({
   return null;
 }
 
+/**
+ * Forces Leaflet to re-measure its container after mount.
+ *
+ * Leaflet measures the container ONCE at `L.map()` init time. On
+ * iOS Safari (and any time the layout settles after Leaflet inits
+ * — toolbar animations, font load shifts, parent flex re-layout
+ * when the user toggles List → Map), the initial measurement can
+ * be slightly wrong: tiles for the wrong viewport are requested
+ * and the map appears blank, off-center, or with a strip of
+ * missing tiles.
+ *
+ * Calling `invalidateSize()` makes Leaflet remeasure + re-request
+ * any missing tiles. Two passes catches both the immediate post-
+ * mount race AND the post-toolbar-animation case ~100-150 ms
+ * later. Cheap (one DOM read) and safe to call extra.
+ */
+function MapResizer() {
+  const map = useMap();
+  useEffect(() => {
+    // Immediate pass — fixes the common "container has dimensions
+    // but Leaflet measured 0×0 between mount and layout" case.
+    map.invalidateSize();
+    // Delayed pass — fixes the iOS Safari toolbar-animation case
+    // where the visual viewport changes height after first paint.
+    const t = window.setTimeout(() => map.invalidateSize(), 200);
+    return () => window.clearTimeout(t);
+  }, [map]);
+  return null;
+}
+
 /** YYYY-MM-DD → "Jun 5, 2026" — local-TZ safe (no `new Date(str)`
  *  TZ-shift). Mirrors the helper in the page module. */
 function formatDueDate(value: string | null): string | null {
@@ -223,13 +253,20 @@ export default function NearbyOfficesMap({
 
   return (
     <div
-      // Leaflet requires its container to have an explicit, non-zero
-      // height. `flex-1 min-h-[60vh]` lets the map fill the page
-      // body on mobile (typical iPhone visual viewport ~640-740
-      // CSS px tall) while still rendering reasonably in DevTools
-      // narrow widths. The `rounded-lg` + `overflow-hidden` clips
-      // the OSM tiles cleanly to the card edge.
-      className="relative flex-1 min-h-[60vh] overflow-hidden rounded-lg border border-border"
+      // Leaflet requires its container to have a definite, non-zero
+      // height at the moment `L.map()` runs. Earlier this used
+      // `flex-1 min-h-[60vh]` which relied on the parent flex
+      // column resolving height correctly — on iOS Safari that
+      // sometimes settled AFTER Leaflet had already measured 0,
+      // contributing to "blank dark rectangle" reports.
+      //
+      // The deterministic `h-[70vh] min-h-[420px]` removes the
+      // flex dependency entirely: the wrapper is always 70 % of
+      // the viewport (or at least 420 px on very short viewports —
+      // covers iPhone SE in landscape, fold devices, etc.).
+      // `MapResizer` below also calls `invalidateSize()` post-mount
+      // so any residual mid-init layout change is corrected.
+      className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-lg border border-border"
     >
       <MapContainer
         center={[center.lat, center.lng]}
@@ -376,6 +413,7 @@ export default function NearbyOfficesMap({
           center={[center.lat, center.lng]}
           radius={radius}
         />
+        <MapResizer />
       </MapContainer>
     </div>
   );
