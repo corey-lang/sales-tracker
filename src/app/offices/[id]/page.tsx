@@ -33,18 +33,24 @@ import { Button, buttonVariants } from "@/components/ui/button";
 // ---------------------------------------------------------------------------
 // Office Detail — Phase 1A test-only surface.
 //
-// Layout, top → bottom:
+// Layout, top → bottom (mobile-first, dashboard-feel — no giant
+// textareas on initial paint):
 //   1. Header (Back + Test pill)
 //   2. Sandbox banner
-//   3. Office identity card (name, address, visit summary)
-//   4. PRIMARY ACTIONS — Log Visit + Open Maps
-//   5. Office Notes (long-term office memory)
-//   6. Next Action (text + optional due date + optional "Add to To-Dos")
-//   7. Visit History (newest first, every entry editable)
+//   3. SNAPSHOT CARD — name, clickable address (Directions), visit
+//      stats, primary actions (Log Visit + Directions). The Log Visit
+//      form is COLLAPSED by default and expands inline within this
+//      card when the user taps "Log visit."
+//   4. Office Notes — preview by default (current notes or empty
+//      copy) + Edit button. Textarea + Save/Cancel only on demand.
+//   5. Next Action — preview by default (current next action + due
+//      pill or empty copy) + Edit button. Full form (textarea + date
+//      + "Add to AE To-Dos" checkbox) only on demand.
+//   6. Visit History — newest first; each entry editable inline.
 //
-// Log Visit + Open Maps live near the top because they're the most-used
-// actions when an AE pulls up an office — the spec calls Log Visit out
-// explicitly as needing to be immediately visible.
+// The page is intentionally compact at first paint so an AE pulling
+// it up at an office sees "what do I need to know and what can I do"
+// without scrolling past empty forms.
 //
 // Access (mirrors /api/offices/[id]):
 //   * `is_test === true` salesperson — passes.
@@ -213,6 +219,16 @@ export default function OfficeDetailPage({
   const [loggingVisit, setLoggingVisit] = useState(false);
   const [visitError, setVisitError] = useState<string | null>(null);
 
+  // ---- Section open/close ------------------------------------------------
+  // Each "card" defaults to a compact preview so the page feels like a
+  // dashboard, not a stack of empty textareas. Tapping the section's
+  // action button flips it open; Cancel collapses back to preview and
+  // re-syncs the draft to the saved value so a discarded edit truly
+  // discards. Save handlers below close the section on success.
+  const [visitOpen, setVisitOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [nextActionOpen, setNextActionOpen] = useState(false);
+
   const loadDetail = useCallback(async () => {
     setLoadState("loading");
     setLoadError(null);
@@ -272,6 +288,10 @@ export default function OfficeDetailPage({
         setDetail({ ...detail, office: updated });
         setNotesDraft(updated.office_notes ?? "");
       }
+      // Collapse back to preview on success. The error path keeps the
+      // editor open so the user can correct + retry without losing
+      // what they typed.
+      setNotesOpen(false);
     } catch (err) {
       setNotesError(
         err instanceof Error ? err.message : "Could not save notes.",
@@ -279,6 +299,13 @@ export default function OfficeDetailPage({
     } finally {
       setSavingNotes(false);
     }
+  }
+
+  /** Discard the in-progress notes edit and collapse the editor. */
+  function handleCancelNotes() {
+    setNotesDraft(detail?.office.office_notes ?? "");
+    setNotesError(null);
+    setNotesOpen(false);
   }
 
   /**
@@ -341,6 +368,9 @@ export default function OfficeDetailPage({
           );
         }
       }
+      // Collapse back to preview on success. The error path leaves the
+      // editor open so the user can correct + retry.
+      setNextActionOpen(false);
     } catch (err) {
       setNextActionError(
         err instanceof Error ? err.message : "Could not save next action.",
@@ -348,6 +378,16 @@ export default function OfficeDetailPage({
     } finally {
       setSavingNextAction(false);
     }
+  }
+
+  /** Discard the in-progress next-action edit and collapse the editor. */
+  function handleCancelNextAction() {
+    setNextActionDraft(detail?.office.next_action ?? "");
+    setNextActionDueDraft(detail?.office.next_action_due_date ?? "");
+    setCreateTodo(false);
+    setNextActionError(null);
+    setNextActionNotice(null);
+    setNextActionOpen(false);
   }
 
   async function handleLogVisit() {
@@ -394,11 +434,31 @@ export default function OfficeDetailPage({
       // Reset form for the next log: fresh "now" + cleared note.
       setVisitWhen(toDateTimeLocalValue(new Date()));
       setVisitNote("");
+      // Collapse the form back to the action-button-only state. Next
+      // tap on "Log visit" re-defaults the time to the new "now" via
+      // the openLogVisit handler below.
+      setVisitOpen(false);
     } catch {
       setVisitError("Network error while logging this visit.");
     } finally {
       setLoggingVisit(false);
     }
+  }
+
+  /** Open the inline Log-Visit form. Refreshes the datetime default to
+   *  "now" each open so a form left collapsed for a while doesn't
+   *  prefill a stale time. */
+  function openLogVisit() {
+    setVisitWhen(toDateTimeLocalValue(new Date()));
+    setVisitError(null);
+    setVisitOpen(true);
+  }
+
+  /** Discard the in-progress visit entry and collapse the form. */
+  function handleCancelVisit() {
+    setVisitNote("");
+    setVisitError(null);
+    setVisitOpen(false);
   }
 
   /**
@@ -532,21 +592,53 @@ export default function OfficeDetailPage({
         </p>
       </div>
 
-      {/* Office identity card. */}
+      {/* ── SNAPSHOT CARD ────────────────────────────────────────────
+          Identity + clickable address + visit stats + primary actions.
+          When the user taps "Log visit," the form expands INSIDE this
+          card so the action and the form live together — Directions
+          stays visible the whole time. */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">{office.name}</CardTitle>
-          {address && (
-            <CardDescription className="inline-flex items-start gap-1.5">
-              <MapPin
-                aria-hidden="true"
-                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-              />
-              <span>{address}</span>
-            </CardDescription>
-          )}
+          {/* Address row.
+              When we can build a Maps URL the whole row is an anchor
+              with target="_blank" — tap-friendly on mobile, keyboard-
+              focusable on desktop, and screen-readers see it as a
+              link with a "Get directions" aria-label. Falls back to
+              the static text presentation when no maps URL is
+              derivable (no address text + no lat/lng). */}
+          {address &&
+            (mapsHref ? (
+              <a
+                href={mapsHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`Get directions to ${office.name}`}
+                className="mt-1 -mx-1 flex items-start gap-1.5 rounded-md px-1 py-0.5 text-sm leading-snug text-foreground underline-offset-2 transition-colors hover:bg-muted hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <MapPin
+                  aria-hidden="true"
+                  className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                />
+                <span className="min-w-0">
+                  <span className="block">{address}</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Tap address for directions
+                  </span>
+                </span>
+              </a>
+            ) : (
+              <CardDescription className="mt-1 inline-flex items-start gap-1.5">
+                <MapPin
+                  aria-hidden="true"
+                  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                />
+                <span>{address}</span>
+              </CardDescription>
+            ))}
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
+          {/* Stats — visit count + last visit, kept compact. */}
           <dl className="grid grid-cols-2 gap-3 text-xs">
             <div>
               <dt className="uppercase tracking-wide text-muted-foreground">
@@ -567,112 +659,209 @@ export default function OfficeDetailPage({
               </dd>
             </div>
           </dl>
-        </CardContent>
-      </Card>
 
-      {/* PRIMARY ACTIONS — Log Visit + Open Maps, near the top so they're
-          immediately visible without scrolling. Log Visit is the
-          most-used action and is the visible default. */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Log visit</CardTitle>
-          <CardDescription>{visitSummary(detail)}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="space-y-1.5">
-            <label
-              htmlFor="visit-when"
-              className="block text-xs font-medium uppercase tracking-wide text-muted-foreground"
-            >
-              When
-            </label>
-            <input
-              id="visit-when"
-              type="datetime-local"
-              value={visitWhen}
-              onChange={(e) => setVisitWhen(e.target.value)}
-              disabled={loggingVisit}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-            <p className="text-[11px] text-muted-foreground">
-              Defaults to now. Adjust if you&apos;re logging this later.
-            </p>
-          </div>
-          <textarea
-            id="visit-note"
-            className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            value={visitNote}
-            onChange={(e) => setVisitNote(e.target.value)}
-            placeholder="What happened on this visit? (optional)"
-            disabled={loggingVisit}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleLogVisit}
-              disabled={loggingVisit}
-            >
-              {loggingVisit ? "Logging…" : "Log visit"}
-            </Button>
-            {mapsHref && (
-              <a
-                href={mapsHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={buttonVariants({ variant: "outline", size: "sm" })}
+          {/* Primary action row.
+              Default state: just two buttons — Log visit (opens the
+              inline form) + Directions (anchor). No textareas on
+              first paint. */}
+          {!visitOpen && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={openLogVisit}
+                disabled={loggingVisit}
               >
-                <Navigation aria-hidden="true" className="size-4" />
-                Open Maps
-              </a>
-            )}
-            {visitError && (
-              <span role="alert" className="text-xs text-destructive">
-                {visitError}
-              </span>
-            )}
-          </div>
+                Log visit
+              </Button>
+              {mapsHref && (
+                <a
+                  href={mapsHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonVariants({
+                    variant: "outline",
+                    size: "sm",
+                  })}
+                >
+                  <Navigation aria-hidden="true" className="size-4" />
+                  Directions
+                </a>
+              )}
+              <p className="basis-full text-[11px] text-muted-foreground">
+                {visitSummary(detail)}
+              </p>
+            </div>
+          )}
+
+          {/* Inline expanded Log-Visit form. Lives in the same card so
+              the action and form stay visually paired. */}
+          {visitOpen && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleLogVisit();
+              }}
+              className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3"
+            >
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Log a visit
+              </p>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="visit-when"
+                  className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  When
+                </label>
+                <input
+                  id="visit-when"
+                  type="datetime-local"
+                  value={visitWhen}
+                  onChange={(e) => setVisitWhen(e.target.value)}
+                  disabled={loggingVisit}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Defaults to now. Adjust if you&apos;re logging this later.
+                </p>
+              </div>
+              <textarea
+                id="visit-note"
+                className="w-full min-h-[64px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                value={visitNote}
+                onChange={(e) => setVisitNote(e.target.value)}
+                placeholder="What happened on this visit? (optional)"
+                disabled={loggingVisit}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="submit" size="sm" disabled={loggingVisit}>
+                  {loggingVisit ? "Logging…" : "Save visit"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCancelVisit}
+                  disabled={loggingVisit}
+                >
+                  <X aria-hidden="true" className="size-3.5" />
+                  Cancel
+                </Button>
+                {mapsHref && (
+                  <a
+                    href={mapsHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={buttonVariants({
+                      variant: "outline",
+                      size: "sm",
+                    })}
+                  >
+                    <Navigation aria-hidden="true" className="size-4" />
+                    Directions
+                  </a>
+                )}
+                {visitError && (
+                  <span role="alert" className="text-xs text-destructive">
+                    {visitError}
+                  </span>
+                )}
+              </div>
+            </form>
+          )}
         </CardContent>
       </Card>
 
-      {/* Office notes — long-term office memory. */}
+      {/* ── OFFICE NOTES ─────────────────────────────────────────────
+          Preview by default — current notes (or empty-state copy) plus
+          an Edit notes button. Expands to a textarea + Save/Cancel
+          only when the user explicitly opens it. */}
       <Card>
         <CardHeader>
           <CardTitle>Office notes</CardTitle>
           <CardDescription>
-            Persistent reference info (broker name, meeting cadence, who
-            to ask for).
+            Persistent reference info (broker name, meeting cadence,
+            who to ask for).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          <textarea
-            id="office-notes"
-            className="w-full min-h-[96px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            value={notesDraft}
-            onChange={(e) => setNotesDraft(e.target.value)}
-            placeholder="e.g. Broker is Sarah · Office meetings Tuesdays at 10am · Ask for Mike at front desk"
-            disabled={savingNotes}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSaveNotes}
-              disabled={savingNotes || !notesDirty}
+          {!notesOpen ? (
+            <>
+              {office.office_notes ? (
+                <p className="whitespace-pre-wrap text-sm">
+                  {office.office_notes}
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No notes yet. Capture broker names, meeting cadences,
+                  who to ask for at the front desk.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setNotesDraft(office.office_notes ?? "");
+                  setNotesError(null);
+                  setNotesOpen(true);
+                }}
+              >
+                <Pencil aria-hidden="true" className="size-3.5" />
+                Edit notes
+              </Button>
+            </>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleSaveNotes();
+              }}
+              className="space-y-2"
             >
-              {savingNotes ? "Saving…" : "Save notes"}
-            </Button>
-            {notesError && (
-              <span role="alert" className="text-xs text-destructive">
-                {notesError}
-              </span>
-            )}
-          </div>
+              <textarea
+                id="office-notes"
+                className="w-full min-h-[96px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                value={notesDraft}
+                onChange={(e) => setNotesDraft(e.target.value)}
+                placeholder="e.g. Broker is Sarah · Office meetings Tuesdays at 10am · Ask for Mike at front desk"
+                disabled={savingNotes}
+                autoFocus
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={savingNotes || !notesDirty}
+                >
+                  {savingNotes ? "Saving…" : "Save notes"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCancelNotes}
+                  disabled={savingNotes}
+                >
+                  <X aria-hidden="true" className="size-3.5" />
+                  Cancel
+                </Button>
+                {notesError && (
+                  <span role="alert" className="text-xs text-destructive">
+                    {notesError}
+                  </span>
+                )}
+              </div>
+            </form>
+          )}
         </CardContent>
       </Card>
 
-      {/* Next action — office-level follow-up. Single text + optional
-          due date + optional "also add to AE To-Dos" hook. */}
+      {/* ── NEXT ACTION ──────────────────────────────────────────────
+          Preview by default — current next action + due-date pill (or
+          empty-state copy) + Edit button. Expands to the full
+          textarea / date / "also add to To-Dos" form on demand. */}
       <Card>
         <CardHeader>
           <CardTitle>Next action</CardTitle>
@@ -681,70 +870,139 @@ export default function OfficeDetailPage({
             office meeting, teach A2L class…).
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <textarea
-            id="next-action"
-            className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            value={nextActionDraft}
-            onChange={(e) => setNextActionDraft(e.target.value)}
-            placeholder="e.g. Drop off donuts week of 6/3 · Follow up on A2L class"
-            disabled={savingNextAction}
-          />
-          <div className="grid gap-1.5 sm:max-w-[14rem]">
-            <label
-              htmlFor="next-action-due"
-              className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+        <CardContent className="space-y-2">
+          {!nextActionOpen ? (
+            <>
+              {office.next_action ? (
+                <div className="space-y-1.5">
+                  <p className="whitespace-pre-wrap text-sm">
+                    {office.next_action}
+                  </p>
+                  {office.next_action_due_date && (
+                    <p className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                      Due {formatDueDate(office.next_action_due_date)}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No next action set. Pick what comes next here — drop
+                  donuts, schedule a meeting, follow up.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setNextActionDraft(office.next_action ?? "");
+                  setNextActionDueDraft(office.next_action_due_date ?? "");
+                  setNextActionError(null);
+                  setNextActionNotice(null);
+                  setNextActionOpen(true);
+                }}
+              >
+                <Pencil aria-hidden="true" className="size-3.5" />
+                {office.next_action ? "Edit next action" : "Set next action"}
+              </Button>
+              {/* Preserve a soft notice (e.g. "saved and added to
+                  To-Dos") across the auto-collapse so the user still
+                  sees the confirmation after Save returns. */}
+              {nextActionNotice && (
+                <p
+                  role="status"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+                >
+                  <CheckCircle2 aria-hidden="true" className="size-3.5" />
+                  {nextActionNotice}
+                </p>
+              )}
+            </>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleSaveNextAction();
+              }}
+              className="space-y-3"
             >
-              Due date (optional)
-            </label>
-            <input
-              id="next-action-due"
-              type="date"
-              value={nextActionDueDraft}
-              onChange={(e) => setNextActionDueDraft(e.target.value)}
-              disabled={savingNextAction}
-              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </div>
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={createTodo}
-              onChange={(e) => setCreateTodo(e.target.checked)}
-              disabled={savingNextAction || nextActionDraft.trim().length === 0}
-              className="mt-0.5"
-            />
-            <span>
-              Also add to my AE To-Dos
-              <span className="block text-[11px] text-muted-foreground">
-                Creates a separate To-Do task with the same title{" "}
-                {nextActionDueDraft ? "and due date" : ""}.
-              </span>
-            </span>
-          </label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSaveNextAction}
-              disabled={savingNextAction || !nextActionDirty}
-            >
-              {savingNextAction ? "Saving…" : "Save next action"}
-            </Button>
-            {nextActionError && (
-              <span role="alert" className="text-xs text-destructive">
-                {nextActionError}
-              </span>
-            )}
-          </div>
-          {nextActionNotice && (
-            <p
-              role="status"
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-            >
-              <CheckCircle2 aria-hidden="true" className="size-3.5" />
-              {nextActionNotice}
-            </p>
+              <textarea
+                id="next-action"
+                className="w-full min-h-[72px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                value={nextActionDraft}
+                onChange={(e) => setNextActionDraft(e.target.value)}
+                placeholder="e.g. Drop off donuts week of 6/3 · Follow up on A2L class"
+                disabled={savingNextAction}
+                autoFocus
+              />
+              <div className="grid gap-1.5 sm:max-w-[14rem]">
+                <label
+                  htmlFor="next-action-due"
+                  className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  Due date (optional)
+                </label>
+                <input
+                  id="next-action-due"
+                  type="date"
+                  value={nextActionDueDraft}
+                  onChange={(e) => setNextActionDueDraft(e.target.value)}
+                  disabled={savingNextAction}
+                  className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+              </div>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={createTodo}
+                  onChange={(e) => setCreateTodo(e.target.checked)}
+                  disabled={
+                    savingNextAction || nextActionDraft.trim().length === 0
+                  }
+                  className="mt-0.5"
+                />
+                <span>
+                  Also add to my AE To-Dos
+                  <span className="block text-[11px] text-muted-foreground">
+                    Creates a separate To-Do task with the same title{" "}
+                    {nextActionDueDraft ? "and due date" : ""}.
+                  </span>
+                </span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={savingNextAction || !nextActionDirty}
+                >
+                  {savingNextAction ? "Saving…" : "Save next action"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCancelNextAction}
+                  disabled={savingNextAction}
+                >
+                  <X aria-hidden="true" className="size-3.5" />
+                  Cancel
+                </Button>
+                {nextActionError && (
+                  <span role="alert" className="text-xs text-destructive">
+                    {nextActionError}
+                  </span>
+                )}
+              </div>
+              {nextActionNotice && (
+                <p
+                  role="status"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+                >
+                  <CheckCircle2 aria-hidden="true" className="size-3.5" />
+                  {nextActionNotice}
+                </p>
+              )}
+            </form>
           )}
         </CardContent>
       </Card>
@@ -786,12 +1044,6 @@ export default function OfficeDetailPage({
         </CardContent>
       </Card>
 
-      {/* Optional read-only reminder of the next action's due date. */}
-      {office.next_action && office.next_action_due_date && (
-        <p className="px-1 text-[11px] text-muted-foreground">
-          Next action due {formatDueDate(office.next_action_due_date)}
-        </p>
-      )}
     </main>
   );
 }
