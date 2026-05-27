@@ -359,6 +359,8 @@ export default function OfficeDetailPage({
 
       // AE To-Do dual-write. Decoupled from the office save: a To-Do
       // failure shows a soft notice but doesn't roll back the office.
+      // The To-Do carries `office_id` so the /todos UI can render a
+      // tappable "From office: <name>" back-link that navigates here.
       const trimmedTitle = nextActionDraft.trim();
       if (createTodo && trimmedTitle.length > 0) {
         try {
@@ -369,6 +371,7 @@ export default function OfficeDetailPage({
             body: JSON.stringify({
               title: trimmedTitle,
               description: `From office: ${officeName}`,
+              office_id: officeId,
               ...(nextActionDueDraft
                 ? { due_date: nextActionDueDraft }
                 : {}),

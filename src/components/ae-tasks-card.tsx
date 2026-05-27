@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { format } from "date-fns";
 import {
+  Building2,
   CalendarPlus,
   Check,
   ChevronDown,
@@ -373,13 +375,13 @@ export function AeTasksCard() {
                 : "No tasks yet — add one above."}
             </p>
           ) : (
-            <div className="space-y-2">
-              <div className="space-y-2.5">
+            <div className="space-y-3">
+              <div className="space-y-3.5">
                 {visibleBuckets.map((bucket) => (
-                  <div key={bucket.key} className="space-y-0.5">
+                  <div key={bucket.key} className="space-y-1">
                   <h3
                     className={cn(
-                      "px-0.5 text-[11px] font-semibold uppercase tracking-wide",
+                      "px-0.5 text-xs font-semibold uppercase tracking-wide",
                       bucket.tone === "bad"
                         ? "text-destructive"
                         : bucket.tone === "warn"
@@ -389,7 +391,10 @@ export function AeTasksCard() {
                   >
                     {bucket.label} · {bucket.tasks.length}
                   </h3>
-                  <ul>
+                  {/* Divider lines between rows give each task a visual
+                      pen-stroke of separation — much easier to scan
+                      one-handed on a phone than the prior tight rows. */}
+                  <ul className="divide-y divide-border/50">
                     {bucket.tasks.map((task) => (
                       <TaskRow
                         key={task.id}
@@ -457,16 +462,16 @@ export function AeTasksCard() {
                 Completed ({completed.length})
               </button>
               {showCompleted && (
-                <ul className="mt-0.5">
+                <ul className="mt-1 divide-y divide-border/50">
                   {completed.map((task) => (
                     <li
                       key={task.id}
-                      className="flex items-center gap-2.5 px-1 py-1"
+                      className="flex items-center gap-3 px-1.5 py-2"
                     >
-                      <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
-                        <Check aria-hidden="true" className="size-2.5" />
+                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
+                        <Check aria-hidden="true" className="size-3" />
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground line-through">
+                      <span className="min-w-0 flex-1 truncate text-base text-muted-foreground line-through">
                         {task.title}
                       </span>
                     </li>
@@ -584,7 +589,7 @@ function TaskRow({
   }
 
   return (
-    <li className="flex items-center gap-1.5 rounded-md px-1 py-0.5 transition-colors hover:bg-muted/50">
+    <li className="flex items-center gap-3 rounded-md px-1.5 py-2.5 transition-colors hover:bg-muted/50">
       {/* 44px hit area for comfortable mobile tapping; the visible checkbox
           stays compact via the inner span. */}
       <button
@@ -594,21 +599,52 @@ function TaskRow({
         disabled={disabled}
         className="group flex size-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <span className="flex size-5 items-center justify-center rounded-full border-2 border-primary/40 text-transparent transition-colors group-hover:border-primary group-hover:bg-primary/10 group-hover:text-primary">
-          <Check aria-hidden="true" className="size-3" />
+        <span className="flex size-6 items-center justify-center rounded-full border-2 border-primary/40 text-transparent transition-colors group-hover:border-primary group-hover:bg-primary/10 group-hover:text-primary">
+          <Check aria-hidden="true" className="size-3.5" />
         </span>
       </button>
-      <div className="min-w-0 flex-1 leading-tight">
-        <p className="text-sm font-medium break-words">{task.title}</p>
+      <div className="min-w-0 flex-1 leading-snug">
+        {/* Title bumped to text-base (16px = iOS native readability,
+            no auto-zoom on tap). */}
+        <p className="text-base font-medium break-words">{task.title}</p>
+        {/* Office back-link. Renders only when the task carries an
+            office_id from the office-detail dual-write. Tappable
+            chip that navigates to /offices/[office_id]. If the
+            office name didn't resolve at read time (deleted office,
+            FK SET NULL race), we still render the row safely as
+            plain text — "(no longer available)" — instead of a
+            broken link. stopPropagation isn't needed because the
+            row itself isn't a button; only the checkbox / actions
+            are interactive. */}
+        {task.office_id && task.office_name && (
+          <Link
+            href={`/offices/${task.office_id}`}
+            className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          >
+            <Building2
+              aria-hidden="true"
+              className="size-3.5 shrink-0 text-muted-foreground"
+            />
+            <span className="truncate">
+              From office: {task.office_name}
+            </span>
+          </Link>
+        )}
+        {task.office_id && !task.office_name && (
+          <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Building2 aria-hidden="true" className="size-3.5" />
+            From office: (no longer available)
+          </p>
+        )}
         {task.description && (
-          <p className="mt-0.5 text-xs text-muted-foreground break-words">
+          <p className="mt-1 text-sm text-muted-foreground break-words">
             {task.description}
           </p>
         )}
         {task.due_date && (
           <p
             className={cn(
-              "mt-0.5 text-xs",
+              "mt-1 text-sm",
               overdue ? "text-destructive" : "text-muted-foreground",
             )}
           >
@@ -616,33 +652,31 @@ function TaskRow({
             {formatDateMDY(task.due_date)}
           </p>
         )}
-        <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-          {stampLabel}
-        </p>
+        <p className="mt-1.5 text-xs text-muted-foreground/80">{stampLabel}</p>
       </div>
       {busy || deleting ? (
         <span className="shrink-0 self-center text-xs text-muted-foreground">
           {deleting ? "Deleting…" : "Saving…"}
         </span>
       ) : (
-        <div className="flex shrink-0 items-center">
+        <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             aria-label={`Edit "${task.title}"`}
             onClick={onStartEdit}
             disabled={disabled}
-            className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex size-10 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Pencil aria-hidden="true" className="size-3.5" />
+            <Pencil aria-hidden="true" className="size-4" />
           </button>
           <button
             type="button"
             aria-label={`Delete "${task.title}"`}
             onClick={onDelete}
             disabled={disabled}
-            className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex size-10 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Trash2 aria-hidden="true" className="size-3.5" />
+            <Trash2 aria-hidden="true" className="size-4" />
           </button>
         </div>
       )}

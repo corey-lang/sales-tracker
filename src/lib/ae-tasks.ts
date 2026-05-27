@@ -20,6 +20,18 @@ export type AeTask = {
   /** ISO date (yyyy-mm-dd) or null when the task has no due date. */
   due_date: string | null;
   status: TaskStatus;
+  /** Optional back-link to the office that spawned this task (via the
+   *  office-detail page's "Also add to my AE To-Dos" checkbox). Null
+   *  for manually-created tasks. See ae_tasks_office_link.sql. */
+  office_id: string | null;
+  /** Denormalized convenience field — the office's display name at
+   *  read time. Not stored on the row; the /api/tasks routes look it
+   *  up by `office_id` and attach it to the response. Null when
+   *  `office_id` is null OR when the office no longer exists (e.g.
+   *  deleted between task create and read — the DB sets office_id to
+   *  NULL on the row, but a stale cached task might still carry the
+   *  id; the UI degrades to plain text in that case). */
+  office_name: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
