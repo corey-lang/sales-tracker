@@ -29,6 +29,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 
 // ---------------------------------------------------------------------------
 // Office Detail — Phase 1A test-only surface.
@@ -662,7 +663,10 @@ export default function OfficeDetailPage({
   const mapsHref = mapsUrl(office);
 
   return (
-    <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4">
+    <>
+      <main
+        className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}
+      >
       {/* Header — Back to /offices + sandbox tag. */}
       <header className="flex flex-wrap items-center justify-between gap-2">
         <Link
@@ -1178,7 +1182,9 @@ export default function OfficeDetailPage({
         </CardContent>
       </Card>
 
-    </main>
+      </main>
+      <BottomNav salesperson={salesperson} />
+    </>
   );
 }
 

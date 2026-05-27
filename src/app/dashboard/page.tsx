@@ -176,28 +176,33 @@ export default function DashboardPage() {
 
         <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
 
-        {/* Nearby Offices entry point — sits directly under the weekly
+        {/* Offices entry point — sits directly under the weekly
             momentum hero so it's the first action the AE sees once
-            they've scanned their numbers for the day. Gated on
-            `is_test === true` because the /offices + /offices/nearby
-            surfaces are themselves test-account-only today; showing
-            the card to non-test AEs would result in a tap → redirect
-            dead-end. Once the office surface graduates to all AEs,
-            the gate can drop. */}
+            they've scanned their numbers for the day. The Offices
+            surface now consolidates the old Map + List views under
+            a single `/offices` URL; the destination defaults to
+            the Map view with auto-locate so the AE lands ready to
+            see what's around them.
+            Gated on `is_test === true` because the /offices surface
+            is itself test-account-only today; showing the card to
+            non-test AEs would result in a tap → redirect dead-end.
+            Once the office surface graduates to all AEs, the gate
+            can drop. */}
         {salesperson.is_test === true && (
           <Card size="sm">
             <CardHeader>
-              <CardTitle>📍 Nearby Offices</CardTitle>
+              <CardTitle>📍 Offices</CardTitle>
               <CardDescription>
-                Find offices around you, get directions, and log visits.
+                See what&apos;s around you on the map, search your full
+                office list, get directions, and log visits.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <Link
-                href="/offices/nearby"
+                href="/offices"
                 className={buttonVariants({ size: "sm" })}
               >
-                Open Nearby Map
+                Open Offices
               </Link>
             </CardContent>
           </Card>
