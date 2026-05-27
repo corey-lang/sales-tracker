@@ -281,7 +281,25 @@ export default function NearbyOfficesMap({
       //
       // `MapResizer` below also calls `invalidateSize()` post-mount
       // so any residual mid-init layout change is corrected.
-      className="relative h-[calc(100dvh-23rem)] min-h-[300px] w-full overflow-hidden rounded-lg border border-border"
+      //
+      // STACKING CONTEXT (`isolate`)
+      //   Leaflet sets high z-indexes on its internal panes (200-700
+      //   for tile/marker/popup panes, 1000 for the .leaflet-top /
+      //   .leaflet-bottom control containers). `.leaflet-container`
+      //   itself is only `position: relative` — that does NOT create
+      //   a stacking context, so those high z-indexes escape into
+      //   the parent stacking context (typically <body>). The
+      //   consequence: any sibling modal at z-50 (e.g. the Add
+      //   Office sheet on /offices) renders BELOW the map because
+      //   z-1000 > z-50 in the shared body context.
+      //
+      //   Adding `isolate` (CSS `isolation: isolate`) on the wrapper
+      //   establishes a new stacking context here — Leaflet's panes
+      //   and controls stay contained, and the wrapper itself
+      //   competes against siblings at z-auto (= 0). Modals at z-50
+      //   then layer correctly above the map without any global
+      //   z-index bumps.
+      className="relative isolate h-[calc(100dvh-23rem)] min-h-[300px] w-full overflow-hidden rounded-lg border border-border"
     >
       <MapContainer
         center={[center.lat, center.lng]}

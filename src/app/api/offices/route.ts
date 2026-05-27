@@ -274,10 +274,14 @@ export async function GET(req: Request) {
 //   them on first create), so a future re-import won't clobber.
 //   next_action_due_date — optional YYYY-MM-DD.
 //
-// NOT ACCEPTED
-//   latitude / longitude — manual adds don't geocode. The office
-//   appears in List immediately but is excluded from Map until
-//   coordinates exist. Acknowledged in the UI copy.
+// COORDINATES
+//   Manually-added offices may now carry latitude + longitude when
+//   the AE picks a result from the Add Office address autocomplete
+//   (powered by /api/geocode/search, OpenStreetMap-backed). The
+//   client passes the chosen address's lat/lng straight through to
+//   this route. Manual address entry without a picked suggestion
+//   still works — those rows insert with NULL coords and surface in
+//   List immediately, just not on the Map until coords appear.
 //
 // OWNERSHIP / SCOPE
 //   `requireTestAccount` gate (same as the rest of the office
@@ -326,6 +330,12 @@ const CreateOfficeSchema = z.object({
   city: OPTIONAL_TEXT(100),
   state: OPTIONAL_TEXT(64),
   zip: OPTIONAL_TEXT(20),
+  // Coordinates are optional. The client passes them through when
+  // the AE picks a geocoded result from the Add Office address
+  // autocomplete; manual address entry leaves them null and the
+  // row inserts without map placement.
+  latitude: z.number().gte(-90).lte(90).nullable().optional(),
+  longitude: z.number().gte(-180).lte(180).nullable().optional(),
   office_phone: OPTIONAL_TEXT(64),
   office_email: OPTIONAL_TEXT(254),
   office_notes: OPTIONAL_TEXT(10_000),
@@ -359,6 +369,8 @@ export async function POST(req: Request) {
       city: string | null;
       state: string | null;
       zip: string | null;
+      latitude: number | null;
+      longitude: number | null;
       office_phone: string | null;
       office_email: string | null;
       office_notes: string | null;
@@ -374,6 +386,8 @@ export async function POST(req: Request) {
       city: body.city ?? null,
       state: body.state ?? null,
       zip: body.zip ?? null,
+      latitude: body.latitude ?? null,
+      longitude: body.longitude ?? null,
       office_phone: body.office_phone ?? null,
       office_email: body.office_email ?? null,
       office_notes: body.office_notes ?? null,

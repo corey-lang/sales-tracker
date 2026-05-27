@@ -7,8 +7,10 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
   ChevronRight,
   List as ListIcon,
+  Loader2,
   Locate,
   Map as MapIcon,
   MapPin,
@@ -31,6 +33,11 @@ import {
   type OfficeListItem,
   type OfficeRow,
 } from "@/lib/offices";
+import {
+  GEOCODE_DEBOUNCE_MS,
+  GEOCODE_MIN_QUERY_LENGTH,
+  type GeocodeResult,
+} from "@/lib/geocode";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -1132,6 +1139,11 @@ function AddOfficeModal({
 }) {
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
+  // Populated when the AE picks a geocoded suggestion from the
+  // address autocomplete. Cleared on any manual edit to the address
+  // field — typed text no longer matches the picked location, so
+  // shipping its coords would be wrong.
+  const [picked, setPicked] = useState<GeocodeResult | null>(null);
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
@@ -1166,14 +1178,43 @@ function AddOfficeModal({
     setSaving(true);
     setError(null);
     try {
-      // Send only the fields the user actually filled in. Empty
-      // strings on optional fields become `undefined` so the server
-      // schema normalizes them to NULL. Required fields go through
-      // their trimmed values.
-      const body: Record<string, string> = {
+      // Build the request body. Required fields go through their
+      // trimmed values. Optional text fields are only added when
+      // the user filled them in (empty strings would normalize to
+      // NULL server-side but explicitly omitting reads cleaner in
+      // network logs).
+      //
+      // When a geocoded suggestion was picked, the structured
+      // address components + lat/lng come from the result. The
+      // user's address text is still authoritative for `street`
+      // (it's what they SAW + chose to save). City/state/zip and
+      // coords come from the upstream geocode for the rest of the
+      // structured columns — those are the parts that make the
+      // office map-eligible immediately.
+      type CreatePayload = {
+        name: string;
+        street: string;
+        city?: string;
+        state?: string;
+        zip?: string;
+        latitude?: number;
+        longitude?: number;
+        office_phone?: string;
+        office_email?: string;
+        office_notes?: string;
+        next_action?: string;
+      };
+      const body: CreatePayload = {
         name: trimmedName,
         street: trimmedAddress,
       };
+      if (picked) {
+        if (picked.city) body.city = picked.city;
+        if (picked.state) body.state = picked.state;
+        if (picked.zip) body.zip = picked.zip;
+        body.latitude = picked.latitude;
+        body.longitude = picked.longitude;
+      }
       if (phone.trim()) body.office_phone = phone.trim();
       if (email.trim()) body.office_email = email.trim();
       if (notes.trim()) body.office_notes = notes.trim();
@@ -1247,10 +1288,13 @@ function AddOfficeModal({
             </button>
           </header>
           <p className="text-xs text-muted-foreground">
-            Required: name + address. After saving, you&apos;ll open
-            the new office detail page. It will also appear in your
-            List right away. It&apos;ll show on the Map once it has
-            coordinates.
+            Required: name + address. Start typing an address to pick
+            a real location — that captures the coordinates so the
+            office appears on the Map right away. Manual entry is fine
+            too; manual addresses may not appear on the Map until
+            coordinates are added. After saving, you&apos;ll open the
+            new office detail page; the office will also appear in
+            your List right away.
           </p>
           <form onSubmit={handleSubmit} className="space-y-3">
             <div className="space-y-1">
@@ -1278,15 +1322,38 @@ function AddOfficeModal({
               >
                 Address <span className="text-destructive">*</span>
               </label>
-              <Input
-                id="add-office-address"
+              <AddressAutocomplete
                 value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                placeholder="e.g. 12 Main St, Orem, UT 84057"
+                onChange={(v) => {
+                  setAddress(v);
+                  // Manual edits invalidate any previously locked
+                  // geocode pick — the typed text no longer matches
+                  // the original lat/lng, so we drop the coords.
+                  // The AE can either re-pick from the suggestions
+                  // or proceed with a coords-less manual address.
+                  if (picked) setPicked(null);
+                }}
+                onPick={(result) => {
+                  setAddress(result.formatted);
+                  setPicked(result);
+                }}
                 disabled={saving}
-                maxLength={500}
-                required
+                inputId="add-office-address"
+                placeholder="e.g. 12 Main St, Orem, UT 84057"
               />
+              {picked && (
+                <p className="inline-flex items-center gap-1 text-[11px] text-green-600 dark:text-green-400">
+                  <CheckCircle2 aria-hidden="true" className="size-3" />
+                  Coordinates captured — this office will show on the
+                  Map right away.
+                </p>
+              )}
+              {!picked && address.trim().length > 0 && (
+                <p className="text-[11px] text-muted-foreground">
+                  Manual addresses may not appear on the Map until
+                  coordinates are added.
+                </p>
+              )}
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
@@ -1384,6 +1451,212 @@ function AddOfficeModal({
           </form>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AddressAutocomplete — typeahead backed by /api/geocode/search
+// ---------------------------------------------------------------------------
+//
+// Behavior contract:
+//   * `value` is the input's current text.
+//   * `onChange(v)` fires on every keystroke / paste.
+//   * `onPick(result)` fires when the user taps a suggestion.
+//     Callers should update `value` to `result.formatted` AND stash
+//     the lat/lng + structured address parts from the result.
+//   * Manual typing AFTER a pick is the caller's responsibility to
+//     handle (clear the stashed coords). This component doesn't
+//     track the picked state internally.
+//
+// Suggestion fetch:
+//   * Debounced by GEOCODE_DEBOUNCE_MS (500 ms) to stay under
+//     Nominatim's ~1 req/s policy.
+//   * Skipped when value < GEOCODE_MIN_QUERY_LENGTH (4 chars).
+//   * Cancellable: a fresh keystroke invalidates the in-flight
+//     request so a slow first query can't overwrite a faster
+//     later one.
+//
+// Dropdown:
+//   * Opens on focus and on every typed change.
+//   * Closes on outside-tap (mousedown/touchstart on the document),
+//     Escape, or after a suggestion is picked.
+//   * Renders "Searching…" while loading, "No matches" when empty,
+//     "Couldn't load suggestions." on error.
+// ---------------------------------------------------------------------------
+function AddressAutocomplete({
+  value,
+  onChange,
+  onPick,
+  disabled,
+  inputId,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onPick: (result: GeocodeResult) => void;
+  disabled?: boolean;
+  inputId?: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Local debounce — runs once whenever `value` changes, then
+  // `debouncedValue` updates GEOCODE_DEBOUNCE_MS after the user
+  // stops typing.
+  useEffect(() => {
+    const t = window.setTimeout(
+      () => setDebouncedValue(value),
+      GEOCODE_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(t);
+  }, [value]);
+
+  // Fetch suggestions whenever the debounced value crosses the
+  // min-length gate. The `cancelled` flag guards against a slow
+  // first request landing on top of a faster later one when the
+  // user types fast.
+  useEffect(() => {
+    const trimmed = debouncedValue.trim();
+    if (trimmed.length < GEOCODE_MIN_QUERY_LENGTH) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSuggestions([]);
+      setLoading(false);
+      setHasError(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setHasError(false);
+    void apiFetch(`/api/geocode/search?q=${encodeURIComponent(trimmed)}`)
+      .then(async (res) => {
+        if (cancelled) return;
+        const data = (await res.json().catch(() => null)) as
+          | { results?: GeocodeResult[] }
+          | null;
+        if (!res.ok) {
+          setHasError(true);
+          setSuggestions([]);
+          return;
+        }
+        setSuggestions(Array.isArray(data?.results) ? data.results : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setHasError(true);
+        setSuggestions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedValue]);
+
+  // Outside-tap + Escape close the dropdown. Only bound while open
+  // so the document listener isn't always active.
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent | TouchEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("touchstart", onPointer, { passive: true });
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("touchstart", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const shouldShowDropdown =
+    open &&
+    (loading || hasError || suggestions.length > 0 ||
+      debouncedValue.trim().length >= GEOCODE_MIN_QUERY_LENGTH);
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <Input
+        id={inputId}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          if (value.trim().length >= GEOCODE_MIN_QUERY_LENGTH) {
+            setOpen(true);
+          }
+        }}
+        placeholder={placeholder}
+        disabled={disabled}
+        maxLength={500}
+        required
+        autoComplete="off"
+        // iOS Safari shows its own autofill bar above the keyboard
+        // by default — `off` here lets the AE rely on the dropdown
+        // instead of Safari's autofill (which usually doesn't have
+        // address suggestions anyway).
+      />
+      {shouldShowDropdown && (
+        <div
+          role="listbox"
+          aria-label="Address suggestions"
+          // Sits inside the modal's z-50 stacking context; no
+          // explicit z-index needed beyond the small bump to clear
+          // the input's focus ring.
+          className="absolute left-0 right-0 top-full z-10 mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
+        >
+          {loading && (
+            <p className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+              Searching…
+            </p>
+          )}
+          {!loading && hasError && (
+            <p className="px-3 py-2 text-xs text-destructive">
+              Couldn&apos;t load suggestions. Try again or enter the
+              address manually.
+            </p>
+          )}
+          {!loading && !hasError && suggestions.length === 0 && (
+            <p className="px-3 py-2 text-xs text-muted-foreground">
+              No matches. You can still enter the address manually.
+            </p>
+          )}
+          {!loading &&
+            !hasError &&
+            suggestions.map((s, i) => (
+              <button
+                key={`${s.latitude},${s.longitude},${i}`}
+                type="button"
+                role="option"
+                aria-selected="false"
+                onClick={() => {
+                  onPick(s);
+                  setOpen(false);
+                }}
+                className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+              >
+                <MapPin
+                  aria-hidden="true"
+                  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                />
+                <span className="min-w-0 flex-1">{s.formatted}</span>
+              </button>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
