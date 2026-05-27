@@ -1,0 +1,67 @@
+-- ===========================================================================
+-- offices — archive (soft delete) column.
+-- ===========================================================================
+-- WHAT THIS IS
+--   Adds `archived_at TIMESTAMPTZ NULL` to `offices`. Powers the
+--   "Remove this office from your list?" action on the office-detail
+--   page. Archive is preferred over hard delete because:
+--
+--     * `office_visits` rows reference `offices.id` via a FK. Hard-
+--       deleting an office would either CASCADE the visits away
+--       (destroying the AE's visit history) or fail outright on
+--       referential integrity. Archive preserves history.
+--     * `ae_tasks.office_id` (migration #31) also references the
+--       office; archived offices let the task's back-link render
+--       as "(no longer available)" rather than producing a broken
+--       FK-cleanup.
+--     * Future surfaces (visit-frequency reports, audit timelines)
+--       may want to read against historical office rows even after
+--       the AE removed them from their working list.
+--
+-- SCOPE
+--   Every read surface filters `archived_at IS NULL`:
+--     * GET /api/offices            (list)
+--     * GET /api/offices/[id]       (detail)
+--     * PATCH /api/offices/[id]     (notes / next_action edits)
+--     * GET /api/offices/nearby     (map + list)
+--     * POST /api/offices/[id]/visits (ownership pre-check)
+--     * PATCH /api/offices/[id]/visits/[vid] (ownership pre-check)
+--   Plus the office-link validation + name enrichment in /api/tasks
+--   (assertCallerOwnsOffice + enrichTasksWithOfficeName) so a task
+--   linked to an archived office degrades to "(no longer available)"
+--   in the To-Do list rather than navigating to a 404.
+--
+-- WRITE
+--   DELETE /api/offices/[id] is the archive endpoint. Sets
+--   `archived_at = NOW()`. Owner-only (predicate enforces
+--   salesperson_id = me.id). The column is otherwise managed by the
+--   server — no `unarchive` flow today (out of scope; an admin can
+--   `UPDATE offices SET archived_at = NULL WHERE id = …` if needed).
+--
+-- WHY NULLABLE
+--   `archived_at IS NULL` is the active-row predicate. A non-null
+--   timestamp marks the row as archived AND records when. Cheaper
+--   than a boolean `is_archived` + separate `archived_at` because
+--   one column encodes both states.
+--
+-- IDEMPOTENT
+--   ADD COLUMN IF NOT EXISTS. Safe to re-run.
+-- ===========================================================================
+
+ALTER TABLE offices
+  ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+-- ===========================================================================
+-- VERIFICATION
+-- ===========================================================================
+-- SELECT column_name, data_type, is_nullable
+-- FROM information_schema.columns
+-- WHERE table_name = 'offices' AND column_name = 'archived_at';
+--   -- expect one row, data_type = 'timestamp with time zone', is_nullable = 'YES'.
+--
+-- -- Confirm the active-row count after archive:
+-- SELECT
+--   COUNT(*) FILTER (WHERE archived_at IS NULL)     AS active,
+--   COUNT(*) FILTER (WHERE archived_at IS NOT NULL) AS archived
+-- FROM offices
+-- WHERE salesperson_id = '<ae-uuid>' AND environment = 'test';

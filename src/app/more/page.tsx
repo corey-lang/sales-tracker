@@ -99,9 +99,14 @@ export default function MorePage() {
               Admin
             </Link>
           )}
-          {/* My Offices (Test) — Phase 1B test-only office list. The
-              link only appears for `is_test === true` salespeople; the
-              server route + the /offices page itself both re-check
+          {/* Offices entry — links to the unified Map + List
+              experience at /offices. Renamed from "My Offices (Test)"
+              once the surface graduated from "list-only / test
+              banner" to the consolidated Map+List feature; the page
+              still owns the Test pill + sandbox banner internally so
+              there's no need to qualify it here.
+              The link only appears for `is_test === true` salespeople;
+              the server route + the /offices page itself both re-check
               `requireTestAccount`, so this is UI discoverability only.
               juice_box_only is excluded by the role check, and
               `is_test` is a static account property (no live grant)
@@ -113,7 +118,7 @@ export default function MorePage() {
                 className={buttonVariants({ variant: "outline" })}
               >
                 <Building2 aria-hidden="true" className="size-4" />
-                My Offices (Test)
+                Offices
               </Link>
             )}
           {(() => {

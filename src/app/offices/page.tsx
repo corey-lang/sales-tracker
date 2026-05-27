@@ -12,6 +12,7 @@ import {
   Locate,
   Map as MapIcon,
   MapPin,
+  Plus,
   Search,
   X,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import {
   type NearbyOfficeItem,
   type NearbyRadius,
   type OfficeListItem,
+  type OfficeRow,
 } from "@/lib/offices";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -249,6 +251,37 @@ export default function OfficesPage() {
   // ---- View mode (Map default, per product direction) ----------------------
   const [viewMode, setViewMode] = useState<ViewMode>("map");
 
+  // ---- Add Office modal state ---------------------------------------------
+  // Opens the modal sheet from the header "Add Office" button. The
+  // modal owns its own form state; the page only tracks open/close
+  // and provides the "fresh office created" callback that refetches
+  // the List view (so the new row shows up immediately even if the
+  // user is currently on Map).
+  const [addOfficeOpen, setAddOfficeOpen] = useState(false);
+  const [listRefreshKey, setListRefreshKey] = useState(0);
+  const handleOfficeCreated = useCallback((office: OfficeRow) => {
+    // Bump the refresh key so the List view's data effect re-runs
+    // (it's keyed on this value). The user navigates away to the
+    // detail page below, so this refetch is for the next time they
+    // return — when they back out, the catalog already has the new
+    // row visible without an extra load.
+    setListRefreshKey((n) => n + 1);
+    // Pre-select List as the active view for the eventual return to
+    // /offices. Map view is the default; landing back on Map after
+    // adding a coords-less office would hide it, which is confusing.
+    // Switching to List ahead of the navigation means a Back tap
+    // lands the AE on the surface where their new office actually
+    // appears.
+    setViewMode("list");
+    setAddOfficeOpen(false);
+    // Product decision: navigate straight to the new office's detail
+    // page so the AE can immediately log a visit, set a next action,
+    // or edit notes. The modal copy tells the user this is what
+    // happens AND that the new office is also already in their
+    // List, so the redirect feels intentional rather than surprising.
+    router.push(`/offices/${office.id}`);
+  }, [router]);
+
   // ===========================================================================
   // MAP VIEW state
   // ===========================================================================
@@ -458,9 +491,11 @@ export default function OfficesPage() {
     return () => clearTimeout(t);
   }, [query]);
 
-  // Lazily fetch list data only when needed. Two triggers:
+  // Lazily fetch list data only when needed. Triggers:
   //   * The user has the List view open AND it hasn't loaded yet.
   //   * The debounced search term changes while List is open.
+  //   * A new office was created (Add Office modal bumped
+  //     `listRefreshKey`) — refetch so the new row appears.
   //
   // Skipping the fetch while on Map view keeps the page lean — no
   // need to pull the full sandbox until the user actually asks for
@@ -505,7 +540,7 @@ export default function OfficesPage() {
     return () => {
       cancelled = true;
     };
-  }, [accessReady, canView, viewMode, debouncedQuery]);
+  }, [accessReady, canView, viewMode, debouncedQuery, listRefreshKey]);
 
   const listCountLabel = useMemo(() => {
     if (listState.kind !== "ready") return null;
@@ -548,13 +583,27 @@ export default function OfficesPage() {
           </span>
         </header>
 
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-            Offices
-          </h1>
-          <p className="text-xs text-muted-foreground">
-            Sandbox office surface — visible only to the test account.
-          </p>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+              Offices
+            </h1>
+            <p className="text-xs text-muted-foreground">
+              Sandbox office surface — visible only to the test account.
+            </p>
+          </div>
+          {/* Add Office — view-mode-agnostic action that opens the
+              manual-add modal. Surfacing it in the header keeps it
+              one tap away from both Map and List without competing
+              with view-specific controls (radius pills, search). */}
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setAddOfficeOpen(true)}
+          >
+            <Plus aria-hidden="true" className="size-4" />
+            Add Office
+          </Button>
         </div>
 
         {/* Sandbox banner. */}
@@ -630,6 +679,12 @@ export default function OfficesPage() {
         )}
       </main>
       <BottomNav salesperson={salesperson} />
+      {addOfficeOpen && (
+        <AddOfficeModal
+          onCreated={handleOfficeCreated}
+          onClose={() => setAddOfficeOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -1050,5 +1105,285 @@ function ListViewSection({
         </ul>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AddOfficeModal — manual-add form
+// ---------------------------------------------------------------------------
+//
+// Mobile-first bottom sheet (centers on sm+) for the AE Add Office
+// flow. Required: name + address. Optional: phone, email, notes,
+// next action. No geocoding — the office appears in List
+// immediately but is excluded from the Map until coordinates exist;
+// the modal calls that out so the AE isn't surprised.
+//
+// Backdrop click or the X closes the modal (matching the juice-box
+// modal pattern). Escape also closes. The form is intentionally
+// straightforward — title + textarea / inputs + Save / Cancel; no
+// multi-step wizard, no client-side geocoding, no contact CRM.
+// ---------------------------------------------------------------------------
+function AddOfficeModal({
+  onCreated,
+  onClose,
+}: {
+  onCreated: (office: OfficeRow) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [notes, setNotes] = useState("");
+  const [nextAction, setNextAction] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // Microtask defer so iOS reliably opens the keyboard on first
+    // paint (mirrors the juice-box ReplyModal pattern).
+    const id = window.setTimeout(() => nameRef.current?.focus(), 30);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    const handle = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !saving) onClose();
+    };
+    document.addEventListener("keydown", handle);
+    return () => document.removeEventListener("keydown", handle);
+  }, [saving, onClose]);
+
+  const trimmedName = name.trim();
+  const trimmedAddress = address.trim();
+  const canSubmit =
+    trimmedName.length > 0 && trimmedAddress.length > 0 && !saving;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSaving(true);
+    setError(null);
+    try {
+      // Send only the fields the user actually filled in. Empty
+      // strings on optional fields become `undefined` so the server
+      // schema normalizes them to NULL. Required fields go through
+      // their trimmed values.
+      const body: Record<string, string> = {
+        name: trimmedName,
+        street: trimmedAddress,
+      };
+      if (phone.trim()) body.office_phone = phone.trim();
+      if (email.trim()) body.office_email = email.trim();
+      if (notes.trim()) body.office_notes = notes.trim();
+      if (nextAction.trim()) body.next_action = nextAction.trim();
+
+      const res = await apiFetch("/api/offices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { office?: OfficeRow; error?: string }
+        | null;
+      if (!res.ok || !data?.office) {
+        // 409 is the dedupe-collision shape; show the server's
+        // friendly text directly. Other failures fall back to the
+        // sanitized generic message.
+        setError(data?.error ?? `Could not add office (${res.status}).`);
+        return;
+      }
+      onCreated(data.office);
+    } catch {
+      setError("Network error while adding this office.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="add-office-title"
+      // z-50 sits above the bottom nav (z-40); matches the juice-box
+      // modal pattern. viewport-fit=cover puts content above the
+      // notch on standalone iPhones via the safe-area envelopes.
+      className="fixed inset-0 z-50 flex items-end justify-center p-3 sm:items-center"
+      style={{
+        paddingTop: "calc(0.75rem + env(safe-area-inset-top))",
+        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+      }}
+    >
+      <button
+        type="button"
+        aria-label="Cancel"
+        onClick={() => {
+          if (!saving) onClose();
+        }}
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm focus:outline-none"
+      />
+      <Card
+        size="sm"
+        className="relative w-full max-w-md overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150"
+      >
+        <CardContent className="space-y-3 px-4 py-3">
+          <header className="flex items-start justify-between gap-2">
+            <h2
+              id="add-office-title"
+              className="text-base font-semibold"
+            >
+              Add Office
+            </h2>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              aria-label="Close"
+              className="-mr-1 -mt-0.5 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </header>
+          <p className="text-xs text-muted-foreground">
+            Required: name + address. After saving, you&apos;ll open
+            the new office detail page. It will also appear in your
+            List right away. It&apos;ll show on the Map once it has
+            coordinates.
+          </p>
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="space-y-1">
+              <label
+                htmlFor="add-office-name"
+                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+              >
+                Name <span className="text-destructive">*</span>
+              </label>
+              <Input
+                id="add-office-name"
+                ref={nameRef}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Smith & Co Realty"
+                disabled={saving}
+                maxLength={200}
+                required
+              />
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="add-office-address"
+                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+              >
+                Address <span className="text-destructive">*</span>
+              </label>
+              <Input
+                id="add-office-address"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="e.g. 12 Main St, Orem, UT 84057"
+                disabled={saving}
+                maxLength={500}
+                required
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label
+                  htmlFor="add-office-phone"
+                  className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  Phone (optional)
+                </label>
+                <Input
+                  id="add-office-phone"
+                  type="tel"
+                  inputMode="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="e.g. (801) 555-1234"
+                  disabled={saving}
+                  maxLength={64}
+                />
+              </div>
+              <div className="space-y-1">
+                <label
+                  htmlFor="add-office-email"
+                  className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                >
+                  Email (optional)
+                </label>
+                <Input
+                  id="add-office-email"
+                  type="email"
+                  inputMode="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. front@office.com"
+                  disabled={saving}
+                  maxLength={254}
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="add-office-notes"
+                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+              >
+                Office notes (optional)
+              </label>
+              <textarea
+                id="add-office-notes"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="e.g. Broker is Sarah · Office meetings Tuesdays at 10am"
+                disabled={saving}
+                rows={2}
+                className="w-full min-h-[64px] rounded-md border border-input bg-background p-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="add-office-next-action"
+                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+              >
+                Next action (optional)
+              </label>
+              <Input
+                id="add-office-next-action"
+                value={nextAction}
+                onChange={(e) => setNextAction(e.target.value)}
+                placeholder="e.g. Drop off donuts next Friday"
+                disabled={saving}
+                maxLength={2000}
+              />
+            </div>
+            {error && (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {error}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={onClose}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" disabled={!canSubmit}>
+                {saving ? "Adding…" : "Add Office"}
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
   );
 }

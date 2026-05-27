@@ -5,14 +5,17 @@ import {
   ApiError,
   badRequest,
   handleApiError,
+  parseBody,
   requireTestAccount,
 } from "@/lib/server/auth";
 import {
+  buildOfficeDedupeKey,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   OFFICE_LIST_LIMIT,
   OFFICE_LIST_QUERY_LIMIT,
   type OfficeListItem,
+  type OfficeRow,
 } from "@/lib/offices";
 
 // GET /api/offices?q=<search>
@@ -134,6 +137,8 @@ export async function GET(req: Request) {
     const supabase = getServerSupabase();
 
     // Base query: this AE's sandbox offices, alphabetical pre-fetch.
+    // Archived offices (`archived_at IS NOT NULL`) are excluded so a
+    // soft-deleted row disappears from the List view immediately.
     let officeQuery = supabase
       .from(OFFICES_TABLE)
       .select(
@@ -141,6 +146,7 @@ export async function GET(req: Request) {
       )
       .eq("salesperson_id", me.id)
       .eq("environment", "test")
+      .is("archived_at", null)
       .order("name", { ascending: true })
       .limit(OFFICE_LIST_QUERY_LIMIT);
 
@@ -242,6 +248,181 @@ export async function GET(req: Request) {
         truncated,
       },
       { headers: { "Cache-Control": "private, no-store" } },
+    );
+  } catch (err) {
+    return handleApiError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/offices  — AE Add Office.
+// ---------------------------------------------------------------------------
+//
+// AE-facing "manually add an office to my list" endpoint. Used by
+// the Add Office modal on /offices.
+//
+// REQUIRED
+//   name, address (mapped to the `street` column; matches how the
+//   Badger import stores combined addresses).
+//
+// OPTIONAL
+//   city, state, zip — splittable address columns when the user
+//   wants them broken out. Most manual entries leave these blank.
+//   office_phone, office_email — contact info.
+//   office_notes, next_action — start the office with first-touch
+//   memory. These are import-safe (the Badger import only seeds
+//   them on first create), so a future re-import won't clobber.
+//   next_action_due_date — optional YYYY-MM-DD.
+//
+// NOT ACCEPTED
+//   latitude / longitude — manual adds don't geocode. The office
+//   appears in List immediately but is excluded from Map until
+//   coordinates exist. Acknowledged in the UI copy.
+//
+// OWNERSHIP / SCOPE
+//   `requireTestAccount` gate (same as the rest of the office
+//   surface). `salesperson_id` is the caller's id, `environment`
+//   is pinned to "test", `dedupe_key` is derived from name+street+zip
+//   (same builder the import uses) so duplicate detection is
+//   consistent between manual + bulk paths. A duplicate insert
+//   surfaces as a uniform 409 "An office with this name and
+//   address is already in your list." rather than the raw
+//   23505 text.
+//
+// IDEMPOTENT
+//   Repeated submits with the same name/address against the same
+//   AE/env produce one row (first wins via the
+//   `uq_offices_dedupe_per_env` partial UNIQUE index) and a 409
+//   on every subsequent attempt.
+
+const TRIM_MAX = (max: number) =>
+  z.string().trim().min(1).max(max);
+
+const OPTIONAL_TEXT = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .transform((v) => (v && v.length > 0 ? v : null))
+    .nullable();
+
+const OPTIONAL_DUE_DATE = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "next_action_due_date must be in YYYY-MM-DD format.")
+  .refine(
+    (v) => !Number.isNaN(Date.parse(v)),
+    "next_action_due_date is not a real date.",
+  )
+  .nullable()
+  .optional();
+
+const CreateOfficeSchema = z.object({
+  name: TRIM_MAX(200),
+  // "Address" UI field maps to `street` so the manual-add path
+  // behaves the same as the Badger `_Address` import (full address
+  // in one column). Future surface can split this when needed.
+  street: TRIM_MAX(500),
+  city: OPTIONAL_TEXT(100),
+  state: OPTIONAL_TEXT(64),
+  zip: OPTIONAL_TEXT(20),
+  office_phone: OPTIONAL_TEXT(64),
+  office_email: OPTIONAL_TEXT(254),
+  office_notes: OPTIONAL_TEXT(10_000),
+  next_action: OPTIONAL_TEXT(2_000),
+  next_action_due_date: OPTIONAL_DUE_DATE,
+});
+
+const NEW_OFFICE_COLUMNS =
+  "id, salesperson_id, import_batch_id, name, street, city, state, zip, " +
+  "latitude, longitude, source, dedupe_key, environment, " +
+  "office_notes, next_action, next_action_due_date, " +
+  "office_phone, office_email, external_badger_id, archived_at, " +
+  "created_at, updated_at";
+
+export async function POST(req: Request) {
+  try {
+    const me = await requireTestAccount(req);
+    const body = await parseBody(req, CreateOfficeSchema);
+    const supabase = getServerSupabase();
+
+    const dedupeKey = buildOfficeDedupeKey({
+      name: body.name,
+      street: body.street,
+      zip: body.zip,
+    });
+
+    const insertPayload: {
+      salesperson_id: string;
+      name: string;
+      street: string;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+      office_phone: string | null;
+      office_email: string | null;
+      office_notes: string | null;
+      next_action: string | null;
+      next_action_due_date: string | null;
+      source: string;
+      dedupe_key: string;
+      environment: "test";
+    } = {
+      salesperson_id: me.id,
+      name: body.name,
+      street: body.street,
+      city: body.city ?? null,
+      state: body.state ?? null,
+      zip: body.zip ?? null,
+      office_phone: body.office_phone ?? null,
+      office_email: body.office_email ?? null,
+      office_notes: body.office_notes ?? null,
+      next_action: body.next_action ?? null,
+      next_action_due_date: body.next_action_due_date ?? null,
+      // `source` labels the row's provenance. Matches the import
+      // route's "<source label>" pattern so the offices table reads
+      // self-describing.
+      source: "Manual add",
+      dedupe_key: dedupeKey,
+      environment: "test",
+    };
+
+    const insertRes = await supabase
+      .from(OFFICES_TABLE)
+      .insert(insertPayload)
+      .select(NEW_OFFICE_COLUMNS)
+      .single();
+
+    if (insertRes.error) {
+      // 23505 = duplicate against the `uq_offices_dedupe_per_env`
+      // partial unique index. Translate to a friendly 409 so the
+      // form can show actionable copy rather than the raw DB text.
+      if (insertRes.error.code === "23505") {
+        return Response.json(
+          {
+            error:
+              "An office with this name and address is already in your list.",
+          },
+          { status: 409 },
+        );
+      }
+      console.warn(
+        `[office-create] insert failed ae=${me.id} code=${insertRes.error.code ?? "?"} msg=${insertRes.error.message}`,
+      );
+      throw new ApiError(500, "Could not add this office.");
+    }
+    if (!insertRes.data) {
+      console.warn(`[office-create] insert returned no data ae=${me.id}`);
+      throw new ApiError(500, "Could not add this office.");
+    }
+
+    const office = insertRes.data as unknown as OfficeRow;
+    return Response.json(
+      { office },
+      {
+        status: 201,
+        headers: { "Cache-Control": "private, no-store" },
+      },
     );
   } catch (err) {
     return handleApiError(err);

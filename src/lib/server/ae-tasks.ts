@@ -41,10 +41,15 @@ export async function enrichTasksWithOfficeName(
     return tasks.map((t) => ({ ...t, office_name: null }));
   }
 
+  // Archived offices are intentionally excluded from the lookup.
+  // The To-Do list then renders "From office: (no longer available)"
+  // for tasks linked to archived offices — matches the office-detail
+  // pattern where archived rows disappear from every read surface.
   const officesRes = await supabase
     .from("offices")
     .select("id, name")
-    .in("id", officeIds);
+    .in("id", officeIds)
+    .is("archived_at", null);
 
   if (officesRes.error) {
     // Don't fail the whole task fetch over a name lookup. Log + fall
@@ -138,6 +143,9 @@ export async function assertCallerOwnsOffice(
     .eq("id", officeId)
     .eq("salesperson_id", callerId)
     .eq("environment", "test")
+    // Archived offices can't be linked to new tasks — same uniform
+    // 400 as a not-found / wrong-owner miss.
+    .is("archived_at", null)
     .maybeSingle();
 
   if (res.error) {

@@ -174,6 +174,10 @@ export async function GET(req: Request) {
         )
         .eq("salesperson_id", me.id)
         .eq("environment", "test")
+        // Hide archived offices from the map. Same filter as the
+        // List + detail routes; see offices_archived_at.sql for
+        // why archive (not hard delete) is the right model.
+        .is("archived_at", null)
         .not("latitude", "is", null)
         .not("longitude", "is", null)
         .gte("latitude", box.minLat)

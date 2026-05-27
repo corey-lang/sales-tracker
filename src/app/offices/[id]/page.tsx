@@ -11,6 +11,7 @@ import {
   MapPin,
   Navigation,
   Pencil,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -243,6 +244,49 @@ export default function OfficeDetailPage({
       }
     };
   }, []);
+
+  // ---- Archive (soft delete) state --------------------------------------
+  // DELETE /api/offices/[id] sets archived_at on the office. The
+  // office disappears from List + Map + detail reads while preserving
+  // its visit history and any ae_tasks back-links. After a successful
+  // archive we navigate back to /offices so the user lands on the
+  // catalog and can see the row is gone.
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  async function handleArchiveOffice() {
+    if (archiving) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Remove this office from your list?")
+    ) {
+      return;
+    }
+    setArchiving(true);
+    setArchiveError(null);
+    try {
+      const res = await apiFetch(`/api/offices/${officeId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        setArchiveError(
+          data?.error ?? `Could not remove this office (${res.status}).`,
+        );
+        setArchiving(false);
+        return;
+      }
+      // Land on the catalog. router.replace (not push) so the
+      // archived office's detail page doesn't sit in browser
+      // history — back-button from /offices shouldn't return to a
+      // now-404 detail page.
+      router.replace("/offices");
+    } catch {
+      setArchiveError("Network error while removing this office.");
+      setArchiving(false);
+    }
+  }
 
   // ---- Section open/close ------------------------------------------------
   // Each "card" defaults to a compact preview so the page feels like a
@@ -1181,6 +1225,35 @@ export default function OfficeDetailPage({
           )}
         </CardContent>
       </Card>
+
+      {/* Remove office — destructive action lives at the very bottom
+          of the page so it's reachable but never the first thing the
+          AE sees. Soft-delete (archive) preserves visit history and
+          any ae_tasks back-links; see offices_archived_at.sql. The
+          confirm() guard catches accidental taps; the server-side
+          predicate enforces ownership independently. */}
+      <div className="mt-2 flex flex-col items-start gap-1">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={handleArchiveOffice}
+          disabled={archiving}
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 aria-hidden="true" className="size-3.5" />
+          {archiving ? "Removing…" : "Remove this office"}
+        </Button>
+        {archiveError && (
+          <p role="alert" className="text-xs text-destructive">
+            {archiveError}
+          </p>
+        )}
+        <p className="text-[11px] text-muted-foreground/80">
+          Removes this office from your list. Visit history is
+          preserved.
+        </p>
+      </div>
 
       </main>
       <BottomNav salesperson={salesperson} />

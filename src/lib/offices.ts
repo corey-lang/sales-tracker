@@ -75,6 +75,13 @@ export type OfficeRow = {
    *  can deep-link back to the Badger record; not yet part of the
    *  dedupe key — see offices_badger_fields.sql. */
   external_badger_id: string | null;
+  /** Soft-delete timestamp. NULL on every active row; non-null after
+   *  the AE archives the office via DELETE /api/offices/[id]. Every
+   *  office read surface filters `archived_at IS NULL`, so archived
+   *  rows are hidden from List, Map, detail, and visit logging while
+   *  preserving the underlying office_visits + ae_tasks FK targets.
+   *  See offices_archived_at.sql for the full rationale. */
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 };

@@ -138,16 +138,20 @@ export async function POST(
 
     const supabase = getServerSupabase();
 
-    // Ownership pre-check. Filtering by id + env + owner means wrong-env,
-    // wrong-owner, and missing all collapse to the same 404 — the
-    // response never leaks whether a production or other-AE office
-    // exists at this id.
+    // Ownership pre-check. Filtering by id + env + owner + active
+    // means wrong-env, wrong-owner, missing, and archived all
+    // collapse to the same 404 — the response never leaks which
+    // case it was. Archived offices can't accept new visits (the
+    // detail page hides them too, so this is mostly defense-in-
+    // depth against a stale client trying to log against an office
+    // they just archived).
     const officeRes = await supabase
       .from(OFFICES_TABLE)
       .select("id")
       .eq("id", officeId)
       .eq("environment", "test")
       .eq("salesperson_id", me.id)
+      .is("archived_at", null)
       .maybeSingle();
 
     if (officeRes.error) {

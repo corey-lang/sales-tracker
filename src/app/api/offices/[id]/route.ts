@@ -58,7 +58,7 @@ const OFFICE_COLUMNS =
   "id, salesperson_id, import_batch_id, name, street, city, state, zip, " +
   "latitude, longitude, source, dedupe_key, environment, " +
   "office_notes, next_action, next_action_due_date, " +
-  "office_phone, office_email, external_badger_id, " +
+  "office_phone, office_email, external_badger_id, archived_at, " +
   "created_at, updated_at";
 
 const VISIT_COLUMNS =
@@ -102,6 +102,12 @@ export async function GET(
         .eq("id", id)
         .eq("environment", "test")
         .eq("salesperson_id", me.id)
+        // Archived offices disappear from every read surface so the
+        // soft-delete on the detail page hides the row from List,
+        // Map, and follow-up detail visits alike. See
+        // offices_archived_at.sql for why archive is preferred over
+        // hard delete (preserves visit history + task FK targets).
+        .is("archived_at", null)
         .maybeSingle(),
       supabase
         .from(OFFICE_VISITS_TABLE)
@@ -281,6 +287,10 @@ export async function PATCH(
       .eq("id", id)
       .eq("environment", "test")
       .eq("salesperson_id", me.id)
+      // PATCH only succeeds against active rows. An archived office
+      // appears as 404 to the caller, same as a wrong-owner or wrong-
+      // env miss — uniform "Office not found." response.
+      .is("archived_at", null)
       .select(OFFICE_COLUMNS)
       .maybeSingle();
 
@@ -308,6 +318,78 @@ export async function PATCH(
 
     return Response.json(
       { office },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
+  } catch (err) {
+    return handleApiError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DELETE — archive (soft delete) an office for the calling AE.
+// ---------------------------------------------------------------------------
+//
+// Archive (set `archived_at = NOW()`), not hard delete. Visit history
+// + ae_tasks back-links stay intact; the office just disappears from
+// the AE's active read surfaces (List, Map, detail, /api/tasks
+// office-name enrichment). See offices_archived_at.sql for the full
+// rationale.
+//
+// Owner-only: the UPDATE predicate pins `salesperson_id = me.id` AND
+// `environment = "test"` AND `archived_at IS NULL`. A miss on any of
+// those collapses to 404 — the response never reveals which case it
+// was (wrong owner, wrong env, missing, or already archived).
+//
+// Idempotent at the UI level: tapping Remove again on a no-longer-
+// listed office would 404 cleanly because the predicate already
+// excludes archived rows.
+//
+// SHAPE
+//   200  { archived_at: string }
+//   400  invalid uuid
+//   401  no session
+//   403  not the test account / juice_box_only / no `is_test` flag
+//   404  office doesn't exist / wrong owner / wrong env / already archived
+//   500  sanitized — raw DB error logged with the `[office-archive]` prefix
+
+export async function DELETE(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const me = await requireTestAccount(req);
+    const { id } = await params;
+
+    const parsed = UuidSchema.safeParse(id);
+    if (!parsed.success) {
+      throw badRequest("Invalid office id.");
+    }
+
+    const supabase = getServerSupabase();
+    const archivedAt = new Date().toISOString();
+
+    const updRes = await supabase
+      .from(OFFICES_TABLE)
+      .update({ archived_at: archivedAt })
+      .eq("id", id)
+      .eq("environment", "test")
+      .eq("salesperson_id", me.id)
+      .is("archived_at", null)
+      .select("id, archived_at")
+      .maybeSingle();
+
+    if (updRes.error) {
+      console.warn(
+        `[office-archive] failed office_id=${id} ae=${me.id} code=${updRes.error.code ?? "?"} msg=${updRes.error.message}`,
+      );
+      throw new ApiError(500, "Could not remove this office.");
+    }
+    if (!updRes.data) {
+      throw notFound("Office not found.");
+    }
+
+    return Response.json(
+      { archived_at: archivedAt },
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch (err) {
