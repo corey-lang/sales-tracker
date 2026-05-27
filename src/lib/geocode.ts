@@ -9,9 +9,9 @@
 
 /**
  * One normalized geocode result the client renders + persists. The
- * server proxy translates the upstream Nominatim shape into this
- * stable, provider-neutral shape so a future switch to a different
- * geocoder (Mapbox, Google) only touches the route, not the UI.
+ * server proxy translates the upstream provider's shape into this
+ * stable, provider-neutral shape so a future swap (Mapbox, Google,
+ * etc.) only touches the route, not the UI.
  *
  * Field guarantees:
  *   * `latitude` / `longitude` are finite numbers.
@@ -19,8 +19,8 @@
  *     style string the user picked.
  *   * `street`, `city`, `state`, `zip` are best-effort splits from the
  *     provider's structured address breakdown. Null when the provider
- *     didn't return that component — Nominatim's coverage outside
- *     dense metros can be patchy, especially for `zip`.
+ *     didn't return that component — coverage outside dense metros
+ *     can be patchy, especially for `zip`.
  */
 export type GeocodeResult = {
   formatted: string;
@@ -42,7 +42,9 @@ export const GEOCODE_MIN_QUERY_LENGTH = 4;
 export const GEOCODE_MAX_RESULTS = 5;
 
 /** Client-side debounce window before firing /api/geocode/search.
- *  500 ms keeps us comfortably under Nominatim's "max 1 req/s" usage
- *  policy even when the user types fast, while still feeling
- *  responsive once they pause. */
+ *  500 ms keeps request volume well under the upstream Geoapify
+ *  free-tier rate limit (5 req/s, 3,000 req/day) even when the
+ *  user types fast, while still feeling responsive once they pause.
+ *  Pairs with the 60 s server + browser cache on identical queries
+ *  to keep daily quota usage low for a small internal team. */
 export const GEOCODE_DEBOUNCE_MS = 500;

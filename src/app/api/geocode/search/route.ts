@@ -14,34 +14,48 @@ import {
 
 // GET /api/geocode/search?q=<query>
 //
-// Server-side proxy in front of OpenStreetMap's Nominatim geocoder.
-// Powers the address autocomplete on the Add Office modal.
+// Server-side proxy in front of Geoapify's Address Autocomplete API.
+// Powers the address autocomplete on the Add Office modal at
+// /offices. The client only knows about this route's URL + the
+// `GeocodeResult` response shape — it doesn't know (or care) which
+// upstream provider answered.
 //
-// WHY A PROXY (and not a direct browser fetch)
-//   * Nominatim's usage policy REQUIRES a custom User-Agent that
-//     identifies the application — browsers don't let JS set that
-//     header. A server fetch can.
-//   * Avoids exposing internal request shape / future provider
-//     swaps to the client.
-//   * Lets us cache + sanitize the response (the upstream JSON
-//     carries a lot of fields we don't need + occasional HTML in
-//     `display_name` we don't want rendered verbatim).
+// WHY GEOAPIFY
+//   * Purpose-built autocomplete ranking. The `/autocomplete`
+//     endpoint ranks for incremental typing, so "Smith Realty
+//     Provo" surfaces office-shaped POIs before street fragments.
+//     Suggestion quality for real-estate office discovery is the
+//     reason this surface exists.
+//   * Dependable free-tier rate limits (3,000 req/day, 5 req/s) —
+//     comfortably above the realistic AE usage for an internal
+//     team, and the client-side debounce + server cache leave
+//     plenty of headroom.
+//   * Structured address payload (`housenumber` / `street` / `city`
+//     / `state` / `postcode`) maps cleanly onto our `GeocodeResult`
+//     without province/town/village fallback chains.
 //
-// PROVIDER CHOICE — OpenStreetMap / Nominatim
-//   * Free, no API key.
-//   * Usage policy: max ~1 req/s, identifying User-Agent, cache
-//     results. We're well under that for an 11-person internal team
-//     when paired with the client's 500 ms debounce + 4-char min
-//     query gate (see src/lib/geocode.ts).
-//   * Falls back gracefully: 502 on upstream failure / parse error
-//     so the UI can show "Couldn't load suggestions." and let the
-//     user fall back to manual address entry.
+// WHY A PROXY (still required)
+//   * Keeps the API key server-side. The browser bundle never sees
+//     `GEOAPIFY_API_KEY` — losing the key wouldn't let an attacker
+//     burn through quota from a leaked NEXT_PUBLIC_ var.
+//   * Lets us cache + normalize + sanitize the upstream response.
+//   * Lets us 502 cleanly if the provider has a hiccup so the
+//     client can fall back to the manual-address path.
 //
 // AUDIENCE
 //   `requireTestAccount` — same gate as the rest of the office
 //   surface. The autocomplete is only reachable from the Add Office
 //   modal (test-account only), so the gate keeps the proxy from
-//   being a generic anonymous service.
+//   being a generic anonymous service abused by other clients.
+//
+// MISSING KEY HANDLING
+//   When `GEOAPIFY_API_KEY` is unset (forgot to set the env in a
+//   deploy, key rotated, etc.) the route returns the same sanitized
+//   502 it returns for any other upstream issue — so the modal's
+//   "Couldn't load suggestions. Try again or enter the address
+//   manually." UX kicks in and the AE can still add the office
+//   without coords. The server-side warning line names the env var
+//   for the admin debugging it.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,81 +64,93 @@ const QuerySchema = z.object({
   q: z.string().trim().min(GEOCODE_MIN_QUERY_LENGTH).max(200),
 });
 
-const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+const GEOAPIFY_AUTOCOMPLETE_URL =
+  "https://api.geoapify.com/v1/geocode/autocomplete";
 
-/** Identifies the app to Nominatim per their usage policy. They block
- *  generic User-Agents (the default ones HTTP libraries set). The
- *  contact URL is intentional even though it's a sample — the policy
- *  wants something a sysadmin could look up. */
-const USER_AGENT =
-  "ElevateSalesTracker/1.0 (https://elevatehs.com; internal office CRM)";
+/** Sanitized "the address lookup didn't work" message — single
+ *  source of truth so every failure branch surfaces the same copy. */
+const UNAVAILABLE_MESSAGE = "Address lookup is temporarily unavailable.";
 
-/** Shape of one Nominatim search result (only the fields we read).
- *  Defined locally so we don't import @types for an external API
- *  with a sprawling response surface. */
-type NominatimItem = {
-  display_name?: unknown;
-  lat?: unknown;
-  lon?: unknown;
-  address?: {
-    house_number?: unknown;
-    road?: unknown;
-    pedestrian?: unknown;
-    cycleway?: unknown;
-    footway?: unknown;
+/** Shape of one feature in the Geoapify GeoJSON response (only the
+ *  fields we read). Defined locally so we don't import @types for
+ *  the provider's full type surface. Every field is `unknown` and
+ *  re-validated at use — the upstream is treated as untrusted. */
+type GeoapifyFeature = {
+  geometry?: {
+    coordinates?: unknown;
+  };
+  properties?: {
+    formatted?: unknown;
+    address_line1?: unknown;
+    lat?: unknown;
+    lon?: unknown;
+    housenumber?: unknown;
+    street?: unknown;
     city?: unknown;
-    town?: unknown;
-    village?: unknown;
-    hamlet?: unknown;
-    suburb?: unknown;
     state?: unknown;
+    state_code?: unknown;
     postcode?: unknown;
   };
 };
 
 /** Reads + trims an `unknown` string field; returns null when the
  *  field is missing, non-string, or empty after trim. Strips any
- *  embedded HTML tags as defense-in-depth — Nominatim shouldn't
- *  return HTML in these fields, but we treat the upstream as
- *  untrusted text. */
+ *  embedded HTML tags as defense-in-depth — Geoapify shouldn't
+ *  return HTML in these fields, but we treat upstream as untrusted. */
 function readString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.replace(/<[^>]*>/g, "").trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** Translates one upstream item into our normalized shape. Returns
- *  null when essential fields are missing/malformed so the caller
- *  can skip it. Address sub-fields fall back through aliases — OSM
- *  cities are sometimes labeled `town` or `village` instead. */
-function normalizeResult(item: NominatimItem): GeocodeResult | null {
-  const lat = Number(item.lat);
-  const lng = Number(item.lon);
+/** Translates one Geoapify feature into our normalized shape.
+ *  Returns null when essential fields are missing or malformed so
+ *  the caller can skip it. */
+function normalizeResult(feature: GeoapifyFeature): GeocodeResult | null {
+  const props = feature.properties ?? {};
+
+  // Prefer `properties.lat/lon` (the provider documents these as
+  // canonical WGS84 decimals). Fall back to GeoJSON
+  // `geometry.coordinates: [lng, lat]` for defensive parity if the
+  // properties ever lose them.
+  let lat = Number(props.lat);
+  let lng = Number(props.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    const coords = feature.geometry?.coordinates;
+    if (Array.isArray(coords) && coords.length >= 2) {
+      const [c0, c1] = coords;
+      if (typeof c0 === "number" && typeof c1 === "number") {
+        // GeoJSON convention: [lng, lat].
+        lng = c0;
+        lat = c1;
+      }
+    }
+  }
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
 
-  const formatted = readString(item.display_name);
+  // `formatted` is the single-line display string the user picks
+  // from the dropdown. Fall back to `address_line1` when the
+  // provider omits the formatted variant (rare).
+  const formatted =
+    readString(props.formatted) ?? readString(props.address_line1);
   if (!formatted) return null;
 
-  const addr = item.address ?? {};
-  const houseNumber = readString(addr.house_number);
-  const road =
-    readString(addr.road) ??
-    readString(addr.pedestrian) ??
-    readString(addr.cycleway) ??
-    readString(addr.footway);
+  const housenumber = readString(props.housenumber);
+  const road = readString(props.street);
+  // Compose "12 Main Street" when both parts are present; otherwise
+  // use whichever half came back. Some Geoapify result types
+  // (street-level matches without a house number) lack the number.
   const street =
-    houseNumber && road ? `${houseNumber} ${road}` : (road ?? null);
+    housenumber && road ? `${housenumber} ${road}` : (road ?? housenumber);
 
-  const city =
-    readString(addr.city) ??
-    readString(addr.town) ??
-    readString(addr.village) ??
-    readString(addr.hamlet) ??
-    readString(addr.suburb);
-
-  const state = readString(addr.state);
-  const zip = readString(addr.postcode);
+  const city = readString(props.city);
+  // Prefer the spelled-out state ("Utah") over the abbreviation
+  // ("UT") since the Office Detail page renders this field
+  // verbatim; the abbreviation falls back when the full name
+  // wasn't returned.
+  const state = readString(props.state) ?? readString(props.state_code);
+  const zip = readString(props.postcode);
 
   return {
     formatted,
@@ -139,10 +165,6 @@ function normalizeResult(item: NominatimItem): GeocodeResult | null {
 
 export async function GET(req: Request) {
   try {
-    // Keep the proxy gated on the same audience that can reach the
-    // Add Office modal — prevents the route from becoming a generic
-    // unauthenticated proxy that could be abused for rate-limit
-    // farming or attribution-fraud.
     await requireTestAccount(req);
 
     const url = new URL(req.url);
@@ -156,40 +178,50 @@ export async function GET(req: Request) {
     }
     const q = parsed.data.q;
 
-    const upstream = new URL(NOMINATIM_URL);
-    upstream.searchParams.set("q", q);
-    upstream.searchParams.set("format", "json");
-    upstream.searchParams.set("addressdetails", "1");
+    const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
+    if (!apiKey) {
+      // The env var name is in the log so an admin can spot the
+      // misconfiguration; the client gets the same sanitized 502
+      // it gets for any other upstream issue, so the modal's
+      // "Couldn't load suggestions… manual entry" UX kicks in
+      // and the AE isn't blocked.
+      console.warn(
+        "[geocode] GEOAPIFY_API_KEY is not set; address autocomplete is disabled until it's configured",
+      );
+      throw new ApiError(502, UNAVAILABLE_MESSAGE);
+    }
+
+    const upstream = new URL(GEOAPIFY_AUTOCOMPLETE_URL);
+    upstream.searchParams.set("text", q);
     upstream.searchParams.set("limit", String(GEOCODE_MAX_RESULTS));
-    // Slight regional bias for the test team's primary market without
-    // hard-restricting (the policy lets us pass country hints). Drop
-    // this when the product goes international.
-    upstream.searchParams.set("countrycodes", "us,ca");
+    upstream.searchParams.set("format", "geojson");
+    // Slight regional bias for the test team's primary market
+    // without hard-restricting. Drop this when the product goes
+    // international.
+    upstream.searchParams.set("filter", "countrycode:us,ca");
+    upstream.searchParams.set("apiKey", apiKey);
 
     let res: Response;
     try {
       res = await fetch(upstream.toString(), {
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept: "application/json",
-        },
-        // Cache identical queries on Next's runtime for 60 s — matches
-        // Nominatim's "cache results" guidance and absorbs the common
-        // case of two people typing the same office.
+        headers: { Accept: "application/json" },
+        // Cache identical queries on Next's runtime for 60 s —
+        // absorbs the common case of two people typing the same
+        // office and protects our daily Geoapify quota.
         next: { revalidate: 60 },
       });
     } catch (err) {
       console.warn(
         `[geocode] upstream fetch failed q_len=${q.length} err=${String(err)}`,
       );
-      throw new ApiError(502, "Address lookup is temporarily unavailable.");
+      throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
     if (!res.ok) {
       console.warn(
         `[geocode] upstream non-200 q_len=${q.length} status=${res.status}`,
       );
-      throw new ApiError(502, "Address lookup is temporarily unavailable.");
+      throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
     let raw: unknown;
@@ -202,14 +234,26 @@ export async function GET(req: Request) {
       throw new ApiError(502, "Address lookup returned an unexpected response.");
     }
 
-    if (!Array.isArray(raw)) {
-      console.warn(`[geocode] upstream returned non-array q_len=${q.length}`);
+    // Geoapify GeoJSON: `{ type: "FeatureCollection", features: [...] }`.
+    // We validate the `features` shape defensively — provider
+    // changes shouldn't crash the route.
+    if (!raw || typeof raw !== "object") {
+      console.warn(
+        `[geocode] upstream returned non-object q_len=${q.length}`,
+      );
+      throw new ApiError(502, "Address lookup returned an unexpected response.");
+    }
+    const features = (raw as { features?: unknown }).features;
+    if (!Array.isArray(features)) {
+      console.warn(
+        `[geocode] upstream missing features q_len=${q.length}`,
+      );
       throw new ApiError(502, "Address lookup returned an unexpected response.");
     }
 
     const results: GeocodeResult[] = [];
-    for (const item of raw.slice(0, GEOCODE_MAX_RESULTS)) {
-      const normalized = normalizeResult(item as NominatimItem);
+    for (const feature of features.slice(0, GEOCODE_MAX_RESULTS)) {
+      const normalized = normalizeResult(feature as GeoapifyFeature);
       if (normalized) results.push(normalized);
     }
 
@@ -217,10 +261,10 @@ export async function GET(req: Request) {
       { results },
       {
         headers: {
-          // Browser-side caching of identical queries. `private` so a
-          // shared cache (e.g. corporate proxy) doesn't pool results
-          // across users; max-age=60 mirrors the Next revalidate
-          // window above.
+          // Browser-side caching of identical queries. `private` so
+          // a shared cache (e.g. corporate proxy) doesn't pool
+          // results across users; `max-age=60` mirrors the Next
+          // revalidate window above.
           "Cache-Control": "private, max-age=60",
         },
       },
