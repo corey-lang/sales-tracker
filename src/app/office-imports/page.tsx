@@ -3,9 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Upload, AlertTriangle, CheckCircle2, ArrowLeft } from "lucide-react";
+import {
+  Upload,
+  AlertTriangle,
+  CheckCircle2,
+  ArrowLeft,
+  XCircle,
+} from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
+import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { useLivePermissions } from "@/lib/use-live-permissions";
@@ -70,10 +77,23 @@ type FieldName =
  * Header aliases for fuzzy CSV column matching. Lowercase, trimmed
  * comparison. Order within an alias list doesn't matter — the first
  * column to match wins. Unknown headers are simply ignored, so a CSV
- * with extra columns ("Notes", "Owner ID") doesn't break the import.
+ * with extra columns ("Notes", "Owner ID", "Place ID") doesn't break
+ * the import.
+ *
+ * The list is biased toward what Badger Maps exports out of the box
+ * ("Location Name", "Address Line 1", "Zip/Postal Code", etc.) plus the
+ * shorter forms an admin might type when prepping a CSV by hand
+ * ("Office Name", "Street", "Zip").
  */
 const HEADER_ALIASES: Record<FieldName, readonly string[]> = {
-  salesperson_id: ["salesperson id", "salesperson_id", "ae id", "ae_id"],
+  salesperson_id: [
+    "salesperson id",
+    "salesperson_id",
+    "ae id",
+    "ae_id",
+    "owner id",
+    "account owner id",
+  ],
   salesperson_first_name: [
     "ae name",
     "ae",
@@ -83,12 +103,48 @@ const HEADER_ALIASES: Record<FieldName, readonly string[]> = {
     "rep name",
     "first name",
     "first_name",
+    // Badger exports the owning user as "Account Owner".
+    "account owner",
+    "owner",
+    "assigned to",
   ],
-  name: ["office name", "office", "name"],
-  street: ["street", "address", "street address"],
-  city: ["city"],
-  state: ["state"],
-  zip: ["zip", "zip code", "zipcode", "postal code"],
+  name: [
+    // Badger's primary location label.
+    "location name",
+    "office name",
+    "office",
+    "name",
+    "account name",
+    "company",
+    "company name",
+  ],
+  street: [
+    "street",
+    "address",
+    "street address",
+    // Badger uses "Address Line 1" / "Address Line 2"; we consume
+    // line 1 as the street and ignore line 2 (rare apartment/suite
+    // detail that the dedupe key would normalize away anyway).
+    "address line 1",
+    "address 1",
+    "address1",
+  ],
+  city: ["city", "town"],
+  state: [
+    "state",
+    "state/province",
+    "state code",
+    "province",
+    "region",
+  ],
+  zip: [
+    "zip",
+    "zip code",
+    "zipcode",
+    "postal code",
+    "zip/postal code",
+    "postcode",
+  ],
   latitude: ["latitude", "lat"],
   longitude: ["longitude", "lng", "lon", "long"],
 };
@@ -104,11 +160,27 @@ const SOURCE_LABEL = "Badger CSV";
 /**
  * Parses CSV text into a header array + body rows. Robust enough for
  * Badger/CRM exports: handles double-quoted fields, escaped `""` inside
- * quoted fields, CRLF, and a leading UTF-8 BOM. Doesn't try to be a
- * full RFC 4180 parser (no multi-line quoted fields with embedded
- * newlines — rare in office CSVs and not worth the complexity).
+ * quoted fields, embedded newlines INSIDE quoted fields (the `\n`
+ * branch is only entered when `inQuotes` is false, so a newline that
+ * appears between an opening `"` and its closing `"` is appended to
+ * the field verbatim), CRLF, and a leading UTF-8 BOM.
+ *
+ * NOT a full RFC 4180 parser: an opening `"` mid-field (e.g.
+ * `foo"bar"`) is treated as a state toggle rather than a literal
+ * quote, but Badger / CRM exports never produce that shape.
+ *
+ * Reports a structural parse error (returned via `error` rather than
+ * thrown) when:
+ *   * An opening `"` is never closed before end-of-file. Without this
+ *     guard the parser would silently swallow the rest of the file
+ *     into one giant quoted field and the user would see "0 rows
+ *     parsed" with no explanation.
  */
-function parseCsv(text: string): { headers: string[]; rows: string[][] } {
+function parseCsv(text: string): {
+  headers: string[];
+  rows: string[][];
+  error: string | null;
+} {
   // Strip UTF-8 BOM if present so the first header doesn't gain a "﻿" prefix.
   const input = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 
@@ -129,6 +201,7 @@ function parseCsv(text: string): { headers: string[]; rows: string[][] } {
         inQuotes = false;
         continue;
       }
+      // Includes `\n` — multi-line quoted fields are preserved here.
       field += ch;
       continue;
     }
@@ -154,6 +227,22 @@ function parseCsv(text: string): { headers: string[]; rows: string[][] } {
     }
     field += ch;
   }
+
+  // Unclosed quote — the file ended while still inside a quoted field.
+  // Surface this loudly so the user knows their CSV is malformed
+  // (typically a missing close quote on a row with commas in it).
+  // Without this guard the parser would silently emit one row with a
+  // giant trailing field and the user would have no idea why the
+  // import shape is wrong.
+  if (inQuotes) {
+    return {
+      headers: [],
+      rows: [],
+      error:
+        "CSV has an unclosed quoted field. Check your file for a missing closing quote.",
+    };
+  }
+
   // Tail field/row if no trailing newline.
   if (field.length > 0 || current.length > 0) {
     current.push(field);
@@ -162,9 +251,11 @@ function parseCsv(text: string): { headers: string[]; rows: string[][] } {
     }
   }
 
-  if (rows.length === 0) return { headers: [], rows: [] };
+  if (rows.length === 0) {
+    return { headers: [], rows: [], error: null };
+  }
   const headers = rows[0].map((h) => h.trim());
-  return { headers, rows: rows.slice(1) };
+  return { headers, rows: rows.slice(1), error: null };
 }
 
 /** Maps each CSV column to its canonical field name, or null if unknown. */
@@ -199,13 +290,73 @@ function rowToObject(
   return obj;
 }
 
-/** Per-row preview validation. Returns null when OK. */
-function rowWarning(row: ParsedRow): string | null {
-  if (!row.name) return "Missing office name";
-  if (!row.salesperson_id && !row.salesperson_first_name) {
-    return "Missing AE name / Salesperson ID";
+/**
+ * Per-row preview classification. Returns a `blocking` reason (the
+ * row will be reported by the server in `skipped[]`) plus a list of
+ * non-blocking `warnings` (the row imports but the user should know
+ * something was off — e.g. invalid lat/lng silently coerced to NULL).
+ *
+ * Blocking conditions:
+ *   * Row has no recognized data at all (every cell was either empty
+ *     OR mapped to an unrecognized column). This catches CSVs whose
+ *     headers don't match any alias and would otherwise be silently
+ *     dropped before reaching the server.
+ *   * Missing office name.
+ *   * Missing AE AND no Default AE picker selection.
+ *
+ * Warning conditions:
+ *   * Latitude cell is present but doesn't parse as a finite number.
+ *   * Longitude cell is present but doesn't parse as a finite number.
+ *     (We intentionally still import the row — see toApiRow — because
+ *     coords can be geocoded later and dropping the whole row over a
+ *     bad cell would lose useful name/address data.)
+ */
+type RowChecks = {
+  blocking: string | null;
+  warnings: string[];
+};
+
+function rowChecks(row: ParsedRow, hasDefaultAe: boolean): RowChecks {
+  const warnings: string[] = [];
+  let blocking: string | null = null;
+
+  // Row has no mapped data at all → CSV headers probably don't match
+  // any alias. Surface explicitly so the user can fix headers BEFORE
+  // submit instead of seeing a confusing "Missing office name" later.
+  const hasAnyMappedField = Object.keys(row).length > 0;
+  if (!hasAnyMappedField) {
+    blocking =
+      "No recognized data — check that the column headers match the accepted names.";
+  } else if (!row.name) {
+    blocking = "Missing office name";
+  } else if (
+    !hasDefaultAe &&
+    !row.salesperson_id &&
+    !row.salesperson_first_name
+  ) {
+    blocking = "Missing AE — pick a Default AE or add an AE column";
   }
-  return null;
+
+  if (
+    row.latitude !== undefined &&
+    row.latitude !== "" &&
+    !Number.isFinite(Number(row.latitude))
+  ) {
+    warnings.push(
+      `Invalid latitude "${row.latitude}" — coordinate will not be saved.`,
+    );
+  }
+  if (
+    row.longitude !== undefined &&
+    row.longitude !== "" &&
+    !Number.isFinite(Number(row.longitude))
+  ) {
+    warnings.push(
+      `Invalid longitude "${row.longitude}" — coordinate will not be saved.`,
+    );
+  }
+
+  return { blocking, warnings };
 }
 
 /** Shape the route accepts. Numbers are pre-coerced from string here. */
@@ -221,6 +372,19 @@ type ApiRow = {
   longitude?: number;
 };
 
+/**
+ * Converts a parsed-from-CSV row into the JSON shape the route accepts.
+ * NEVER drops the row — even if every cell is unmapped or every field
+ * is invalid, the row is sent so the server can report it in
+ * `skipped[]` with a clear reason. This is the invariant the four-
+ * bucket reconciliation depends on:
+ *
+ *   created + updated + skipped.length + errors.length === sent.length
+ *
+ * Invalid lat/lng cells are coerced to NULL on the wire (the row still
+ * imports with its other data). The preview surfaces the issue as a
+ * row-level warning via `rowChecks` so the user is not blindsided.
+ */
 function toApiRow(row: ParsedRow): ApiRow {
   const out: ApiRow = {};
   if (row.salesperson_id) out.salesperson_id = row.salesperson_id;
@@ -232,11 +396,16 @@ function toApiRow(row: ParsedRow): ApiRow {
   if (row.city) out.city = row.city;
   if (row.state) out.state = row.state;
   if (row.zip) out.zip = row.zip;
-  if (row.latitude) {
+  // Coordinates: a literal "0" is falsy but a valid coordinate
+  // (equator / prime meridian), so check for non-empty + finite.
+  // Invalid values are reported as warnings via rowChecks; here they
+  // simply don't make it into the payload (which is what the user was
+  // shown in the preview).
+  if (row.latitude !== undefined && row.latitude !== "") {
     const n = Number(row.latitude);
     if (Number.isFinite(n)) out.latitude = n;
   }
-  if (row.longitude) {
+  if (row.longitude !== undefined && row.longitude !== "") {
     const n = Number(row.longitude);
     if (Number.isFinite(n)) out.longitude = n;
   }
@@ -247,15 +416,30 @@ function toApiRow(row: ParsedRow): ApiRow {
 // Page
 // ---------------------------------------------------------------------------
 
-type ImportSkip = { row: number; reason: string };
+type RowReport = { row: number; reason: string };
 type ImportResult = {
   batch_id: string | null;
   source: string;
   environment: string;
-  inserted: number;
+  /** Rows that didn't exist before this import. */
+  created: number;
+  /** Rows that matched an existing office (same AE + dedupe key) and
+   *  had their address / coords / source updated in place. */
+  updated: number;
   total_rows: number;
-  skipped: ImportSkip[];
+  /** Rows the importer intentionally bypassed — validation failures,
+   *  AE not resolvable, intra-batch duplicates. Caller-fixable. */
+  skipped: RowReport[];
+  /** Rows the database rejected — constraint violation, transient
+   *  connection failure, etc. Usually retryable. */
+  errors: RowReport[];
   warning?: string;
+};
+
+/** Lightweight salesperson summary for the Default-AE picker. */
+type AePerson = {
+  id: string;
+  first_name: string;
 };
 
 export default function OfficeImportsPage() {
@@ -339,25 +523,78 @@ export default function OfficeImportsPage() {
   const [rows, setRows] = useState<ParsedRow[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ---- Default-AE picker -------------------------------------------------
+  // Badger exports the offices owned by the logged-in user — there is
+  // no per-row "AE Name" column. The picker lets the admin select a
+  // single AE to assign EVERY row to, with per-row AE columns (when
+  // they exist) taking precedence on the server side. Empty value =
+  // no default; the import then requires every row to carry its own
+  // AE assignment.
+  const [aePeople, setAePeople] = useState<AePerson[] | null>(null);
+  const [defaultAeId, setDefaultAeId] = useState<string>("");
+  const hasDefaultAe = defaultAeId.length > 0;
+
+  // Pull the AE roster for the picker. The anon key has SELECT on
+  // salespeople by default (no RLS on that table), so we can read it
+  // directly from the browser — matches the pattern in src/app/page.tsx
+  // (the name-picker login screen).
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("salespeople")
+      .select("id, first_name")
+      .order("first_name", { ascending: true })
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          // Picker failure is non-fatal — the user can still import
+          // a CSV that carries its own AE column. Surface the error
+          // inline only if they try to use the picker (the value
+          // stays empty until then).
+          console.warn("[office-imports] AE roster fetch failed", error);
+          setAePeople([]);
+          return;
+        }
+        setAePeople((data ?? []) as AePerson[]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ---- Import state ------------------------------------------------------
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
 
+  /**
+   * Per-row checks memoized once per (rows, hasDefaultAe) change so
+   * the preview table and the stats summary read from the same
+   * underlying classification — no chance of the two views getting
+   * out of sync.
+   */
+  const checks = useMemo(
+    () => rows.map((r) => rowChecks(r, hasDefaultAe)),
+    [rows, hasDefaultAe],
+  );
+
   const stats = useMemo(() => {
     let importable = 0;
-    let warnings = 0;
-    for (const r of rows) {
-      if (rowWarning(r)) warnings++;
+    let willSkip = 0;
+    let withWarnings = 0;
+    for (const c of checks) {
+      if (c.blocking) willSkip++;
       else importable++;
+      if (c.warnings.length > 0) withWarnings++;
     }
     return {
       total: rows.length,
       importable,
-      warnings,
+      willSkip,
+      withWarnings,
       tooMany: rows.length > MAX_ROWS,
     };
-  }, [rows]);
+  }, [rows.length, checks]);
 
   function resetParse() {
     setFileName(null);
@@ -377,7 +614,14 @@ export default function OfficeImportsPage() {
     setFileName(file.name);
     try {
       const text = await file.text();
-      const { headers: h, rows: r } = parseCsv(text);
+      const { headers: h, rows: r, error: parserErr } = parseCsv(text);
+      if (parserErr) {
+        setParseError(parserErr);
+        setHeaders([]);
+        setHeaderMap([]);
+        setRows([]);
+        return;
+      }
       if (h.length === 0) {
         setParseError("CSV appears empty — no header row found.");
         setHeaders([]);
@@ -386,9 +630,16 @@ export default function OfficeImportsPage() {
         return;
       }
       const map = mapHeaders(h);
-      const parsed = r
-        .map((row) => rowToObject(row, map))
-        .filter((row) => Object.keys(row).length > 0);
+      // INVARIANT: every parsed CSV data row makes it into `rows` and
+      // therefore into the import payload. Rows whose cells are all
+      // empty or all-unmapped are NOT silently filtered here — they
+      // would otherwise disappear from the count without explanation.
+      // The preview classifier (rowChecks) flags them with a blocking
+      // reason so the user sees them in the preview, and the server
+      // reports them in `skipped[]` so the reconciliation
+      //   created + updated + skipped + errors === rows.length
+      // holds.
+      const parsed = r.map((row) => rowToObject(row, map));
       setHeaders(h);
       setHeaderMap(map);
       setRows(parsed);
@@ -408,11 +659,21 @@ export default function OfficeImportsPage() {
     try {
       // environment is HARD-CODED to "test" — the server also enforces
       // this for the MVP. Sending it explicitly documents the intent.
-      const payload = {
+      // default_salesperson_id is only sent when the picker has a
+      // value selected, so an "import from a CSV that already has AE
+      // columns" workflow doesn't get a misleading default applied.
+      const payload: {
+        source: string;
+        environment: "test";
+        rows: ApiRow[];
+        default_salesperson_id?: string;
+      } = {
         source: SOURCE_LABEL,
-        environment: "test" as const,
+        environment: "test",
         rows: rows.map(toApiRow),
       };
+      if (defaultAeId) payload.default_salesperson_id = defaultAeId;
+
       const res = await apiFetch("/api/admin/offices/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -498,15 +759,71 @@ export default function OfficeImportsPage() {
       </div>
 
 
+      {/* ---- Default AE picker ----
+          Badger exports the offices that belong to the logged-in user,
+          so its CSVs typically have NO per-row AE column. The picker
+          assigns every row in the batch to one AE; per-row AE columns
+          (when present in the CSV) take precedence on the server. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Default AE</CardTitle>
+          <CardDescription>
+            Used when a CSV row has no AE column. Per-row AE columns
+            (when present) take precedence, so it&apos;s safe to leave
+            this set for mixed CSVs.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <label
+            htmlFor="default-ae"
+            className="block text-xs font-medium uppercase tracking-wide text-muted-foreground"
+          >
+            Assign every row to
+          </label>
+          <select
+            id="default-ae"
+            value={defaultAeId}
+            onChange={(e) => setDefaultAeId(e.target.value)}
+            disabled={aePeople === null || importing}
+            className="w-full max-w-sm rounded-md border border-input bg-background/40 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value="">
+              {aePeople === null
+                ? "Loading AEs…"
+                : "(none — use AE column from CSV)"}
+            </option>
+            {(aePeople ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.first_name}
+              </option>
+            ))}
+          </select>
+          {aePeople !== null && aePeople.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No AEs found. The CSV must include an AE column for every row.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
       {/* ---- Upload card ---- */}
       <Card>
         <CardHeader>
           <CardTitle>Upload CSV</CardTitle>
           <CardDescription>
-            Required columns: <strong>AE Name</strong> (or{" "}
-            <strong>Salesperson ID</strong>) and <strong>Office Name</strong>.
-            Optional: Street, City, State, Zip, Latitude, Longitude. Unknown
-            columns are ignored.
+            Required: <strong>Office Name</strong>{" "}
+            (column also accepted as <em>Location Name</em>,{" "}
+            <em>Office</em>, <em>Account Name</em>, <em>Company</em>).
+            Optional: <em>Address / Street / Address Line 1</em>,{" "}
+            <em>City</em>,{" "}
+            <em>State / State Code / State/Province</em>,{" "}
+            <em>Zip / Zip Code / Zip/Postal Code</em>,{" "}
+            <em>Latitude</em>,{" "}
+            <em>Longitude</em>. AE column accepted as{" "}
+            <em>AE Name / Salesperson / Account Owner</em>,{" "}
+            or <em>Salesperson ID / Owner ID</em>. Unknown columns are
+            ignored. Re-importing the same office updates it in place;
+            existing notes/next-actions are preserved.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -566,11 +883,19 @@ export default function OfficeImportsPage() {
               <span className="font-medium text-foreground">
                 {stats.importable} importable
               </span>
-              {stats.warnings > 0 && (
+              {stats.willSkip > 0 && (
                 <>
                   {" · "}
                   <span className="font-medium text-amber-600 dark:text-amber-400">
-                    {stats.warnings} with warnings
+                    {stats.willSkip} will be skipped
+                  </span>
+                </>
+              )}
+              {stats.withWarnings > 0 && (
+                <>
+                  {" · "}
+                  <span className="font-medium text-amber-600 dark:text-amber-400">
+                    {stats.withWarnings} with warnings
                   </span>
                 </>
               )}
@@ -624,7 +949,10 @@ export default function OfficeImportsPage() {
                 </thead>
                 <tbody>
                   {rows.slice(0, PREVIEW_LIMIT).map((r, i) => {
-                    const warning = rowWarning(r);
+                    const c = checks[i] ?? {
+                      blocking: null,
+                      warnings: [],
+                    };
                     const address = [r.street, r.city, r.state, r.zip]
                       .filter(Boolean)
                       .join(", ");
@@ -652,23 +980,41 @@ export default function OfficeImportsPage() {
                           )}
                         </td>
                         <td className="px-2 py-1.5">
-                          {warning ? (
-                            <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                              <AlertTriangle
-                                aria-hidden="true"
-                                className="size-3"
-                              />
-                              {warning}
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-green-600 dark:text-green-400">
-                              <CheckCircle2
-                                aria-hidden="true"
-                                className="size-3"
-                              />
-                              OK
-                            </span>
-                          )}
+                          {/* Blocking takes the lead chip; warnings
+                              stack underneath so the user sees both
+                              reasons on rows that fail multiple checks.
+                              "OK" only appears when both are clear. */}
+                          <div className="flex flex-col gap-0.5">
+                            {c.blocking ? (
+                              <span className="inline-flex items-start gap-1 text-amber-600 dark:text-amber-400">
+                                <AlertTriangle
+                                  aria-hidden="true"
+                                  className="mt-0.5 size-3 shrink-0"
+                                />
+                                <span>Will be skipped: {c.blocking}</span>
+                              </span>
+                            ) : c.warnings.length === 0 ? (
+                              <span className="inline-flex items-center gap-1 text-green-600 dark:text-green-400">
+                                <CheckCircle2
+                                  aria-hidden="true"
+                                  className="size-3"
+                                />
+                                OK
+                              </span>
+                            ) : null}
+                            {c.warnings.map((w, wi) => (
+                              <span
+                                key={wi}
+                                className="inline-flex items-start gap-1 text-amber-600 dark:text-amber-400"
+                              >
+                                <AlertTriangle
+                                  aria-hidden="true"
+                                  className="mt-0.5 size-3 shrink-0"
+                                />
+                                <span>{w}</span>
+                              </span>
+                            ))}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -680,9 +1026,10 @@ export default function OfficeImportsPage() {
             {stats.total > PREVIEW_LIMIT && (
               <p className="text-xs text-muted-foreground">
                 … and {stats.total - PREVIEW_LIMIT} more row
-                {stats.total - PREVIEW_LIMIT === 1 ? "" : "s"} not shown in
-                preview. All rows will be sent to the server — the server
-                returns full per-row results in the import summary.
+                {stats.total - PREVIEW_LIMIT === 1 ? "" : "s"} not shown
+                in preview. Every parsed row is sent to the server and
+                accounted for in the result summary — nothing is
+                silently dropped on the client.
               </p>
             )}
 
@@ -730,11 +1077,7 @@ export default function OfficeImportsPage() {
               <CardDescription>
                 Batch <code className="font-mono">{result.batch_id ?? "—"}</code>
                 {" · "}
-                <span className="font-medium text-foreground">
-                  {result.inserted} inserted
-                </span>
-                {" · "}
-                {result.skipped.length} skipped of {result.total_rows} total
+                {result.total_rows} row{result.total_rows === 1 ? "" : "s"} in CSV
               </CardDescription>
             )}
           </CardHeader>
@@ -755,45 +1098,168 @@ export default function OfficeImportsPage() {
                 {result.warning}
               </p>
             )}
-            {result && result.skipped.length > 0 && (
-              <div>
-                <p className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
-                  Skipped rows
-                </p>
-                <div className="max-h-64 overflow-y-auto rounded-md border border-border">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-muted/40">
-                      <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                        <th className="px-2 py-1.5 font-semibold">Row</th>
-                        <th className="px-2 py-1.5 font-semibold">Reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.skipped.map((s, i) => (
-                        <tr
-                          key={i}
-                          className="border-t border-border/60 last:border-b"
-                        >
-                          <td className="px-2 py-1.5 tabular-nums text-muted-foreground">
-                            {s.row}
-                          </td>
-                          <td className="px-2 py-1.5">{s.reason}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            {result && (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <SummaryStat
+                  label="Created"
+                  value={result.created}
+                  tone="success"
+                />
+                <SummaryStat
+                  label="Updated"
+                  value={result.updated}
+                  tone="info"
+                />
+                <SummaryStat
+                  label="Skipped"
+                  value={result.skipped.length}
+                  tone="warning"
+                />
+                <SummaryStat
+                  label="Errors"
+                  value={result.errors.length}
+                  tone={result.errors.length > 0 ? "destructive" : "muted"}
+                />
               </div>
             )}
-            {result && result.skipped.length === 0 && result.inserted > 0 && (
-              <p className="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
-                <CheckCircle2 aria-hidden="true" className="size-4" />
-                All rows imported cleanly.
-              </p>
+            {/*
+              Reconciliation guard. The four-bucket invariant is
+              `created + updated + skipped + errors === total_rows`.
+              If those don't add up, surface it loudly so a silent
+              accounting gap can't ever go unnoticed — the import is
+              still authoritative for the rows it touched, but the
+              admin needs to know a row went unreported.
+            */}
+            {result &&
+              result.created +
+                result.updated +
+                result.skipped.length +
+                result.errors.length !==
+                result.total_rows && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                >
+                  Row accounting mismatch: server reported{" "}
+                  {result.created +
+                    result.updated +
+                    result.skipped.length +
+                    result.errors.length}{" "}
+                  of {result.total_rows} sent rows. This shouldn&apos;t
+                  happen — please report it.
+                </p>
+              )}
+            {result && result.errors.length > 0 && (
+              <ResultRowsTable
+                title="Errors (database rejected these rows)"
+                tone="destructive"
+                rows={result.errors}
+              />
             )}
+            {result && result.skipped.length > 0 && (
+              <ResultRowsTable
+                title="Skipped (caller-fixable)"
+                tone="warning"
+                rows={result.skipped}
+              />
+            )}
+            {result &&
+              result.skipped.length === 0 &&
+              result.errors.length === 0 &&
+              result.created + result.updated > 0 && (
+                <p className="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
+                  <CheckCircle2 aria-hidden="true" className="size-4" />
+                  All rows imported cleanly.
+                </p>
+              )}
           </CardContent>
         </Card>
       )}
     </main>
+  );
+}
+
+/**
+ * One number-pill in the four-bucket summary header. Tone drives the
+ * background/border color so the four pills read at a glance as
+ * created (green) / updated (blue) / skipped (amber) / errors
+ * (red — unless zero, in which case neutral).
+ */
+function SummaryStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "success" | "info" | "warning" | "destructive" | "muted";
+}) {
+  const toneClass =
+    tone === "success"
+      ? "border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300"
+      : tone === "info"
+        ? "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+        : tone === "warning"
+          ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+          : tone === "destructive"
+            ? "border-destructive/40 bg-destructive/10 text-destructive"
+            : "border-border bg-muted/30 text-muted-foreground";
+  return (
+    <div className={`rounded-md border px-3 py-2 ${toneClass}`}>
+      <p className="text-[11px] font-medium uppercase tracking-wide opacity-80">
+        {label}
+      </p>
+      <p className="text-xl font-bold tabular-nums">{value}</p>
+    </div>
+  );
+}
+
+/** Shared per-row reasons table for the Skipped / Errors lists. */
+function ResultRowsTable({
+  title,
+  tone,
+  rows,
+}: {
+  title: string;
+  tone: "warning" | "destructive";
+  rows: RowReport[];
+}) {
+  const Icon = tone === "destructive" ? XCircle : AlertTriangle;
+  const headingClass =
+    tone === "destructive"
+      ? "text-destructive"
+      : "text-amber-600 dark:text-amber-400";
+  return (
+    <div>
+      <p
+        className={`mb-1 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${headingClass}`}
+      >
+        <Icon aria-hidden="true" className="size-3.5" />
+        {title} ({rows.length})
+      </p>
+      <div className="max-h-64 overflow-y-auto rounded-md border border-border">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-muted/40">
+            <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-2 py-1.5 font-semibold">Row</th>
+              <th className="px-2 py-1.5 font-semibold">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s, i) => (
+              <tr
+                key={i}
+                className="border-t border-border/60 last:border-b"
+              >
+                <td className="px-2 py-1.5 tabular-nums text-muted-foreground">
+                  {s.row}
+                </td>
+                <td className="px-2 py-1.5">{s.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

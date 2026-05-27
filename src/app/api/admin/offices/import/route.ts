@@ -19,11 +19,29 @@ import {
 //
 // Admin-only office bulk-import endpoint. Accepts JSON rows derived
 // from a CSV (the client does the CSV → JSON conversion so the server
-// stays dependency-light). Each row is validated, the AE resolved by
-// id or first_name, the office insert attempted under the chosen
-// environment. Duplicate rows (same AE + env + normalized
-// name+street+zip) are skipped via the partial UNIQUE index from
-// supabase/offices.sql and reported back in the summary.
+// stays dependency-light). Per row the route:
+//   1. Validates required fields (office name).
+//   2. Resolves the AE — either from the row's own salesperson_id /
+//      salesperson_first_name fields, OR from the batch-level
+//      `default_salesperson_id` / `default_salesperson_first_name`
+//      (so Badger CSVs that don't carry per-row AE columns import).
+//   3. UPSERTs the office on (salesperson_id, environment, dedupe_key)
+//      — duplicates UPDATE in place rather than skipping, so a re-
+//      import propagates address corrections, lat/lng fills, etc.
+//      Persistent user memory (`office_notes`, `next_action`) is
+//      intentionally NOT in the upsert payload so it survives re-imports.
+//
+// SUMMARY SHAPE
+//   The route returns four buckets so the UI can show separate counts:
+//     created   — rows that didn't exist before (INSERT path)
+//     updated   — rows that matched an existing dedupe key (UPDATE path)
+//     skipped[] — rows the IMPORTER intentionally bypassed (validation
+//                 fail, AE not found) — caller decision required to fix
+//     errors[]  — rows the DATABASE rejected (constraint violation,
+//                 connection blip) — system problem, generally transient
+//   Created vs updated is inferred from the returned `created_at` ===
+//   `updated_at` (true on freshly-inserted rows; the BEFORE UPDATE
+//   trigger bumps updated_at on every UPDATE so they diverge there).
 //
 // SANDBOX GUARD
 //   This first iteration is sandbox-only. Only `environment === "test"`
@@ -68,29 +86,21 @@ const OPTIONAL_NUMBER = z
   .optional()
   .nullable();
 
-const RawRowSchema = z
-  .object({
-    /** Either salesperson_id OR salesperson_first_name must be present. */
-    salesperson_id: z.uuid().optional(),
-    salesperson_first_name: z.string().trim().min(1).max(64).optional(),
-    name: NON_EMPTY(200),
-    street: OPTIONAL_STRING(200),
-    city: OPTIONAL_STRING(100),
-    state: OPTIONAL_STRING(64),
-    zip: OPTIONAL_STRING(20),
-    latitude: OPTIONAL_NUMBER,
-    longitude: OPTIONAL_NUMBER,
-  })
-  .refine(
-    (row) =>
-      typeof row.salesperson_id === "string" ||
-      typeof row.salesperson_first_name === "string",
-    {
-      message:
-        "Either salesperson_id or salesperson_first_name is required.",
-      path: ["salesperson_id"],
-    },
-  );
+const RawRowSchema = z.object({
+  /** Per-row AE assignment. Either column may be missing for a row;
+   *  the route falls back to the batch-level `default_salesperson_*`
+   *  if neither is present. The "no AE resolved anywhere" case is
+   *  reported as a skip, not a validation error. */
+  salesperson_id: z.uuid().optional(),
+  salesperson_first_name: z.string().trim().min(1).max(64).optional(),
+  name: NON_EMPTY(200),
+  street: OPTIONAL_STRING(200),
+  city: OPTIONAL_STRING(100),
+  state: OPTIONAL_STRING(64),
+  zip: OPTIONAL_STRING(20),
+  latitude: OPTIONAL_NUMBER,
+  longitude: OPTIONAL_NUMBER,
+});
 
 type ParsedRow = z.infer<typeof RawRowSchema>;
 
@@ -103,6 +113,20 @@ const RequestSchema = z.object({
    * Default keeps casual callers in the sandbox without thinking about it.
    */
   environment: z.enum(["test", "production"]).default("test"),
+  /**
+   * Batch-level AE fallback. When a CSV row carries no per-row AE
+   * (the common Badger case — Badger exports MY offices), the
+   * resolver uses these. At most one should be set per request; both
+   * being null/undefined means every row must carry its own AE columns
+   * (the old behavior).
+   */
+  default_salesperson_id: z.uuid().optional(),
+  default_salesperson_first_name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .optional(),
   rows: z.array(z.unknown()).min(1).max(5_000),
 });
 
@@ -116,9 +140,23 @@ type Skipped = {
   reason: string;
 };
 
+type RowError = {
+  row: number;
+  reason: string;
+};
+
+/**
+ * Chunk size for the batched upsert call. Keeps each Supabase round-
+ * trip well under the 6 MB row payload limit on PostgREST and the
+ * 30–60 s Vercel function budget — even a 5,000-row import is ten
+ * round-trips, not five thousand.
+ */
+const UPSERT_CHUNK_SIZE = 500;
+
 /** Salesperson lookup result — mapped to id. Null = not found. */
 type SalespersonResolver = {
   byId: Map<string, string>;
+  /** Keyed by lowercased first_name; CITEXT unique → one row per name. */
   byFirstName: Map<string, string>;
 };
 
@@ -126,19 +164,25 @@ type SalespersonResolver = {
  * Batch-resolves the AE for every row in one round-trip per identifier
  * type. We always resolve by id when supplied (cheapest, unambiguous);
  * otherwise we resolve by first_name (CITEXT, case-insensitive unique).
+ * The batch-level defaults are folded into the lookup set so the
+ * single default also resolves through the same path.
  */
 async function resolveSalespeople(
   supabase: ReturnType<typeof getServerSupabase>,
   rows: ParsedRow[],
+  defaults: {
+    id?: string | null;
+    firstName?: string | null;
+  },
 ): Promise<SalespersonResolver> {
   const wantedIds = new Set<string>();
   const wantedNames = new Set<string>();
   for (const r of rows) {
     if (r.salesperson_id) wantedIds.add(r.salesperson_id);
-    else if (r.salesperson_first_name) {
-      wantedNames.add(r.salesperson_first_name);
-    }
+    if (r.salesperson_first_name) wantedNames.add(r.salesperson_first_name);
   }
+  if (defaults.id) wantedIds.add(defaults.id);
+  if (defaults.firstName) wantedNames.add(defaults.firstName);
 
   const byId = new Map<string, string>();
   const byFirstName = new Map<string, string>();
@@ -207,10 +251,13 @@ async function resolveSalespeople(
   return { byId, byFirstName };
 }
 
-/** Returns the resolved salesperson_id for a row, or null if not found. */
+/** Returns the resolved salesperson_id for a row, or null if not found.
+ *  Falls back to the batch-level defaults when the row carries neither
+ *  its own salesperson_id nor salesperson_first_name. */
 function resolveRowSalesperson(
   row: ParsedRow,
   resolver: SalespersonResolver,
+  defaults: { id?: string | null; firstName?: string | null },
 ): string | null {
   if (row.salesperson_id) {
     return resolver.byId.get(row.salesperson_id) ?? null;
@@ -220,6 +267,11 @@ function resolveRowSalesperson(
       resolver.byFirstName.get(row.salesperson_first_name.toLowerCase()) ??
       null
     );
+  }
+  // Per-row AE missing → fall back to the batch-level default.
+  if (defaults.id) return resolver.byId.get(defaults.id) ?? null;
+  if (defaults.firstName) {
+    return resolver.byFirstName.get(defaults.firstName.toLowerCase()) ?? null;
   }
   return null;
 }
@@ -252,6 +304,7 @@ export async function POST(req: Request) {
     // detail in the API response.
     const parsed: Array<{ idx: number; row: ParsedRow }> = [];
     const skipped: Skipped[] = [];
+    const errors: RowError[] = [];
     for (let i = 0; i < body.rows.length; i++) {
       const r = RawRowSchema.safeParse(body.rows[i]);
       if (!r.success) {
@@ -285,9 +338,11 @@ export async function POST(req: Request) {
           batch_id: null,
           source: body.source,
           environment,
-          inserted: 0,
+          created: 0,
+          updated: 0,
           total_rows: body.rows.length,
           skipped,
+          errors,
         },
         { status: 200 },
       );
@@ -295,11 +350,36 @@ export async function POST(req: Request) {
 
     const supabase = getServerSupabase();
 
-    // Resolve every AE referenced by the payload in one shot.
+    const defaults = {
+      id: body.default_salesperson_id ?? null,
+      firstName: body.default_salesperson_first_name ?? null,
+    };
+
+    // Resolve every AE referenced by the payload + the batch-level
+    // default in one shot.
     const resolver = await resolveSalespeople(
       supabase,
       parsed.map((p) => p.row),
+      defaults,
     );
+
+    // Pre-flight: if a default AE was specified, fail the whole batch
+    // when it doesn't resolve — every row that relied on the default
+    // would individually skip with the same message, which is noisy
+    // and misleading (the problem is the user's input, not the rows).
+    if (defaults.id && !resolver.byId.get(defaults.id)) {
+      throw badRequest(
+        `Default salesperson id ${defaults.id} not found. Pick a different default AE.`,
+      );
+    }
+    if (
+      defaults.firstName &&
+      !resolver.byFirstName.get(defaults.firstName.toLowerCase())
+    ) {
+      throw badRequest(
+        `Default salesperson "${defaults.firstName}" not found. Pick a different default AE.`,
+      );
+    }
 
     // Create the batch FIRST so each office row can carry its
     // import_batch_id. row_count is updated at the end.
@@ -328,15 +408,43 @@ export async function POST(req: Request) {
     }
     const batchId = (batchRes.data as { id: string }).id;
 
-    let inserted = 0;
+    // Build the upsert payloads. AE resolution happens here; rows
+    // with no resolvable AE become skips (not errors).
+    //
+    // INTRA-BATCH DEDUPE
+    //   Postgres `ON CONFLICT DO UPDATE` is undefined when two rows in
+    //   the same statement target the same conflict tuple. We pre-
+    //   dedupe in JS by (salesperson_id, dedupe_key), keeping the LAST
+    //   occurrence — matches the "last write wins" mental model.
+    //   Earlier duplicates are reported as skips with a clear reason.
+    type UpsertPayload = {
+      salesperson_id: string;
+      import_batch_id: string;
+      name: string;
+      street: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+      latitude: number | null;
+      longitude: number | null;
+      source: string;
+      dedupe_key: string;
+      environment: OfficeEnvironment;
+    };
+    const byKey = new Map<
+      string,
+      { idx: number; payload: UpsertPayload }
+    >();
     for (const { idx, row } of parsed) {
-      const salespersonId = resolveRowSalesperson(row, resolver);
+      const salespersonId = resolveRowSalesperson(row, resolver, defaults);
       if (!salespersonId) {
         skipped.push({
           row: idx,
           reason: row.salesperson_id
             ? `Salesperson id ${row.salesperson_id} not found.`
-            : `Salesperson "${row.salesperson_first_name}" not found.`,
+            : row.salesperson_first_name
+              ? `Salesperson "${row.salesperson_first_name}" not found.`
+              : "Missing AE for this row (no per-row AE column and no default AE selected).",
         });
         continue;
       }
@@ -347,71 +455,128 @@ export async function POST(req: Request) {
         zip: row.zip,
       });
 
-      const insertRes = await supabase
-        .from(OFFICES_TABLE)
-        .insert({
-          salesperson_id: salespersonId,
-          import_batch_id: batchId,
-          name: row.name,
-          street: row.street,
-          city: row.city,
-          state: row.state,
-          zip: row.zip,
-          latitude: row.latitude ?? null,
-          longitude: row.longitude ?? null,
-          source: body.source,
-          dedupe_key: dedupeKey,
-          environment,
-        })
-        .select("id")
-        .single();
+      const key = `${salespersonId}|${dedupeKey}`;
+      const payload: UpsertPayload = {
+        salesperson_id: salespersonId,
+        import_batch_id: batchId,
+        name: row.name,
+        street: row.street,
+        city: row.city,
+        state: row.state,
+        zip: row.zip,
+        // Coordinates are nullable. `?? null` keeps an explicit 0 from
+        // getting dropped to null — equator/prime-meridian points are
+        // legitimate values.
+        latitude: row.latitude ?? null,
+        longitude: row.longitude ?? null,
+        source: body.source,
+        dedupe_key: dedupeKey,
+        environment,
+      };
 
-      if (insertRes.error) {
-        // 23505 = unique_violation on the per-(AE, env, dedupe_key)
-        // index. Reported as a skip, not an error — the caller wanted
-        // to import this row but it's already in the table.
-        if (insertRes.error.code === "23505") {
-          skipped.push({
-            row: idx,
-            reason: "Duplicate office for this AE/environment.",
+      const existing = byKey.get(key);
+      if (existing) {
+        // Earlier duplicate within this same batch — report the
+        // earlier row as a skip and keep the later one. The CSV
+        // probably has two near-identical rows for the same office.
+        skipped.push({
+          row: existing.idx,
+          reason: `Duplicate of row ${idx} in this CSV — kept the later one.`,
+        });
+      }
+      byKey.set(key, { idx, payload });
+    }
+
+    // Run the upsert in chunks. Each call returns the rows it touched
+    // with created_at + updated_at so we can split into created vs
+    // updated buckets.
+    //
+    // Crucially the payload omits office_notes and next_action — the
+    // user-edited "office memory" columns — so a re-import never wipes
+    // them. Postgres `DO UPDATE SET col = EXCLUDED.col` only updates
+    // the columns named in the INSERT, so columns absent from the
+    // payload retain their existing values on the matched row.
+    const queued = Array.from(byKey.values());
+    let created = 0;
+    let updated = 0;
+
+    for (let i = 0; i < queued.length; i += UPSERT_CHUNK_SIZE) {
+      const chunk = queued.slice(i, i + UPSERT_CHUNK_SIZE);
+      const upsertRes = await supabase
+        .from(OFFICES_TABLE)
+        .upsert(
+          chunk.map((q) => q.payload),
+          {
+            onConflict: "salesperson_id,environment,dedupe_key",
+          },
+        )
+        .select("id, created_at, updated_at");
+
+      if (upsertRes.error) {
+        // The whole chunk failed — report every row in it as a
+        // database error (not a skip; the importer's input was
+        // structurally valid, the DB rejected the write). Continue
+        // with the next chunk so a transient blip doesn't kill an
+        // otherwise-good import. Raw error logged server-side.
+        console.warn(
+          `[offices-import] upsert chunk failed batch=${batchId} chunk_start=${i} chunk_size=${chunk.length} code=${upsertRes.error.code ?? "?"} msg=${upsertRes.error.message}`,
+        );
+        for (const q of chunk) {
+          errors.push({
+            row: q.idx,
+            reason: "Database insert failed for this row.",
+          });
+        }
+        continue;
+      }
+
+      const rows = (upsertRes.data ?? []) as Array<{
+        id: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+      // PostgREST returns upserted rows in input order. If a chunk
+      // came back shorter than expected (rare — should only happen
+      // on partial constraint failures we can't see), report the
+      // tail as errors.
+      for (let j = 0; j < chunk.length; j++) {
+        const result = rows[j];
+        if (!result) {
+          errors.push({
+            row: chunk[j].idx,
+            reason: "Database did not confirm this row was written.",
           });
           continue;
         }
-        // Surface a generic admin-safe reason; log the raw DB error
-        // server-side with batch + row context so a real failure
-        // (constraint mismatch, downed pool, etc.) is debuggable from
-        // Vercel function logs without leaking internals to the
-        // import response.
-        console.warn(
-          `[offices-import] insert failed batch=${batchId} row=${idx} code=${insertRes.error.code ?? "?"} msg=${insertRes.error.message}`,
-        );
-        skipped.push({
-          row: idx,
-          reason: "Database insert failed for this row.",
-        });
-        continue;
+        // Trigger bumps updated_at on UPDATE; on INSERT the column
+        // defaults set both columns to the same NOW() instant.
+        if (result.created_at === result.updated_at) {
+          created++;
+        } else {
+          updated++;
+        }
       }
-      inserted++;
     }
 
-    // Update the batch's row_count to the final inserted count so the
-    // provenance row reflects reality. Skipped rows are NOT counted.
-    // If the update itself fails, the inserted office rows are still
-    // intact — only the audit count is stale. We surface that as a
-    // soft `warning` field on the response (and log raw error
-    // server-side) instead of letting provenance silently drift.
+    // Update the batch's row_count to the final created+updated count
+    // so the provenance row reflects what we actually touched. Skipped
+    // rows and database errors are NOT counted. If the update itself
+    // fails the rows are still intact — only the audit count is stale.
+    // Surface that as a soft `warning` field on the response (and log
+    // raw error server-side) instead of letting provenance silently drift.
     let provenanceWarning: string | null = null;
-    if (inserted > 0) {
+    const touched = created + updated;
+    if (touched > 0) {
       const updRes = await supabase
         .from(OFFICE_IMPORT_BATCHES_TABLE)
-        .update({ row_count: inserted })
+        .update({ row_count: touched })
         .eq("id", batchId);
       if (updRes.error) {
         console.warn(
-          `[offices-import] batch row_count update failed batch=${batchId} count=${inserted} msg=${updRes.error.message}`,
+          `[offices-import] batch row_count update failed batch=${batchId} count=${touched} msg=${updRes.error.message}`,
         );
         provenanceWarning =
-          "Offices were inserted, but the batch row_count audit field could not be updated. " +
+          "Offices were saved, but the batch row_count audit field could not be updated. " +
           "Re-derive the true count from offices.import_batch_id if needed.";
       }
     }
@@ -421,9 +586,11 @@ export async function POST(req: Request) {
         batch_id: batchId,
         source: body.source,
         environment,
-        inserted,
+        created,
+        updated,
         total_rows: body.rows.length,
         skipped,
+        errors,
         ...(provenanceWarning ? { warning: provenanceWarning } : {}),
       },
       { status: 201 },
