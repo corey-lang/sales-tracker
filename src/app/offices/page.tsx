@@ -79,14 +79,17 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 
 // Leaflet touches `window` at module load — load the map component
 // lazily AND with SSR disabled. The placeholder height matches the
-// real map's `h-[70vh] min-h-[420px]` so the layout doesn't jump
-// when the chunk arrives.
+// real map wrapper's `h-[calc(100dvh-23rem)] min-h-[300px]` so the
+// layout doesn't jump when the chunk arrives. The dvh-based height
+// keeps the map above the translucent BottomNav so map tiles never
+// bleed through the nav's backdrop — see nearby-offices-map.tsx
+// for the math.
 const NearbyOfficesMap = dynamic(
   () => import("@/components/nearby-offices-map"),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[70vh] min-h-[420px] items-center justify-center rounded-lg border border-border bg-muted/20">
+      <div className="flex h-[calc(100dvh-23rem)] min-h-[300px] items-center justify-center rounded-lg border border-border bg-muted/20">
         <p className="text-sm text-muted-foreground">Loading map…</p>
       </div>
     ),
@@ -166,6 +169,34 @@ function formatCityState(item: OfficeListItem | NearbyOfficeItem): string {
   const cityState = [item.city, item.state].filter(Boolean).join(", ");
   const parts = [cityState, item.zip].filter((s) => s && s.length > 0);
   return parts.join(" ");
+}
+
+/**
+ * Plain-language status line for a successful location fix.
+ *
+ * Replaces the prior "(Got fix Today 2:38pm)" technical-sounding
+ * sub-line with the spec's preferred copy:
+ *   * < 60 s old → "Using your location. Updated just now."
+ *   * older      → "Using your location from 2:38 PM."
+ *
+ * Uses `toLocaleTimeString` with `hour: "numeric", minute: "2-digit"`
+ * to produce the user's locale-appropriate 12-hour clock on most
+ * devices ("2:38 PM" in en-US) while still rendering correctly for
+ * 24-hour locales.
+ *
+ * Note: the message is computed at render time and doesn't auto-tick
+ * — a fix that was "just now" 5 minutes ago will still read that way
+ * until the next state change. Accepted MVP behavior: the user can
+ * tap "Refresh Location" to get a fresh fix + fresh copy.
+ */
+function formatLocationStatus(takenAt: number): string {
+  const ageMs = Date.now() - takenAt;
+  if (ageMs < 60_000) return "Using your location. Updated just now.";
+  const time = new Date(takenAt).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `Using your location from ${time}.`;
 }
 
 /** YYYY-MM-DD → "Jun 5, 2026" — local-TZ safe. */
@@ -831,10 +862,7 @@ function LocationBanner({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
       <span className="text-muted-foreground">
-        Using your current location.{" "}
-        <span className="text-foreground/70">
-          (Got fix {formatActivityStamp(new Date(location.takenAt).toISOString())})
-        </span>
+        {formatLocationStatus(location.takenAt)}
       </span>
       <Button type="button" size="sm" variant="outline" onClick={onRequest}>
         <Locate aria-hidden="true" className="size-3.5" />

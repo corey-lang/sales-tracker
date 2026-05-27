@@ -253,20 +253,35 @@ export default function NearbyOfficesMap({
 
   return (
     <div
-      // Leaflet requires its container to have a definite, non-zero
-      // height at the moment `L.map()` runs. Earlier this used
-      // `flex-1 min-h-[60vh]` which relied on the parent flex
-      // column resolving height correctly — on iOS Safari that
-      // sometimes settled AFTER Leaflet had already measured 0,
-      // contributing to "blank dark rectangle" reports.
+      // Map sizing has two competing constraints:
+      //   1. Leaflet needs a definite, non-zero height at `L.map()`
+      //      init time (the prior `flex-1` design fell back to 0
+      //      on iOS Safari before flex resolved, producing "blank
+      //      dark rectangle" reports).
+      //   2. The bottom nav floats above the page with a
+      //      semi-transparent (`bg-background/85`) backdrop. If the
+      //      map extends into the nav's vertical zone, map tiles
+      //      bleed through the translucency and the nav looks
+      //      covered. The fix is to keep the map's bottom edge
+      //      ABOVE the nav at scroll=0 so the nav only ever floats
+      //      over the page's bottom padding (BOTTOM_NAV_SPACER) or
+      //      empty body background — never over tiles.
       //
-      // The deterministic `h-[70vh] min-h-[420px]` removes the
-      // flex dependency entirely: the wrapper is always 70 % of
-      // the viewport (or at least 420 px on very short viewports —
-      // covers iPhone SE in landscape, fold devices, etc.).
+      // The `calc(100dvh - 23rem)` ceiling subtracts roughly the
+      // above-map controls (~16rem on mobile, less on desktop) +
+      // the bottom nav (~5rem) + a small buffer (~2rem). `dvh` (not
+      // `vh`) tracks the iOS Safari visual viewport as the toolbar
+      // shows/hides — without it the map would peek behind the nav
+      // when the toolbar collapses.
+      //
+      // Min height `300px` is the floor for tiny viewports (fold
+      // devices, iPhone SE landscape). On those a small amount of
+      // overlap is unavoidable; the dynamic ceiling keeps it minimal
+      // everywhere else.
+      //
       // `MapResizer` below also calls `invalidateSize()` post-mount
       // so any residual mid-init layout change is corrected.
-      className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-lg border border-border"
+      className="relative h-[calc(100dvh-23rem)] min-h-[300px] w-full overflow-hidden rounded-lg border border-border"
     >
       <MapContainer
         center={[center.lat, center.lng]}
