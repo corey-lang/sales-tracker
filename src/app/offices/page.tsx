@@ -7,7 +7,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   ChevronRight,
-  Locate,
   MapPin,
   Search,
   X,
@@ -223,16 +222,18 @@ export default function OfficesListPage() {
             Sandbox office list — visible only to the test account.
           </p>
         </div>
-        {/* "Nearby" entry point — opens the geolocation-driven
-            /offices/nearby surface. Lives in the header so it's
-            visible without scrolling and doesn't compete with the
-            search input for the primary thumb position. */}
+        {/* Nearby Offices entry point — opens the geolocation-driven
+            /offices/nearby surface (Map + List). The "📍 Open
+            Nearby Map" label is shared verbatim with the home-page
+            discoverability card so the affordance reads the same
+            wherever an AE encounters it. Lives in the header so
+            it's visible without scrolling and doesn't compete with
+            the search input for the primary thumb position. */}
         <Link
           href="/offices/nearby"
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
-          <Locate aria-hidden="true" className="size-4" />
-          Nearby
+          📍 Open Nearby Map
         </Link>
       </div>
 

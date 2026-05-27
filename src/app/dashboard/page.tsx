@@ -176,6 +176,33 @@ export default function DashboardPage() {
 
         <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
 
+        {/* Nearby Offices entry point — sits directly under the weekly
+            momentum hero so it's the first action the AE sees once
+            they've scanned their numbers for the day. Gated on
+            `is_test === true` because the /offices + /offices/nearby
+            surfaces are themselves test-account-only today; showing
+            the card to non-test AEs would result in a tap → redirect
+            dead-end. Once the office surface graduates to all AEs,
+            the gate can drop. */}
+        {salesperson.is_test === true && (
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle>📍 Nearby Offices</CardTitle>
+              <CardDescription>
+                Find offices around you, get directions, and log visits.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Link
+                href="/offices/nearby"
+                className={buttonVariants({ size: "sm" })}
+              >
+                Open Nearby Map
+              </Link>
+            </CardContent>
+          </Card>
+        )}
+
         <MessagesCard salespersonId={salesperson.id} />
 
         <Card id="log-activity" size="sm" className="scroll-mt-4">
