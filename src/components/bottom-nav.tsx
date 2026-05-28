@@ -28,8 +28,9 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 //   reachable from the Home header (a small "More" icon links to /more).
 //
 // Spacing: this component is `position: fixed`, so consuming pages add
-// `pb-24` (or similar) to their main wrapper. We expose `BOTTOM_NAV_SPACER`
-// as the canonical class to use, but plain `pb-24` is fine too.
+// `BOTTOM_NAV_SPACER` (a `pb-…` class) to their main wrapper so the last
+// piece of scrollable content can scroll fully above the nav instead of
+// being clipped by the translucent backdrop.
 
 type NavItem = {
   href: string;
@@ -62,9 +63,21 @@ const SCAN_BIZ_CARD: NavItem = {
   icon: ScanLine,
 };
 
-/** Bottom padding any page using BottomNav should apply to its main wrapper. */
+/**
+ * Bottom padding any page using BottomNav should apply to its main wrapper.
+ *
+ * Sized for the nav's actual rendered height (~69px = py-3 + size-6 icon
+ * + gap-1 + 12px label + 1px border) plus ~43px of breathing room so the
+ * last visible card doesn't sit flush against the nav's translucent edge.
+ * `env(safe-area-inset-bottom)` mirrors the inset the nav itself adds, so
+ * iPhone home-indicator devices get the same visual clearance as desktop.
+ *
+ * Was 5rem; bumped to 7rem because the previous ~11px clearance made long
+ * pages (Scorecard, Activity Reports, etc.) look like content was being
+ * clipped by the nav.
+ */
 export const BOTTOM_NAV_SPACER =
-  "pb-[calc(5rem+env(safe-area-inset-bottom))]";
+  "pb-[calc(7rem+env(safe-area-inset-bottom))]";
 
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   if (!salesperson) return [HOME_AE];
