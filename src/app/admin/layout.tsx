@@ -28,6 +28,7 @@ const ADMIN_NAV = [
   { href: "/admin/coaching", label: "Weekly Focus" },
   { href: "/admin/business-cards", label: "Business Cards" },
   { href: "/admin/leaderboard", label: "Leaderboard" },
+  { href: "/admin/scorecard", label: "Scorecard" },
   { href: "/admin/reports/activity", label: "Activity Reports" },
   { href: "/office-imports", label: "Office Imports" },
 ];
