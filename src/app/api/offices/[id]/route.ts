@@ -11,6 +11,7 @@ import {
   requireTestAccount,
 } from "@/lib/server/auth";
 import {
+  buildOfficeDedupeKey,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   OFFICE_VISITS_DETAIL_LIMIT,
@@ -161,14 +162,39 @@ export async function GET(
 // PATCH
 // ---------------------------------------------------------------------------
 
-// office_notes, next_action, and next_action_due_date are all
-// independently optional. A PATCH request must include AT LEAST one
-// of them — sending an empty body is a 400 (no-op writes are
-// pointless and obscure real bugs). Strings are trimmed;
-// empty/whitespace-only payloads clear the column (stored as NULL).
-// Caps mirror the import route's persistent-text caps.
+// PATCH accepts three classes of fields, all independently optional
+// — sending an empty body is a 400 so a no-op write doesn't fire
+// the updated_at trigger.
+//
+//   1. "Office memory" (existing): office_notes, next_action,
+//      next_action_due_date. AE-authored persistent state.
+//   2. "Office identity" (added for Edit Office): name, street,
+//      city, state, zip, latitude, longitude. The shape an AE
+//      reaches for when they want to fix a Badger import typo or
+//      record that an office has relocated.
+//   3. "Contact" (added for Edit Office): office_phone,
+//      office_email. Factual contact info.
+//
+// Strings are trimmed; empty/whitespace-only payloads on nullable
+// fields clear the column (stored as NULL). Caps mirror the
+// import route's persistent-text caps.
+//
+// DEDUPE KEY RECOMPUTATION
+//   When name OR street OR zip is in the body, the route fetches
+//   the existing row first, merges supplied + existing values, and
+//   recomputes `dedupe_key` so the unique index stays consistent
+//   with the new identity. A collision (another active office of
+//   the same AE already has this name + address) surfaces as a
+//   friendly 409 — same UX as POST /api/offices.
 const OFFICE_NOTES_MAX = 4000;
 const NEXT_ACTION_MAX = 500;
+const NAME_MAX = 200;
+const STREET_MAX = 500;
+const CITY_MAX = 100;
+const STATE_MAX = 64;
+const ZIP_MAX = 20;
+const OFFICE_PHONE_MAX = 64;
+const OFFICE_EMAIL_MAX = 254;
 
 // Helper: trim a possibly-null/undefined string to text-or-null.
 // Returns `undefined` when the field wasn't supplied (so we can skip
@@ -201,18 +227,44 @@ const dueDateSchema = z
 
 const PatchSchema = z
   .object({
+    // Office memory (existing).
     office_notes: z.string().max(OFFICE_NOTES_MAX).nullable().optional(),
     next_action: z.string().max(NEXT_ACTION_MAX).nullable().optional(),
     next_action_due_date: dueDateSchema.nullable().optional(),
+    // Office identity. Name + street are NOT NULL on the table, so
+    // when they're in the body they must be present-and-non-empty
+    // after trim; an explicit `null` would be a 400.
+    name: z.string().trim().min(1).max(NAME_MAX).optional(),
+    street: z.string().trim().min(1).max(STREET_MAX).optional(),
+    city: z.string().trim().max(CITY_MAX).nullable().optional(),
+    state: z.string().trim().max(STATE_MAX).nullable().optional(),
+    zip: z.string().trim().max(ZIP_MAX).nullable().optional(),
+    latitude: z.number().gte(-90).lte(90).nullable().optional(),
+    longitude: z.number().gte(-180).lte(180).nullable().optional(),
+    // Contact.
+    office_phone: z.string().trim().max(OFFICE_PHONE_MAX).nullable().optional(),
+    office_email: z.string().trim().max(OFFICE_EMAIL_MAX).nullable().optional(),
   })
   .refine(
     (body) =>
+      // At least one settable field must be present. The refine fires
+      // when the caller sends `{}` or only sends fields that are
+      // somehow all `undefined` — defensive in case Zod's optional
+      // handling drifts.
       body.office_notes !== undefined ||
       body.next_action !== undefined ||
-      body.next_action_due_date !== undefined,
+      body.next_action_due_date !== undefined ||
+      body.name !== undefined ||
+      body.street !== undefined ||
+      body.city !== undefined ||
+      body.state !== undefined ||
+      body.zip !== undefined ||
+      body.latitude !== undefined ||
+      body.longitude !== undefined ||
+      body.office_phone !== undefined ||
+      body.office_email !== undefined,
     {
-      message:
-        "Provide office_notes, next_action, and/or next_action_due_date.",
+      message: "Provide at least one field to update.",
       path: ["office_notes"],
     },
   );
@@ -239,7 +291,19 @@ export async function PATCH(
       office_notes?: string | null;
       next_action?: string | null;
       next_action_due_date?: string | null;
+      name?: string;
+      street?: string;
+      city?: string | null;
+      state?: string | null;
+      zip?: string | null;
+      latitude?: number | null;
+      longitude?: number | null;
+      office_phone?: string | null;
+      office_email?: string | null;
+      dedupe_key?: string;
     } = {};
+
+    // --- Office memory (existing) ---
     const notes = normalizePatchField(
       body.office_notes,
       OFFICE_NOTES_MAX,
@@ -252,27 +316,93 @@ export async function PATCH(
     );
     if (notes !== undefined) update.office_notes = notes;
     if (nextAction !== undefined) update.next_action = nextAction;
-    // `next_action_due_date` is a YYYY-MM-DD string or null — Zod has
-    // already validated the shape. We pass it straight through so the
-    // route stays uniform with the other PATCH fields.
     if (body.next_action_due_date !== undefined) {
       update.next_action_due_date = body.next_action_due_date;
     }
 
-    // Defense in depth: if all three ended up undefined (shouldn't
-    // happen given the Zod refine above) bail rather than issuing a
-    // no-op UPDATE that fires the updated_at trigger.
-    if (
-      update.office_notes === undefined &&
-      update.next_action === undefined &&
-      update.next_action_due_date === undefined
-    ) {
-      throw badRequest(
-        "Provide office_notes, next_action, and/or next_action_due_date.",
-      );
+    // --- Office identity (Edit Office flow) ---
+    // Name + street are NOT NULL on the table; Zod already enforced
+    // min(1) after trim, so a present value is guaranteed safe to
+    // write. Pass straight through.
+    if (body.name !== undefined) update.name = body.name;
+    if (body.street !== undefined) update.street = body.street;
+    // city / state / zip use the existing PATCH text helper — trims,
+    // converts empty to null, enforces max length.
+    const city = normalizePatchField(body.city, CITY_MAX, "city");
+    const state = normalizePatchField(body.state, STATE_MAX, "state");
+    const zip = normalizePatchField(body.zip, ZIP_MAX, "zip");
+    if (city !== undefined) update.city = city;
+    if (state !== undefined) update.state = state;
+    if (zip !== undefined) update.zip = zip;
+    if (body.latitude !== undefined) update.latitude = body.latitude;
+    if (body.longitude !== undefined) update.longitude = body.longitude;
+
+    // --- Contact ---
+    const phone = normalizePatchField(
+      body.office_phone,
+      OFFICE_PHONE_MAX,
+      "office_phone",
+    );
+    const email = normalizePatchField(
+      body.office_email,
+      OFFICE_EMAIL_MAX,
+      "office_email",
+    );
+    if (phone !== undefined) update.office_phone = phone;
+    if (email !== undefined) update.office_email = email;
+
+    // Defense in depth: bail rather than firing a no-op UPDATE that
+    // would still bump updated_at.
+    if (Object.keys(update).length === 0) {
+      throw badRequest("Provide at least one field to update.");
     }
 
     const supabase = getServerSupabase();
+
+    // Dedupe-key recomputation. The partial UNIQUE index on
+    // (salesperson_id, environment, dedupe_key) keys off
+    // normalize(name) + normalize(street) + normalize(zip) (see
+    // buildOfficeDedupeKey + offices.sql). When any of those three
+    // is touched by this PATCH we have to fetch the existing values,
+    // merge with the supplied changes, recompute the key, and write
+    // it alongside the rest of the update. Otherwise the index
+    // would point at the OLD identity and a future re-import (or
+    // another edit) couldn't find/dedupe it.
+    const dedupeAffectingChange =
+      update.name !== undefined ||
+      update.street !== undefined ||
+      update.zip !== undefined;
+
+    if (dedupeAffectingChange) {
+      const existingRes = await supabase
+        .from(OFFICES_TABLE)
+        .select("name, street, zip")
+        .eq("id", id)
+        .eq("environment", "test")
+        .eq("salesperson_id", me.id)
+        .is("archived_at", null)
+        .maybeSingle();
+      if (existingRes.error) {
+        console.warn(
+          `[office-detail] dedupe lookup failed office_id=${id} ae=${me.id} code=${existingRes.error.code ?? "?"} msg=${existingRes.error.message}`,
+        );
+        throw new ApiError(500, "Could not update this office.");
+      }
+      if (!existingRes.data) {
+        throw notFound("Office not found.");
+      }
+      const merged = {
+        name: update.name ?? existingRes.data.name,
+        street: update.street ?? existingRes.data.street,
+        zip:
+          update.zip !== undefined ? update.zip : existingRes.data.zip,
+      };
+      update.dedupe_key = buildOfficeDedupeKey({
+        name: merged.name,
+        street: merged.street,
+        zip: merged.zip,
+      });
+    }
 
     // The UPDATE filters by id + environment + ownership, mirroring the
     // GET. A row count of 0 means the office doesn't exist, is in the
@@ -295,6 +425,20 @@ export async function PATCH(
       .maybeSingle();
 
     if (updRes.error) {
+      // 23505 = duplicate against `uq_offices_dedupe_per_env`. Edit
+      // Office can hit this when the AE edits this office's name +
+      // address to match another active office they already own.
+      // Translate to a friendly 409 (same UX as POST /api/offices'
+      // dedupe collision).
+      if (updRes.error.code === "23505") {
+        return Response.json(
+          {
+            error:
+              "Another office in your list already has this name and address.",
+          },
+          { status: 409 },
+        );
+      }
       console.warn(
         `[office-detail] patch failed office_id=${id} ae=${me.id} code=${updRes.error.code ?? "?"} msg=${updRes.error.message}`,
       );

@@ -31,6 +31,11 @@ import {
 } from "@/components/ui/card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
+import {
+  OfficeFormModal,
+  type OfficeFormPayload,
+  type OfficeFormSubmitResult,
+} from "@/components/office-form-modal";
 
 // ---------------------------------------------------------------------------
 // Office Detail — Phase 1A test-only surface.
@@ -244,6 +249,132 @@ export default function OfficeDetailPage({
       }
     };
   }, []);
+
+  // ---- Edit Office modal state ------------------------------------------
+  // Opens the shared OfficeFormModal in `mode="edit"`, pre-populated
+  // from the loaded `detail.office`. On successful PATCH the modal
+  // closes and the page applies the returned (canonical) office row
+  // in place — no full reload, no flash of stale data.
+  //
+  // EDIT-vs-ADD payload differences are encoded in handleEditSubmit:
+  //   * Only fields that actually changed are sent (PATCH semantics).
+  //   * A new geocoded `picked` ships city / state / zip / lat / lng
+  //     from the result; a manual-only address text edit ships only
+  //     `street` so the prior coords stay attached.
+  //   * Office notes + next action are NOT sent from this modal in
+  //     edit mode — the detail page has dedicated preview/edit cards
+  //     for those, and the modal's `mode === "edit"` branch hides
+  //     them entirely.
+  const [editOpen, setEditOpen] = useState(false);
+
+  const handleEditSubmit = useCallback(
+    async (data: OfficeFormPayload): Promise<OfficeFormSubmitResult> => {
+      type EditPayload = {
+        name?: string;
+        street?: string;
+        // city / state / zip are `string | null` (not just `string`)
+        // because the geocode-pick branch below sends `null`
+        // explicitly when Geoapify didn't return that component.
+        // Without the null slot, the old values would silently
+        // remain in the DB when the new address only partially
+        // resolves.
+        city?: string | null;
+        state?: string | null;
+        zip?: string | null;
+        latitude?: number;
+        longitude?: number;
+        office_phone?: string | null;
+        office_email?: string | null;
+      };
+      const initial = {
+        name: detail?.office.name ?? "",
+        phone: detail?.office.office_phone ?? "",
+        email: detail?.office.office_email ?? "",
+      };
+      const body: EditPayload = {};
+
+      // Name: send only when it changed.
+      if (data.name !== initial.name) body.name = data.name;
+
+      // Address text: send `street` only when the user actually
+      // edited the text. A picked-then-not-edited case (the address
+      // text matches a freshly-picked suggestion) still counts as
+      // changed if the formatted text differs from initial.
+      if (data.addressTextChanged) body.street = data.address;
+
+      // Geocode pick: ship the structured address columns + coords.
+      // The `picked` flag is the source of truth — manual edits
+      // after a pick cleared it inside the modal.
+      //
+      // CITY / STATE / ZIP REPLACEMENT
+      //   When the user picks a new geocoded address, every
+      //   structured component is part of THAT location — including
+      //   the ones the provider didn't return. Sending `null` for
+      //   missing components (instead of omitting them) means the
+      //   PATCH replaces the old city/state/zip with the new
+      //   address's actual components, even when the new address
+      //   has none. Omitting them would leave the previous
+      //   address's city/state/zip on the row, producing a
+      //   Frankenstein record that mixes two locations.
+      //
+      //   `latitude` / `longitude` are always finite numbers on a
+      //   valid pick (the server normalizes invalid coords away
+      //   before the result ever reaches the client), so no
+      //   `?? null` fallback is needed there.
+      if (data.picked) {
+        body.city = data.picked.city ?? null;
+        body.state = data.picked.state ?? null;
+        body.zip = data.picked.zip ?? null;
+        body.latitude = data.picked.latitude;
+        body.longitude = data.picked.longitude;
+      }
+
+      // Phone / email: send when changed. Empty after trim sends an
+      // explicit null so the server clears the column.
+      if (data.phone !== initial.phone) {
+        body.office_phone = data.phone.length > 0 ? data.phone : null;
+      }
+      if (data.email !== initial.email) {
+        body.office_email = data.email.length > 0 ? data.email : null;
+      }
+
+      if (Object.keys(body).length === 0) {
+        // No-op edit — close cleanly rather than firing a PATCH that
+        // would 400 ("Provide at least one field to update.").
+        return { ok: true };
+      }
+
+      try {
+        const res = await apiFetch(`/api/offices/${officeId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = (await res.json().catch(() => null)) as
+          | { office?: OfficeRow; error?: string }
+          | null;
+        if (!res.ok || !json?.office) {
+          return {
+            ok: false,
+            error: json?.error ?? `Could not save changes (${res.status}).`,
+          };
+        }
+        // Apply the canonical row in place. Visit history, last
+        // visit, and visit count are preserved (PATCH doesn't touch
+        // them) so spreading is safe.
+        setDetail((current) =>
+          current ? { ...current, office: json.office! } : current,
+        );
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while saving these changes.",
+        };
+      }
+    },
+    [detail, officeId],
+  );
 
   // ---- Archive (soft delete) state --------------------------------------
   // DELETE /api/offices/[id] sets archived_at on the office. The
@@ -1226,37 +1357,76 @@ export default function OfficeDetailPage({
         </CardContent>
       </Card>
 
-      {/* Remove office — destructive action lives at the very bottom
-          of the page so it's reachable but never the first thing the
-          AE sees. Soft-delete (archive) preserves visit history and
-          any ae_tasks back-links; see offices_archived_at.sql. The
-          confirm() guard catches accidental taps; the server-side
-          predicate enforces ownership independently. */}
-      <div className="mt-2 flex flex-col items-start gap-1">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={handleArchiveOffice}
-          disabled={archiving}
-          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-        >
-          <Trash2 aria-hidden="true" className="size-3.5" />
-          {archiving ? "Removing…" : "Remove this office"}
-        </Button>
+      {/* Edit + Archive — bottom-of-page actions. Edit Office is a
+          non-destructive outline button paired with the destructive
+          Remove button so the two long-lived office-management
+          actions live side-by-side at the bottom of the detail
+          page. Edit opens the shared OfficeFormModal in `edit`
+          mode pre-populated from the loaded office; on success the
+          modal closes and the page updates in place. Archive is
+          unchanged from the prior pass — confirm() guard, server-
+          side ownership predicate, redirect-to-/offices on success.
+          Visit history + notes + next action + To-Do back-links
+          are preserved across both actions (PATCH never touches
+          memory columns; archive sets `archived_at` instead of
+          hard-deleting). */}
+      <div className="mt-2 flex flex-col items-start gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setEditOpen(true)}
+            disabled={archiving}
+          >
+            <Pencil aria-hidden="true" className="size-3.5" />
+            Edit office
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleArchiveOffice}
+            disabled={archiving}
+            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Trash2 aria-hidden="true" className="size-3.5" />
+            {archiving ? "Removing…" : "Remove this office"}
+          </Button>
+        </div>
         {archiveError && (
           <p role="alert" className="text-xs text-destructive">
             {archiveError}
           </p>
         )}
         <p className="text-[11px] text-muted-foreground/80">
-          Removes this office from your list. Visit history is
-          preserved.
+          Edit updates name, address, phone, or email. Remove takes
+          this office off your list while preserving visit history.
         </p>
       </div>
 
       </main>
       <BottomNav salesperson={salesperson} />
+      {editOpen && (
+        <OfficeFormModal
+          mode="edit"
+          initialValues={{
+            name: office.name,
+            address: office.street ?? "",
+            phone: office.office_phone ?? "",
+            email: office.office_email ?? "",
+            // Notes + next action are read-only from the modal's
+            // perspective in edit mode — the modal hides those
+            // fields when mode === "edit" because the detail page
+            // owns dedicated preview/edit cards for them. Passing
+            // them here just satisfies the prop shape.
+            notes: office.office_notes ?? "",
+            nextAction: office.next_action ?? "",
+          }}
+          onSubmit={handleEditSubmit}
+          onClose={() => setEditOpen(false)}
+        />
+      )}
     </>
   );
 }

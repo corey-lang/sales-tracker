@@ -7,10 +7,8 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
-  CheckCircle2,
   ChevronRight,
   List as ListIcon,
-  Loader2,
   Locate,
   Map as MapIcon,
   MapPin,
@@ -33,16 +31,16 @@ import {
   type OfficeListItem,
   type OfficeRow,
 } from "@/lib/offices";
-import {
-  GEOCODE_DEBOUNCE_MS,
-  GEOCODE_MIN_QUERY_LENGTH,
-  type GeocodeResult,
-} from "@/lib/geocode";
-
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
+import {
+  EMPTY_OFFICE_FORM_VALUES,
+  OfficeFormModal,
+  type OfficeFormPayload,
+  type OfficeFormSubmitResult,
+} from "@/components/office-form-modal";
 
 // ---------------------------------------------------------------------------
 // /offices — consolidated Map + List office surface.
@@ -259,35 +257,84 @@ export default function OfficesPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("map");
 
   // ---- Add Office modal state ---------------------------------------------
-  // Opens the modal sheet from the header "Add Office" button. The
-  // modal owns its own form state; the page only tracks open/close
-  // and provides the "fresh office created" callback that refetches
-  // the List view (so the new row shows up immediately even if the
-  // user is currently on Map).
+  // Opens the shared OfficeFormModal (mode="add") from the header
+  // "Add Office" button. The page collects state, posts, and on
+  // success bumps a `listRefreshKey` so the List view's data effect
+  // re-runs — the new row appears the next time the user lands on
+  // /offices via the Back navigation from the detail page.
   const [addOfficeOpen, setAddOfficeOpen] = useState(false);
   const [listRefreshKey, setListRefreshKey] = useState(0);
-  const handleOfficeCreated = useCallback((office: OfficeRow) => {
-    // Bump the refresh key so the List view's data effect re-runs
-    // (it's keyed on this value). The user navigates away to the
-    // detail page below, so this refetch is for the next time they
-    // return — when they back out, the catalog already has the new
-    // row visible without an extra load.
-    setListRefreshKey((n) => n + 1);
-    // Pre-select List as the active view for the eventual return to
-    // /offices. Map view is the default; landing back on Map after
-    // adding a coords-less office would hide it, which is confusing.
-    // Switching to List ahead of the navigation means a Back tap
-    // lands the AE on the surface where their new office actually
-    // appears.
-    setViewMode("list");
-    setAddOfficeOpen(false);
-    // Product decision: navigate straight to the new office's detail
-    // page so the AE can immediately log a visit, set a next action,
-    // or edit notes. The modal copy tells the user this is what
-    // happens AND that the new office is also already in their
-    // List, so the redirect feels intentional rather than surprising.
-    router.push(`/offices/${office.id}`);
-  }, [router]);
+
+  /** Submit handler the OfficeFormModal calls in add mode. POSTs
+   *  /api/offices with the form payload, handles dedupe 409s, and
+   *  on success navigates to the new office detail page. Returns
+   *  `{ ok: true }` so the modal closes; `{ ok: false, error }`
+   *  keeps it open with the error shown inline. */
+  const handleAddSubmit = useCallback(
+    async (data: OfficeFormPayload): Promise<OfficeFormSubmitResult> => {
+      type AddPayload = {
+        name: string;
+        street: string;
+        city?: string;
+        state?: string;
+        zip?: string;
+        latitude?: number;
+        longitude?: number;
+        office_phone?: string;
+        office_email?: string;
+        office_notes?: string;
+        next_action?: string;
+      };
+      const body: AddPayload = {
+        name: data.name,
+        street: data.address,
+      };
+      if (data.picked) {
+        if (data.picked.city) body.city = data.picked.city;
+        if (data.picked.state) body.state = data.picked.state;
+        if (data.picked.zip) body.zip = data.picked.zip;
+        body.latitude = data.picked.latitude;
+        body.longitude = data.picked.longitude;
+      }
+      if (data.phone) body.office_phone = data.phone;
+      if (data.email) body.office_email = data.email;
+      if (data.notes) body.office_notes = data.notes;
+      if (data.nextAction) body.next_action = data.nextAction;
+
+      try {
+        const res = await apiFetch("/api/offices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = (await res.json().catch(() => null)) as
+          | { office?: OfficeRow; error?: string }
+          | null;
+        if (!res.ok || !json?.office) {
+          return {
+            ok: false,
+            error: json?.error ?? `Could not add office (${res.status}).`,
+          };
+        }
+        // Bump the refresh key so the next List paint includes the
+        // new row. Pre-select List for the eventual Back-tap from
+        // the detail page — Map would hide a coords-less office.
+        setListRefreshKey((n) => n + 1);
+        setViewMode("list");
+        // Product decision: navigate straight to the new office's
+        // detail page so the AE can immediately log a visit or set
+        // a next action. The modal copy primes the user for this.
+        router.push(`/offices/${json.office.id}`);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while adding this office.",
+        };
+      }
+    },
+    [router],
+  );
 
   // ===========================================================================
   // MAP VIEW state
@@ -687,8 +734,10 @@ export default function OfficesPage() {
       </main>
       <BottomNav salesperson={salesperson} />
       {addOfficeOpen && (
-        <AddOfficeModal
-          onCreated={handleOfficeCreated}
+        <OfficeFormModal
+          mode="add"
+          initialValues={EMPTY_OFFICE_FORM_VALUES}
+          onSubmit={handleAddSubmit}
           onClose={() => setAddOfficeOpen(false)}
         />
       )}
@@ -1115,548 +1164,3 @@ function ListViewSection({
   );
 }
 
-// ---------------------------------------------------------------------------
-// AddOfficeModal — manual-add form
-// ---------------------------------------------------------------------------
-//
-// Mobile-first bottom sheet (centers on sm+) for the AE Add Office
-// flow. Required: name + address. Optional: phone, email, notes,
-// next action. No geocoding — the office appears in List
-// immediately but is excluded from the Map until coordinates exist;
-// the modal calls that out so the AE isn't surprised.
-//
-// Backdrop click or the X closes the modal (matching the juice-box
-// modal pattern). Escape also closes. The form is intentionally
-// straightforward — title + textarea / inputs + Save / Cancel; no
-// multi-step wizard, no client-side geocoding, no contact CRM.
-// ---------------------------------------------------------------------------
-function AddOfficeModal({
-  onCreated,
-  onClose,
-}: {
-  onCreated: (office: OfficeRow) => void;
-  onClose: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [address, setAddress] = useState("");
-  // Populated when the AE picks a geocoded suggestion from the
-  // address autocomplete. Cleared on any manual edit to the address
-  // field — typed text no longer matches the picked location, so
-  // shipping its coords would be wrong.
-  const [picked, setPicked] = useState<GeocodeResult | null>(null);
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [notes, setNotes] = useState("");
-  const [nextAction, setNextAction] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const nameRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    // Microtask defer so iOS reliably opens the keyboard on first
-    // paint (mirrors the juice-box ReplyModal pattern).
-    const id = window.setTimeout(() => nameRef.current?.focus(), 30);
-    return () => window.clearTimeout(id);
-  }, []);
-
-  useEffect(() => {
-    const handle = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !saving) onClose();
-    };
-    document.addEventListener("keydown", handle);
-    return () => document.removeEventListener("keydown", handle);
-  }, [saving, onClose]);
-
-  const trimmedName = name.trim();
-  const trimmedAddress = address.trim();
-  const canSubmit =
-    trimmedName.length > 0 && trimmedAddress.length > 0 && !saving;
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canSubmit) return;
-    setSaving(true);
-    setError(null);
-    try {
-      // Build the request body. Required fields go through their
-      // trimmed values. Optional text fields are only added when
-      // the user filled them in (empty strings would normalize to
-      // NULL server-side but explicitly omitting reads cleaner in
-      // network logs).
-      //
-      // When a geocoded suggestion was picked, the structured
-      // address components + lat/lng come from the result. The
-      // user's address text is still authoritative for `street`
-      // (it's what they SAW + chose to save). City/state/zip and
-      // coords come from the upstream geocode for the rest of the
-      // structured columns — those are the parts that make the
-      // office map-eligible immediately.
-      type CreatePayload = {
-        name: string;
-        street: string;
-        city?: string;
-        state?: string;
-        zip?: string;
-        latitude?: number;
-        longitude?: number;
-        office_phone?: string;
-        office_email?: string;
-        office_notes?: string;
-        next_action?: string;
-      };
-      const body: CreatePayload = {
-        name: trimmedName,
-        street: trimmedAddress,
-      };
-      if (picked) {
-        if (picked.city) body.city = picked.city;
-        if (picked.state) body.state = picked.state;
-        if (picked.zip) body.zip = picked.zip;
-        body.latitude = picked.latitude;
-        body.longitude = picked.longitude;
-      }
-      if (phone.trim()) body.office_phone = phone.trim();
-      if (email.trim()) body.office_email = email.trim();
-      if (notes.trim()) body.office_notes = notes.trim();
-      if (nextAction.trim()) body.next_action = nextAction.trim();
-
-      const res = await apiFetch("/api/offices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { office?: OfficeRow; error?: string }
-        | null;
-      if (!res.ok || !data?.office) {
-        // 409 is the dedupe-collision shape; show the server's
-        // friendly text directly. Other failures fall back to the
-        // sanitized generic message.
-        setError(data?.error ?? `Could not add office (${res.status}).`);
-        return;
-      }
-      onCreated(data.office);
-    } catch {
-      setError("Network error while adding this office.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="add-office-title"
-      // z-50 sits above the bottom nav (z-40); matches the juice-box
-      // modal pattern. viewport-fit=cover puts content above the
-      // notch on standalone iPhones via the safe-area envelopes.
-      className="fixed inset-0 z-50 flex items-end justify-center p-3 sm:items-center"
-      style={{
-        paddingTop: "calc(0.75rem + env(safe-area-inset-top))",
-        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
-      }}
-    >
-      <button
-        type="button"
-        aria-label="Cancel"
-        onClick={() => {
-          if (!saving) onClose();
-        }}
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm focus:outline-none"
-      />
-      <Card
-        size="sm"
-        className="relative w-full max-w-md overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150"
-      >
-        <CardContent className="space-y-3 px-4 py-3">
-          <header className="flex items-start justify-between gap-2">
-            <h2
-              id="add-office-title"
-              className="text-base font-semibold"
-            >
-              Add Office
-            </h2>
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={saving}
-              aria-label="Close"
-              className="-mr-1 -mt-0.5 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50"
-            >
-              <X aria-hidden="true" className="size-4" />
-            </button>
-          </header>
-          <p className="text-xs text-muted-foreground">
-            Required: name + address. Start typing an address to pick
-            a real location — that captures the coordinates so the
-            office appears on the Map right away. Manual entry is fine
-            too; manual addresses may not appear on the Map until
-            coordinates are added. After saving, you&apos;ll open the
-            new office detail page; the office will also appear in
-            your List right away.
-          </p>
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <div className="space-y-1">
-              <label
-                htmlFor="add-office-name"
-                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-              >
-                Name <span className="text-destructive">*</span>
-              </label>
-              <Input
-                id="add-office-name"
-                ref={nameRef}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Smith & Co Realty"
-                disabled={saving}
-                maxLength={200}
-                required
-              />
-            </div>
-            <div className="space-y-1">
-              <label
-                htmlFor="add-office-address"
-                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-              >
-                Address <span className="text-destructive">*</span>
-              </label>
-              <AddressAutocomplete
-                value={address}
-                onChange={(v) => {
-                  setAddress(v);
-                  // Manual edits invalidate any previously locked
-                  // geocode pick — the typed text no longer matches
-                  // the original lat/lng, so we drop the coords.
-                  // The AE can either re-pick from the suggestions
-                  // or proceed with a coords-less manual address.
-                  if (picked) setPicked(null);
-                }}
-                onPick={(result) => {
-                  setAddress(result.formatted);
-                  setPicked(result);
-                }}
-                disabled={saving}
-                inputId="add-office-address"
-                placeholder="e.g. 12 Main St, Orem, UT 84057"
-              />
-              {picked && (
-                <p className="inline-flex items-center gap-1 text-[11px] text-green-600 dark:text-green-400">
-                  <CheckCircle2 aria-hidden="true" className="size-3" />
-                  Coordinates captured — this office will show on the
-                  Map right away.
-                </p>
-              )}
-              {!picked && address.trim().length > 0 && (
-                <p className="text-[11px] text-muted-foreground">
-                  Manual addresses may not appear on the Map until
-                  coordinates are added.
-                </p>
-              )}
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <label
-                  htmlFor="add-office-phone"
-                  className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-                >
-                  Phone (optional)
-                </label>
-                <Input
-                  id="add-office-phone"
-                  type="tel"
-                  inputMode="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="e.g. (801) 555-1234"
-                  disabled={saving}
-                  maxLength={64}
-                />
-              </div>
-              <div className="space-y-1">
-                <label
-                  htmlFor="add-office-email"
-                  className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-                >
-                  Email (optional)
-                </label>
-                <Input
-                  id="add-office-email"
-                  type="email"
-                  inputMode="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="e.g. front@office.com"
-                  disabled={saving}
-                  maxLength={254}
-                />
-              </div>
-            </div>
-            <div className="space-y-1">
-              <label
-                htmlFor="add-office-notes"
-                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-              >
-                Office notes (optional)
-              </label>
-              <textarea
-                id="add-office-notes"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="e.g. Broker is Sarah · Office meetings Tuesdays at 10am"
-                disabled={saving}
-                rows={2}
-                className="w-full min-h-[64px] rounded-md border border-input bg-background p-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
-              />
-            </div>
-            <div className="space-y-1">
-              <label
-                htmlFor="add-office-next-action"
-                className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-              >
-                Next action (optional)
-              </label>
-              <Input
-                id="add-office-next-action"
-                value={nextAction}
-                onChange={(e) => setNextAction(e.target.value)}
-                placeholder="e.g. Drop off donuts next Friday"
-                disabled={saving}
-                maxLength={2000}
-              />
-            </div>
-            {error && (
-              <p
-                role="alert"
-                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-              >
-                {error}
-              </p>
-            )}
-            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={onClose}
-                disabled={saving}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" size="sm" disabled={!canSubmit}>
-                {saving ? "Adding…" : "Add Office"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// AddressAutocomplete — typeahead backed by /api/geocode/search
-// ---------------------------------------------------------------------------
-//
-// Behavior contract:
-//   * `value` is the input's current text.
-//   * `onChange(v)` fires on every keystroke / paste.
-//   * `onPick(result)` fires when the user taps a suggestion.
-//     Callers should update `value` to `result.formatted` AND stash
-//     the lat/lng + structured address parts from the result.
-//   * Manual typing AFTER a pick is the caller's responsibility to
-//     handle (clear the stashed coords). This component doesn't
-//     track the picked state internally.
-//
-// Suggestion fetch:
-//   * Debounced by GEOCODE_DEBOUNCE_MS (500 ms) to stay under
-//     Nominatim's ~1 req/s policy.
-//   * Skipped when value < GEOCODE_MIN_QUERY_LENGTH (4 chars).
-//   * Cancellable: a fresh keystroke invalidates the in-flight
-//     request so a slow first query can't overwrite a faster
-//     later one.
-//
-// Dropdown:
-//   * Opens on focus and on every typed change.
-//   * Closes on outside-tap (mousedown/touchstart on the document),
-//     Escape, or after a suggestion is picked.
-//   * Renders "Searching…" while loading, "No matches" when empty,
-//     "Couldn't load suggestions." on error.
-// ---------------------------------------------------------------------------
-function AddressAutocomplete({
-  value,
-  onChange,
-  onPick,
-  disabled,
-  inputId,
-  placeholder,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onPick: (result: GeocodeResult) => void;
-  disabled?: boolean;
-  inputId?: string;
-  placeholder?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [hasError, setHasError] = useState(false);
-  const [debouncedValue, setDebouncedValue] = useState(value);
-  const wrapRef = useRef<HTMLDivElement>(null);
-
-  // Local debounce — runs once whenever `value` changes, then
-  // `debouncedValue` updates GEOCODE_DEBOUNCE_MS after the user
-  // stops typing.
-  useEffect(() => {
-    const t = window.setTimeout(
-      () => setDebouncedValue(value),
-      GEOCODE_DEBOUNCE_MS,
-    );
-    return () => window.clearTimeout(t);
-  }, [value]);
-
-  // Fetch suggestions whenever the debounced value crosses the
-  // min-length gate. The `cancelled` flag guards against a slow
-  // first request landing on top of a faster later one when the
-  // user types fast.
-  useEffect(() => {
-    const trimmed = debouncedValue.trim();
-    if (trimmed.length < GEOCODE_MIN_QUERY_LENGTH) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSuggestions([]);
-      setLoading(false);
-      setHasError(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    setHasError(false);
-    void apiFetch(`/api/geocode/search?q=${encodeURIComponent(trimmed)}`)
-      .then(async (res) => {
-        if (cancelled) return;
-        const data = (await res.json().catch(() => null)) as
-          | { results?: GeocodeResult[] }
-          | null;
-        if (!res.ok) {
-          setHasError(true);
-          setSuggestions([]);
-          return;
-        }
-        setSuggestions(Array.isArray(data?.results) ? data.results : []);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setHasError(true);
-        setSuggestions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedValue]);
-
-  // Outside-tap + Escape close the dropdown. Only bound while open
-  // so the document listener isn't always active.
-  useEffect(() => {
-    if (!open) return;
-    const onPointer = (e: MouseEvent | TouchEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointer);
-    document.addEventListener("touchstart", onPointer, { passive: true });
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onPointer);
-      document.removeEventListener("touchstart", onPointer);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const shouldShowDropdown =
-    open &&
-    (loading || hasError || suggestions.length > 0 ||
-      debouncedValue.trim().length >= GEOCODE_MIN_QUERY_LENGTH);
-
-  return (
-    <div ref={wrapRef} className="relative">
-      <Input
-        id={inputId}
-        value={value}
-        onChange={(e) => {
-          onChange(e.target.value);
-          setOpen(true);
-        }}
-        onFocus={() => {
-          if (value.trim().length >= GEOCODE_MIN_QUERY_LENGTH) {
-            setOpen(true);
-          }
-        }}
-        placeholder={placeholder}
-        disabled={disabled}
-        maxLength={500}
-        required
-        autoComplete="off"
-        // iOS Safari shows its own autofill bar above the keyboard
-        // by default — `off` here lets the AE rely on the dropdown
-        // instead of Safari's autofill (which usually doesn't have
-        // address suggestions anyway).
-      />
-      {shouldShowDropdown && (
-        <div
-          role="listbox"
-          aria-label="Address suggestions"
-          // Sits inside the modal's z-50 stacking context; no
-          // explicit z-index needed beyond the small bump to clear
-          // the input's focus ring.
-          className="absolute left-0 right-0 top-full z-10 mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
-        >
-          {loading && (
-            <p className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-              <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
-              Searching…
-            </p>
-          )}
-          {!loading && hasError && (
-            <p className="px-3 py-2 text-xs text-destructive">
-              Couldn&apos;t load suggestions. Try again or enter the
-              address manually.
-            </p>
-          )}
-          {!loading && !hasError && suggestions.length === 0 && (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
-              No matches. You can still enter the address manually.
-            </p>
-          )}
-          {!loading &&
-            !hasError &&
-            suggestions.map((s, i) => (
-              <button
-                key={`${s.latitude},${s.longitude},${i}`}
-                type="button"
-                role="option"
-                aria-selected="false"
-                onClick={() => {
-                  onPick(s);
-                  setOpen(false);
-                }}
-                className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
-              >
-                <MapPin
-                  aria-hidden="true"
-                  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-                />
-                <span className="min-w-0 flex-1">{s.formatted}</span>
-              </button>
-            ))}
-        </div>
-      )}
-    </div>
-  );
-}
