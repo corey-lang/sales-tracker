@@ -236,29 +236,46 @@ export async function GET(req: Request) {
 
     // Annotate with each office's most-recent visit (per-AE).
     // Skip the lookup when there's nothing to annotate.
+    //
+    // NON-FATAL: a failure here used to 500 the entire map. The
+    // map's primary value is "show me what's around me" — visit
+    // recency is a useful but not load-blocking annotation. We
+    // now log + skip on failure and ship the map without the
+    // last-visit pills rather than blocking the whole surface.
+    // (The visible cap is NEARBY_RESULT_LIMIT = 100 IDs, well
+    // under any proxy URL limit, so the IN clause is fine without
+    // chunking here.)
     const lastByOffice = new Map<string, string>();
     if (visible.length > 0) {
       const ids = visible.map((o) => o.id);
-      const visitsRes = await supabase
-        .from(OFFICE_VISITS_TABLE)
-        .select("office_id, visited_at")
-        .eq("salesperson_id", me.id)
-        .eq("environment", environment)
-        .in("office_id", ids);
-      if (visitsRes.error) {
-        console.warn(
-          `[offices-nearby] visits fetch failed ae=${me.id} office_count=${ids.length} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
-        );
-        throw new ApiError(500, "Could not load visit history.");
-      }
-      for (const v of (visitsRes.data ?? []) as Array<{
-        office_id: string;
-        visited_at: string;
-      }>) {
-        const existing = lastByOffice.get(v.office_id);
-        if (!existing || v.visited_at > existing) {
-          lastByOffice.set(v.office_id, v.visited_at);
+      const visitsStartedAt = Date.now();
+      try {
+        const visitsRes = await supabase
+          .from(OFFICE_VISITS_TABLE)
+          .select("office_id, visited_at")
+          .eq("salesperson_id", me.id)
+          .eq("environment", environment)
+          .in("office_id", ids);
+        if (visitsRes.error) {
+          console.warn(
+            `[offices-nearby] visits fetch failed ae=${me.id} office_count=${ids.length} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+          );
+        } else {
+          for (const v of (visitsRes.data ?? []) as Array<{
+            office_id: string;
+            visited_at: string;
+          }>) {
+            const existing = lastByOffice.get(v.office_id);
+            if (!existing || v.visited_at > existing) {
+              lastByOffice.set(v.office_id, v.visited_at);
+            }
+          }
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[offices-nearby] visits fetch threw ae=${me.id} office_count=${ids.length} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
+        );
       }
     }
 

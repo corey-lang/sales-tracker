@@ -117,23 +117,37 @@ export async function GET(
     // matching note in /api/offices/[id]/route.ts for the full
     // rationale; `visit_count` derives from `visits.length` which is
     // accurate up to the inline cap.
-    const visitsRes = await supabase
-      .from(OFFICE_VISITS_TABLE)
-      .select(VISIT_COLUMNS)
-      .eq("office_id", id)
-      .order("visited_at", { ascending: false })
-      .limit(OFFICE_VISITS_DETAIL_LIMIT);
-
     let visits: OfficeVisitRow[] = [];
     let visitsLoadWarning: string | undefined;
-    if (visitsRes.error) {
+    // Wrapped so BOTH PostgREST row-errors AND thrown exceptions
+    // (network/timeout/fetch failures from supabase-js) degrade to
+    // the warning instead of 500'ing the whole detail. See the
+    // matching block in /api/offices/[id]/route.ts for full notes.
+    const visitsStartedAt = Date.now();
+    try {
+      const visitsRes = await supabase
+        .from(OFFICE_VISITS_TABLE)
+        .select(VISIT_COLUMNS)
+        .eq("office_id", id)
+        .order("visited_at", { ascending: false })
+        .limit(OFFICE_VISITS_DETAIL_LIMIT);
+
+      if (visitsRes.error) {
+        console.warn(
+          `[offices-detail] visits lookup failed office_id=${id} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        );
+        visitsLoadWarning =
+          "Couldn't load visit history right now. Reload to retry.";
+      } else {
+        visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[offices-detail] visits lookup failed office_id=${id} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        `[offices-detail] visits lookup threw office_id=${id} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
       );
       visitsLoadWarning =
         "Couldn't load visit history right now. Reload to retry.";
-    } else {
-      visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
     }
 
     const detail: OfficeDetail = {

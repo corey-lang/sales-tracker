@@ -186,35 +186,70 @@ export async function GET(req: Request) {
     const offices = (officesRes.data ?? []) as OfficeBaseRow[];
 
     // Visit-aggregate pass. Keyed by office_id, accumulates per-AE
-    // count + most-recent visited_at. Scoped to this AE + test so a
+    // count + most-recent visited_at. Scoped to this AE + env so a
     // future shared-office model can't contaminate the personal sort.
+    //
+    // CHUNKED IN(): for an AE with thousands of imported offices
+    // (Chanel/Hilary post-rollout), passing every office_id in a
+    // single `.in(...)` clause builds a multi-tens-of-KB query
+    // string that overflows the upstream proxy's URL/header budget
+    // (Cloudflare ~8KB headers, Vercel ~16KB total) and surfaces as
+    // a request error long before Postgres sees it. Chunking keeps
+    // each request small and lets the visit map merge across pages.
+    //
+    // NON-FATAL: a failure here used to 500 the entire list page
+    // — misleading copy ("Could not load visit history.") for what
+    // is really a sort-degradation. We now log + skip the failing
+    // chunk and continue. Worst case the list renders without the
+    // "visited first" promotion for offices in the failed chunk,
+    // which matches the same office_set's fresh-import baseline
+    // (never-visited rows sort alphabetical) and never blocks the
+    // page from loading.
     const visitMap = new Map<string, { last: string; count: number }>();
     if (offices.length > 0) {
       const officeIds = offices.map((o) => o.id);
-      const visitsRes = await supabase
-        .from(OFFICE_VISITS_TABLE)
-        .select("office_id, visited_at")
-        .eq("salesperson_id", me.id)
-        .eq("environment", environment)
-        .in("office_id", officeIds);
+      // 200 UUIDs (~37 chars each + commas) ≈ 7.5KB query — well
+      // under the conservative 8KB header floor and small enough
+      // to keep request latency steady.
+      const VISITS_IN_CHUNK = 200;
+      for (let i = 0; i < officeIds.length; i += VISITS_IN_CHUNK) {
+        const chunk = officeIds.slice(i, i + VISITS_IN_CHUNK);
+        const chunkStartedAt = Date.now();
+        try {
+          const visitsRes = await supabase
+            .from(OFFICE_VISITS_TABLE)
+            .select("office_id, visited_at")
+            .eq("salesperson_id", me.id)
+            .eq("environment", environment)
+            .in("office_id", chunk);
 
-      if (visitsRes.error) {
-        console.warn(
-          `[office-list] visits fetch failed ae=${me.id} office_count=${officeIds.length} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
-        );
-        throw new ApiError(500, "Could not load visit history.");
-      }
+          if (visitsRes.error) {
+            console.warn(
+              `[office-list] visits chunk failed ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+            );
+            continue;
+          }
 
-      for (const v of (visitsRes.data ?? []) as VisitTimestampRow[]) {
-        const existing = visitMap.get(v.office_id);
-        if (!existing) {
-          visitMap.set(v.office_id, { last: v.visited_at, count: 1 });
-          continue;
+          for (const v of (visitsRes.data ?? []) as VisitTimestampRow[]) {
+            const existing = visitMap.get(v.office_id);
+            if (!existing) {
+              visitMap.set(v.office_id, { last: v.visited_at, count: 1 });
+              continue;
+            }
+            existing.count += 1;
+            // ISO 8601 sorts lexically — comparing strings is
+            // correct and avoids the cost of Date construction per
+            // visit.
+            if (v.visited_at > existing.last) existing.last = v.visited_at;
+          }
+        } catch (err) {
+          // Thrown exceptions (network/timeout/aborted fetch) land
+          // here — same degradation as the row-error path.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[office-list] visits chunk threw ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} err=${msg}`,
+          );
         }
-        existing.count += 1;
-        // ISO 8601 sorts lexically — comparing strings is correct
-        // and avoids the cost of Date construction per visit.
-        if (v.visited_at > existing.last) existing.last = v.visited_at;
       }
     }
 

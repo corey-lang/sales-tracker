@@ -101,6 +101,7 @@ export async function GET(
     // follow-up detail visits alike. See offices_archived_at.sql for
     // why archive is preferred over hard delete (preserves visit
     // history + task FK targets).
+    const officeStartedAt = Date.now();
     const officeRes = await supabase
       .from(OFFICES_TABLE)
       .select(OFFICE_COLUMNS)
@@ -112,7 +113,7 @@ export async function GET(
 
     if (officeRes.error) {
       console.warn(
-        `[office-detail] office lookup failed office_id=${id} ae=${me.id} code=${officeRes.error.code ?? "?"} msg=${officeRes.error.message}`,
+        `[office-detail] office lookup failed office_id=${id} ae=${me.id} elapsed_ms=${Date.now() - officeStartedAt} code=${officeRes.error.code ?? "?"} msg=${officeRes.error.message}`,
       );
       throw new ApiError(500, "Could not load office detail.");
     }
@@ -146,25 +147,46 @@ export async function GET(
     // — a future refactor that splits these queries can't accidentally
     // surface another AE's visits for an office they happen to know
     // the id of.
-    const visitsRes = await supabase
-      .from(OFFICE_VISITS_TABLE)
-      .select(VISIT_COLUMNS)
-      .eq("office_id", id)
-      .eq("environment", environment)
-      .eq("salesperson_id", me.id)
-      .order("visited_at", { ascending: false })
-      .limit(OFFICE_VISITS_DETAIL_LIMIT);
-
     let visits: OfficeVisitRow[] = [];
     let visitsLoadWarning: string | undefined;
-    if (visitsRes.error) {
+    // Wrapped so BOTH failure modes degrade to the warning instead of
+    // 500'ing the whole detail page:
+    //   1. PostgREST returned a row-level error → `visitsRes.error`
+    //   2. The await threw — fetch/network/timeout failure, the
+    //      supabase-js client raising an exception, etc. Without the
+    //      inner try the throw would unwind to the outer catch and
+    //      call handleApiError → 500, exactly the behavior we're
+    //      trying to avoid.
+    const visitsStartedAt = Date.now();
+    try {
+      const visitsRes = await supabase
+        .from(OFFICE_VISITS_TABLE)
+        .select(VISIT_COLUMNS)
+        .eq("office_id", id)
+        .eq("environment", environment)
+        .eq("salesperson_id", me.id)
+        .order("visited_at", { ascending: false })
+        .limit(OFFICE_VISITS_DETAIL_LIMIT);
+
+      if (visitsRes.error) {
+        console.warn(
+          `[office-detail] visits lookup failed office_id=${id} ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        );
+        visitsLoadWarning =
+          "Couldn't load visit history right now. Reload to retry — logging a new visit still works.";
+      } else {
+        visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
+      }
+    } catch (err) {
+      // Thrown exceptions from supabase-js (timeout, fetch error,
+      // aborted request) land here. The office row is already loaded
+      // — degrade to the warning so the page still renders.
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[office-detail] visits lookup failed office_id=${id} ae=${me.id} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        `[office-detail] visits lookup threw office_id=${id} ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
       );
       visitsLoadWarning =
         "Couldn't load visit history right now. Reload to retry — logging a new visit still works.";
-    } else {
-      visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
     }
 
     const detail: OfficeDetail = {
