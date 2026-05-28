@@ -140,27 +140,34 @@ export type OfficeImportBatchRow = {
 };
 
 /**
- * Aggregate "open this office" payload — what the future office-detail
- * surface (and any map detail popover) will fetch in one round trip.
+ * Aggregate "open this office" payload.
  *
  * Composed of:
  *   * The office row itself, including the persistent `office_notes`
  *     and `next_action` memory.
- *   * The visit log, newest-first. May be capped by the read route at
- *     a sane upper bound (the future UI's "Visit History" timeline
- *     paginates via a separate older-history call if needed).
+ *   * The visit log, newest-first, capped at OFFICE_VISITS_DETAIL_LIMIT.
  *   * `last_visit_at` — the `visited_at` of the most recent visit, or
  *     null when the office has never been visited. Derived so the UI
  *     doesn't have to peek into the visits array.
- *   * `visit_count` — the AUTHORITATIVE count of visits, NOT
- *     visits.length. The read route uses Postgres COUNT(*) so this
- *     stays accurate even if visits was capped.
+ *   * `visit_count` — derived from `visits.length`. Accurate when
+ *     visit history fits in the inline cap (every realistic
+ *     AE-office pair); for the edge case where a single AE has more
+ *     than OFFICE_VISITS_DETAIL_LIMIT visits to one office, the count
+ *     under-reports — acceptable since the UI's timeline is anchored
+ *     at "most recent N" anyway.
+ *   * `visits_load_warning` — present and human-readable when the
+ *     visits sub-query failed and the page is degrading to an empty
+ *     timeline. Office row + notes + next action all still load; the
+ *     UI surfaces the warning inline so the AE knows their existing
+ *     visit history (if any) didn't render. Logging a new visit
+ *     still works.
  */
 export type OfficeDetail = {
   office: OfficeRow;
   visits: OfficeVisitRow[];
   last_visit_at: string | null;
   visit_count: number;
+  visits_load_warning?: string;
 };
 
 /**

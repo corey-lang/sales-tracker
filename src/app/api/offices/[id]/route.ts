@@ -92,41 +92,23 @@ export async function GET(
 
     const supabase = getServerSupabase();
 
-    // Office read includes ownership (`salesperson_id = me.id`) and
-    // environment in the predicate — wrong env, wrong owner, and not-
-    // found all collapse to the same 404 so the response is uniform.
+    // Office read first. Ownership (`salesperson_id = me.id`) and env
+    // are in the predicate — wrong env, wrong owner, and not-found
+    // all collapse to the same 404 so the response is uniform.
     //
-    // Visits read uses `count: "exact"` so `visit_count` is authoritative
-    // even when the inline array would be capped by OFFICE_VISITS_DETAIL_LIMIT.
-    // Both reads are issued in parallel — the visits query also pins
-    // `salesperson_id = me.id` for ownership symmetry / defense-in-depth.
-    // The office read above would already 404 a stranger's id, but
-    // duplicating the predicate here means a future refactor that
-    // splits these reads apart can't accidentally surface another AE's
-    // visits for an office they happen to know the id of.
-    const [officeRes, visitsRes] = await Promise.all([
-      supabase
-        .from(OFFICES_TABLE)
-        .select(OFFICE_COLUMNS)
-        .eq("id", id)
-        .eq("environment", environment)
-        .eq("salesperson_id", me.id)
-        // Archived offices disappear from every read surface so the
-        // soft-delete on the detail page hides the row from List,
-        // Map, and follow-up detail visits alike. See
-        // offices_archived_at.sql for why archive is preferred over
-        // hard delete (preserves visit history + task FK targets).
-        .is("archived_at", null)
-        .maybeSingle(),
-      supabase
-        .from(OFFICE_VISITS_TABLE)
-        .select(VISIT_COLUMNS, { count: "exact" })
-        .eq("office_id", id)
-        .eq("environment", environment)
-        .eq("salesperson_id", me.id)
-        .order("visited_at", { ascending: false })
-        .limit(OFFICE_VISITS_DETAIL_LIMIT),
-    ]);
+    // Archived offices disappear from every read surface so the soft-
+    // delete on the detail page hides the row from List, Map, and
+    // follow-up detail visits alike. See offices_archived_at.sql for
+    // why archive is preferred over hard delete (preserves visit
+    // history + task FK targets).
+    const officeRes = await supabase
+      .from(OFFICES_TABLE)
+      .select(OFFICE_COLUMNS)
+      .eq("id", id)
+      .eq("environment", environment)
+      .eq("salesperson_id", me.id)
+      .is("archived_at", null)
+      .maybeSingle();
 
     if (officeRes.error) {
       console.warn(
@@ -137,24 +119,60 @@ export async function GET(
     if (!officeRes.data) {
       throw notFound("Office not found.");
     }
+
+    const office = officeRes.data as unknown as OfficeRow;
+
+    // Visits read is INDEPENDENT of the office read. A failure here
+    // (transient DB blip, planner-chosen bad index path, statement
+    // timeout under heavy concurrent load) does NOT take the whole
+    // detail page down — instead we degrade to an empty timeline +
+    // a `visits_load_warning` that the UI surfaces inline. The
+    // office row, notes, next action, edit/archive paths all keep
+    // working; logging a new visit still works because the POST
+    // route does its own ownership pre-check independent of this read.
+    //
+    // Drops the prior `count: "exact"` flag: PostgREST's count=exact
+    // mode forces an additional COUNT(*) plan over the same predicate
+    // and was the most likely source of intermittent visits failures
+    // for AEs with large imported office sets. `visit_count` now
+    // derives from `visits.length`, which is accurate when the timeline
+    // fits the inline cap (the realistic case for every AE-office
+    // pair). For the rare >OFFICE_VISITS_DETAIL_LIMIT case the count
+    // under-reports — acceptable because the UI is already anchored
+    // at "most recent N" anyway.
+    //
+    // Both the office read predicate above and this visits predicate
+    // pin `salesperson_id = me.id` independently for defense in depth
+    // — a future refactor that splits these queries can't accidentally
+    // surface another AE's visits for an office they happen to know
+    // the id of.
+    const visitsRes = await supabase
+      .from(OFFICE_VISITS_TABLE)
+      .select(VISIT_COLUMNS)
+      .eq("office_id", id)
+      .eq("environment", environment)
+      .eq("salesperson_id", me.id)
+      .order("visited_at", { ascending: false })
+      .limit(OFFICE_VISITS_DETAIL_LIMIT);
+
+    let visits: OfficeVisitRow[] = [];
+    let visitsLoadWarning: string | undefined;
     if (visitsRes.error) {
       console.warn(
         `[office-detail] visits lookup failed office_id=${id} ae=${me.id} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
       );
-      throw new ApiError(500, "Could not load office visit history.");
+      visitsLoadWarning =
+        "Couldn't load visit history right now. Reload to retry — logging a new visit still works.";
+    } else {
+      visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
     }
-
-    const office = officeRes.data as unknown as OfficeRow;
-    const visits = (visitsRes.data ?? []) as unknown as OfficeVisitRow[];
 
     const detail: OfficeDetail = {
       office,
       visits,
       last_visit_at: visits[0]?.visited_at ?? null,
-      visit_count:
-        typeof visitsRes.count === "number"
-          ? visitsRes.count
-          : visits.length,
+      visit_count: visits.length,
+      ...(visitsLoadWarning ? { visits_load_warning: visitsLoadWarning } : {}),
     };
 
     return Response.json(

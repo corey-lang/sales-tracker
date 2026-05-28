@@ -622,7 +622,10 @@ export default function OfficeDetailPage({
       }
 
       // Apply locally without a refetch. Sort visits by visited_at desc
-      // so a back-dated entry slots into the right position.
+      // so a back-dated entry slots into the right position. Clears
+      // any prior visits_load_warning — local state now reflects the
+      // freshly-logged visit, so the empty-state banner no longer
+      // applies.
       if (detail) {
         const merged = [data.visit, ...detail.visits].sort((a, b) =>
           b.visited_at.localeCompare(a.visited_at),
@@ -632,6 +635,7 @@ export default function OfficeDetailPage({
           visits: merged,
           last_visit_at: merged[0].visited_at,
           visit_count: detail.visit_count + 1,
+          visits_load_warning: undefined,
         });
       }
 
@@ -702,7 +706,9 @@ export default function OfficeDetailPage({
       }
 
       // Local merge mirrors the form path: prepend, re-sort by
-      // visited_at desc, bump count + last_visit_at.
+      // visited_at desc, bump count + last_visit_at. Clears any prior
+      // visits_load_warning since local state now reflects the
+      // freshly-logged visit.
       if (detail) {
         const merged = [data.visit, ...detail.visits].sort((a, b) =>
           b.visited_at.localeCompare(a.visited_at),
@@ -712,6 +718,7 @@ export default function OfficeDetailPage({
           visits: merged,
           last_visit_at: merged[0].visited_at,
           visit_count: detail.visit_count + 1,
+          visits_load_warning: undefined,
         });
       }
 
@@ -1344,7 +1351,14 @@ export default function OfficeDetailPage({
           )}
         </CardHeader>
         <CardContent>
-          {detail.visits.length === 0 ? (
+          {detail.visits_load_warning ? (
+            <p
+              role="status"
+              className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+            >
+              {detail.visits_load_warning}
+            </p>
+          ) : detail.visits.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               No visits logged yet.
             </p>
