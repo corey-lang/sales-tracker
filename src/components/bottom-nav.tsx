@@ -73,11 +73,20 @@ const SCAN_BIZ_CARD: NavItem = {
  * iPhone home-indicator devices get the same visual clearance as desktop.
  *
  * Was 5rem; bumped to 7rem because the previous ~11px clearance made long
- * pages (Scorecard, Activity Reports, etc.) look like content was being
- * clipped by the nav.
+ * pages look clipped by the nav.
+ *
+ * `!important` (the trailing `!` is Tailwind v4 syntax) is required because
+ * several consuming pages combine this with a `sm:p-6` shorthand on the
+ * same wrapper (admin/layout.tsx, dashboard, leaderboard). At >=640px the
+ * `sm:p-6` media-query rule comes after the unprefixed `pb-…` in the
+ * cascade and silently collapses bottom padding to 1.5rem — the entire
+ * point of this spacer disappears at the sm breakpoint. Forcing important
+ * on the constant makes the spacer survive any padding shorthand at any
+ * future breakpoint, so callers can write `p-4 sm:p-6` (or md:/lg:) and
+ * still get the nav clearance they asked for.
  */
 export const BOTTOM_NAV_SPACER =
-  "pb-[calc(7rem+env(safe-area-inset-bottom))]";
+  "pb-[calc(7rem+env(safe-area-inset-bottom))]!";
 
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   if (!salesperson) return [HOME_AE];
