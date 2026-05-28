@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, ShieldCheck, MapPin, Building2 } from "lucide-react";
+import { LogOut, ShieldCheck, MapPin } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -97,23 +97,6 @@ export default function MorePage() {
             >
               <ShieldCheck aria-hidden="true" className="size-4" />
               Admin
-            </Link>
-          )}
-          {/* Offices entry — links to the unified Map + List
-              experience at /offices. Available to every AE; the
-              page still owns the Test pill + sandbox banner
-              internally for the test account.
-              juice_box_only callers are excluded from the AE office
-              tool surface, matching `requireAeToolAccess` on the
-              server. Role is a static account property so the
-              cached session value is the authority here. */}
-          {salesperson.role !== "juice_box_only" && (
-            <Link
-              href="/offices"
-              className={buttonVariants({ variant: "outline" })}
-            >
-              <Building2 aria-hidden="true" className="size-4" />
-              Offices
             </Link>
           )}
           {(() => {
