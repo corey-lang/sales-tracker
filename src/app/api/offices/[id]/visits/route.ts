@@ -7,9 +7,10 @@ import {
   handleApiError,
   notFound,
   parseBody,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
+  officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   type OfficeVisitRow,
@@ -17,9 +18,9 @@ import {
 
 // POST /api/offices/[id]/visits
 //
-// Phase 1A — test-only visit logging.
+// AE visit logging.
 //
-// Inserts one office_visits row for the calling test AE against the
+// Inserts one office_visits row for the calling AE against the
 // office in the URL. `visited_at` defaults to NOW() (the schema's
 // default) — the in-the-moment "I just visited here" path doesn't
 // need to send it. Callers MAY send a `visited_at` ISO timestamp to
@@ -29,13 +30,13 @@ import {
 // visit.
 //
 // AUDIENCE / IDENTITY
-//   `requireTestAccount` — same gate as the GET/PATCH detail route.
+//   `requireAeToolAccess` — same gate as the GET/PATCH detail route.
 //   `salesperson_id` is the caller's id; never trust a client-supplied
 //   value. Ownership is enforced by a pre-check against `offices`:
-//   the office must exist, be in `environment = "test"`, AND belong
-//   to the caller. The DB trigger
+//   the office must exist, be in `environment = officeEnvironmentFor(me)`,
+//   AND belong to the caller. The DB trigger
 //   (`trg_office_visits_env_from_office`) overrides `environment` from
-//   the parent office, so a caller can't smuggle in a 'production'
+//   the parent office, so a caller can't smuggle in a different-env
 //   tag even if the route trusted them — but the explicit check here
 //   keeps a wrong-owner write from succeeding silently.
 //
@@ -48,7 +49,7 @@ import {
 //   201  { visit: OfficeVisitRow }
 //   400  invalid uuid or body
 //   401  no session
-//   403  not the test account / juice_box_only / no `is_test` flag
+//   403  juice_box_only caller (AE office tools not available)
 //   404  office doesn't exist, wrong env, or belongs to a different AE
 //
 // ERRORS
@@ -99,7 +100,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const { id: officeId } = await params;
 
     const parsedId = UuidSchema.safeParse(officeId);
@@ -149,7 +151,7 @@ export async function POST(
       .from(OFFICES_TABLE)
       .select("id")
       .eq("id", officeId)
-      .eq("environment", "test")
+      .eq("environment", environment)
       .eq("salesperson_id", me.id)
       .is("archived_at", null)
       .maybeSingle();
@@ -165,9 +167,10 @@ export async function POST(
     }
 
     // The DB trigger derives `environment` from the parent office, so
-    // passing "test" here is informational — even a malicious "production"
-    // value would be overwritten before the row hits storage. Including
-    // it keeps the intent obvious at the call site.
+    // passing the caller's slice here is informational — even a
+    // malicious mismatched value would be overwritten before the
+    // row hits storage. Including it keeps the intent obvious at
+    // the call site.
     //
     // `visited_at` is conditionally included so omitting it falls
     // through to the column DEFAULT NOW() — the in-the-moment path.
@@ -175,13 +178,13 @@ export async function POST(
       office_id: string;
       salesperson_id: string;
       note: string | null;
-      environment: "test";
+      environment: typeof environment;
       visited_at?: string;
     } = {
       office_id: officeId,
       salesperson_id: me.id,
       note,
-      environment: "test",
+      environment,
     };
     if (visitedAt !== undefined) insertPayload.visited_at = visitedAt;
 

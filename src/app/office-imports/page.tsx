@@ -27,14 +27,17 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
-// Office Imports (Test) — sandbox tool for CSV office import. Access
-// is gated on `is_admin` or the per-user `can_import_offices`
-// permission (see migration #26), NOT on role membership.
+// Office Imports — CSV office import tool. Access is gated on
+// `is_admin` or the per-user `can_import_offices` permission (see
+// migration #26), NOT on role membership.
 //
-// SANDBOX
-//   This page ONLY supports environment="test". The server route hard-
-//   rejects production imports for the MVP; the client mirrors that
-//   constraint by hard-coding environment="test" on every POST.
+// ENVIRONMENT
+//   The request body no longer carries an `environment` flag. The
+//   server route derives each row's env slice from the resolved AE
+//   via `officeEnvironmentFor`: rows targeting the test account land
+//   in `"test"`, every other AE lands in `"production"`. The picker
+//   below surfaces the destination slice so admins can confirm the
+//   import will go live for a real AE before submitting.
 //
 // ACCESS
 //   `is_admin === true` OR `can_import_offices === true` on the
@@ -56,8 +59,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //   every call point and the two layers can never drift.
 //
 // SCOPE
-//   No map, no read endpoint, no production import. CSV → preview →
-//   POST to /api/admin/offices/import. Everything else is the existing
+//   No map, no read endpoint. CSV → preview → POST to
+//   /api/admin/offices/import. Everything else is the existing
 //   foundation from supabase/offices.sql + that route.
 // ---------------------------------------------------------------------------
 
@@ -557,10 +560,14 @@ type ImportResult = {
   warning?: string;
 };
 
-/** Lightweight salesperson summary for the Default-AE picker. */
+/** Lightweight salesperson summary for the Default-AE picker.
+ *  `is_test` drives the dynamic Environment label so admins can
+ *  see whether a picked default AE will land rows in production
+ *  or the sandbox before they submit. */
 type AePerson = {
   id: string;
   first_name: string;
+  is_test: boolean;
 };
 
 export default function OfficeImportsPage() {
@@ -663,7 +670,7 @@ export default function OfficeImportsPage() {
     let cancelled = false;
     supabase
       .from("salespeople")
-      .select("id, first_name")
+      .select("id, first_name, is_test")
       .order("first_name", { ascending: true })
       .then(({ data, error }) => {
         if (cancelled) return;
@@ -676,7 +683,19 @@ export default function OfficeImportsPage() {
           setAePeople([]);
           return;
         }
-        setAePeople((data ?? []) as AePerson[]);
+        setAePeople(
+          (
+            (data ?? []) as Array<{
+              id: string;
+              first_name: string;
+              is_test: boolean | null;
+            }>
+          ).map((row) => ({
+            id: row.id,
+            first_name: row.first_name,
+            is_test: row.is_test === true,
+          })),
+        );
       });
     return () => {
       cancelled = true;
@@ -778,19 +797,18 @@ export default function OfficeImportsPage() {
     setResult(null);
     setResultError(null);
     try {
-      // environment is HARD-CODED to "test" — the server also enforces
-      // this for the MVP. Sending it explicitly documents the intent.
+      // environment is NOT sent. The server derives each row's slice
+      // from the resolved AE (test account → "test", every other AE →
+      // "production"), so the client never has to think about it.
       // default_salesperson_id is only sent when the picker has a
       // value selected, so an "import from a CSV that already has AE
       // columns" workflow doesn't get a misleading default applied.
       const payload: {
         source: string;
-        environment: "test";
         rows: ApiRow[];
         default_salesperson_id?: string;
       } = {
         source: SOURCE_LABEL,
-        environment: "test",
         rows: rows.map(toApiRow),
       };
       if (defaultAeId) payload.default_salesperson_id = defaultAeId;
@@ -839,18 +857,36 @@ export default function OfficeImportsPage() {
   const acknowledged = classified.filter((c) => c.cls === "acknowledged");
   const ignored = classified.filter((c) => c.cls === "unknown");
 
+  // Dynamic destination env. Drives the header pill + warning banner
+  // so admins can confirm — before they tap Import — whether the
+  // batch will land in the production slice (visible to a real AE
+  // immediately) or the sandbox slice (test account only). Mirrors
+  // the server's per-row `officeEnvironmentFor(resolved)` decision.
+  const defaultAe =
+    defaultAeId.length > 0
+      ? (aePeople ?? []).find((p) => p.id === defaultAeId) ?? null
+      : null;
+  const destinationEnv: "production" | "test" | null = defaultAe
+    ? defaultAe.is_test
+      ? "test"
+      : "production"
+    : null;
+
   return (
     <main className="pwa-safe-top mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 p-4 sm:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">
-            Sandbox tool
-          </p>
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
             Office Imports{" "}
-            <span className="ml-1 align-middle inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
-              Test
-            </span>
+            {destinationEnv === "test" ? (
+              <span className="ml-1 align-middle inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
+                Test
+              </span>
+            ) : destinationEnv === "production" ? (
+              <span className="ml-1 align-middle inline-flex items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 ring-1 ring-inset ring-emerald-500/25 dark:text-emerald-400">
+                Production
+              </span>
+            ) : null}
           </h1>
         </div>
         <Link
@@ -869,17 +905,19 @@ export default function OfficeImportsPage() {
         </Link>
       </header>
 
-      {/* Sandbox banner — make it obvious this never reaches production. */}
+      {/* Rollout banner. The destination slice is derived per-row
+          from the resolved AE, so picking the right Default AE
+          decides whether this batch goes live for a real AE or
+          stays in the sandbox. */}
       <div
         role="note"
         className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300"
       >
         <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
         <p className="leading-snug">
-          This tool imports offices into the <strong>test</strong> sandbox
-          only. AEs cannot see these records yet — the map and AE read
-          surfaces are not wired up. Production imports are blocked
-          server-side.
+          Pick the right AE before importing. Imported offices become
+          visible to that AE right after import. Test imports stay in
+          the sandbox; production imports go live for the chosen AE.
         </p>
       </div>
 
@@ -920,9 +958,28 @@ export default function OfficeImportsPage() {
             {(aePeople ?? []).map((p) => (
               <option key={p.id} value={p.id}>
                 {p.first_name}
+                {p.is_test ? " (Test)" : ""}
               </option>
             ))}
           </select>
+          {destinationEnv === "test" && (
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              Destination: <strong>Test sandbox</strong>. Rows will only
+              be visible to the test account.
+            </p>
+          )}
+          {destinationEnv === "production" && (
+            <p className="text-xs text-emerald-700 dark:text-emerald-400">
+              Destination: <strong>Production</strong>. Rows will be
+              visible to {defaultAe?.first_name} immediately after import.
+            </p>
+          )}
+          {destinationEnv === null && aePeople !== null && (
+            <p className="text-xs text-muted-foreground">
+              No default AE selected — each row must carry its own AE
+              column. Destination is derived per row.
+            </p>
+          )}
           {aePeople !== null && aePeople.length === 0 && (
             <p className="text-xs text-muted-foreground">
               No AEs found. The CSV must include an AE column for every row.
@@ -1191,7 +1248,14 @@ export default function OfficeImportsPage() {
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <p className="text-xs text-muted-foreground">
                 Source label: <code className="font-mono">{SOURCE_LABEL}</code>
-                {" · "}Environment: <code className="font-mono">test</code>
+                {" · "}Environment:{" "}
+                <code className="font-mono">
+                  {destinationEnv === "test"
+                    ? "test"
+                    : destinationEnv === "production"
+                      ? "production"
+                      : "per row"}
+                </code>
               </p>
               {/* Explicit `canImport` gate. Mirrors the server's
                   `requireOfficeImporter` so the button is visible

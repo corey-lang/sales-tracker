@@ -29,7 +29,7 @@ const ADMIN_NAV = [
   { href: "/admin/business-cards", label: "Business Cards" },
   { href: "/admin/leaderboard", label: "Leaderboard" },
   { href: "/admin/reports/activity", label: "Activity Reports" },
-  { href: "/office-imports", label: "Office Imports (Test)" },
+  { href: "/office-imports", label: "Office Imports" },
 ];
 
 export default function AdminLayout({

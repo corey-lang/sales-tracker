@@ -38,12 +38,12 @@ import {
 } from "@/components/office-form-modal";
 
 // ---------------------------------------------------------------------------
-// Office Detail — Phase 1A test-only surface.
+// Office Detail.
 //
 // Layout, top → bottom (mobile-first, dashboard-feel — no giant
 // textareas on initial paint):
-//   1. Header (Back + Test pill)
-//   2. Sandbox banner
+//   1. Header (Back + Test pill — test account only)
+//   2. Sandbox banner — test account only
 //   3. SNAPSHOT CARD — name, clickable address (Directions), visit
 //      stats, three primary actions: [Log visit] (one-tap, no form —
 //      the most-used AE workflow), [Log visit + note] (opens the
@@ -62,9 +62,12 @@ import {
 // without scrolling past empty forms.
 //
 // Access (mirrors /api/offices/[id]):
-//   * `is_test === true` salesperson — passes.
+//   * Every AE passes (real AEs operate in environment="production";
+//     the test account operates in environment="test"). Ownership is
+//     enforced server-side by `salesperson_id = me.id` on every read
+//     and write.
 //   * juice_box_only — redirected to /juice-box.
-//   * Anyone else — redirected to /dashboard.
+//   * Anyone else (no session) — redirected to /.
 // ---------------------------------------------------------------------------
 
 type DetailResponse = { detail: OfficeDetail };
@@ -173,9 +176,7 @@ export default function OfficeDetailPage({
   // ---- Access gate -------------------------------------------------------
   const accessReady = sessionLoaded && permsLoaded;
   const canView =
-    !!salesperson &&
-    salesperson.role !== "juice_box_only" &&
-    salesperson.is_test === true;
+    !!salesperson && salesperson.role !== "juice_box_only";
 
   useEffect(() => {
     if (!accessReady) return;
@@ -842,7 +843,7 @@ export default function OfficeDetailPage({
       <main
         className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}
       >
-      {/* Header — Back to /offices + sandbox tag. */}
+      {/* Header — Back to /offices + Test pill (test account only). */}
       <header className="flex flex-wrap items-center justify-between gap-2">
         <Link
           href="/offices"
@@ -851,21 +852,25 @@ export default function OfficeDetailPage({
           <ArrowLeft aria-hidden="true" className="size-4" />
           Back
         </Link>
-        <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
-          Test
-        </span>
+        {salesperson.is_test === true && (
+          <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
+            Test
+          </span>
+        )}
       </header>
 
-      {/* Sandbox banner. */}
-      <div
-        role="note"
-        className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-      >
-        <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        <p className="leading-snug">
-          Sandbox office detail — visible only to the test account.
-        </p>
-      </div>
+      {/* Sandbox banner — test account only. */}
+      {salesperson.is_test === true && (
+        <div
+          role="note"
+          className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+        >
+          <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+          <p className="leading-snug">
+            Sandbox office detail — visible only to the test account.
+          </p>
+        </div>
+      )}
 
       {/* ── SNAPSHOT CARD ────────────────────────────────────────────
           Identity + clickable address + visit stats + primary actions.

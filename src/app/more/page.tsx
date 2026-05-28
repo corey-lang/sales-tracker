@@ -100,27 +100,22 @@ export default function MorePage() {
             </Link>
           )}
           {/* Offices entry — links to the unified Map + List
-              experience at /offices. Renamed from "My Offices (Test)"
-              once the surface graduated from "list-only / test
-              banner" to the consolidated Map+List feature; the page
-              still owns the Test pill + sandbox banner internally so
-              there's no need to qualify it here.
-              The link only appears for `is_test === true` salespeople;
-              the server route + the /offices page itself both re-check
-              `requireTestAccount`, so this is UI discoverability only.
-              juice_box_only is excluded by the role check, and
-              `is_test` is a static account property (no live grant)
-              so the cached session value is the authority here. */}
-          {salesperson.is_test === true &&
-            salesperson.role !== "juice_box_only" && (
-              <Link
-                href="/offices"
-                className={buttonVariants({ variant: "outline" })}
-              >
-                <Building2 aria-hidden="true" className="size-4" />
-                Offices
-              </Link>
-            )}
+              experience at /offices. Available to every AE; the
+              page still owns the Test pill + sandbox banner
+              internally for the test account.
+              juice_box_only callers are excluded from the AE office
+              tool surface, matching `requireAeToolAccess` on the
+              server. Role is a static account property so the
+              cached session value is the authority here. */}
+          {salesperson.role !== "juice_box_only" && (
+            <Link
+              href="/offices"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              <Building2 aria-hidden="true" className="size-4" />
+              Offices
+            </Link>
+          )}
           {(() => {
             // Visibility prefers LIVE permissions from
             // /api/me/permissions so grant/revoke takes effect on the
@@ -160,7 +155,7 @@ export default function MorePage() {
                 className={buttonVariants({ variant: "outline" })}
               >
                 <MapPin aria-hidden="true" className="size-4" />
-                Office Imports (Test)
+                Office Imports
               </Link>
             );
           })()}

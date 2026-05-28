@@ -6,10 +6,11 @@ import {
   badRequest,
   handleApiError,
   parseBody,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
   buildOfficeDedupeKey,
+  officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   OFFICE_LIST_LIMIT,
@@ -20,17 +21,23 @@ import {
 
 // GET /api/offices?q=<search>
 //
-// Phase 1B office list — test-only.
+// AE office list.
 //
 // AUDIENCE
-//   `requireTestAccount` — same gate as /api/offices/[id]. Real AEs,
-//   plain admins (no `is_test`), and juice_box_only are all rejected.
-//   The list is per-caller: every row carries `salesperson_id = me.id`
-//   in its predicate so an authorized test AE never sees another
-//   AE's sandbox offices.
+//   `requireAeToolAccess` — same gate as the rest of the office
+//   surface. Every signed-in salesperson except juice_box_only
+//   reaches their own office catalog. The list is per-caller:
+//   every row carries `salesperson_id = me.id` in its predicate so
+//   no AE ever sees another AE's offices.
+//
+// ENVIRONMENT
+//   The slice an AE sees is derived from `officeEnvironmentFor(me)`:
+//   the seeded test account stays in `"test"`, every real AE works
+//   in `"production"`. Test data never leaks into production AEs'
+//   lists and vice-versa.
 //
 // SCOPE
-//   * `environment = "test"` pinned on every read.
+//   * `environment = officeEnvironmentFor(me)` pinned on every read.
 //   * `salesperson_id = me.id` pinned on every read.
 //
 // SEARCH
@@ -39,7 +46,7 @@ import {
 //   small set of address-safe punctuation so a stray `%`, `,`, or
 //   PostgREST operator separator can't break out of the value
 //   position. Empty / all-stripped `q` is treated as "no query" and
-//   the full sandbox is returned.
+//   the caller's full office set is returned.
 //
 // SORT
 //   1. Visited offices first, most-recently-visited at top.
@@ -48,8 +55,8 @@ import {
 //   The DB pre-fetches alphabetically and the JS sort promotes
 //   visited rows to the top. Doing the sort in JS avoids needing a
 //   denormalized `last_visited_at` column on `offices` (which would
-//   need a trigger + backfill migration); for a 2,000-row sandbox
-//   the in-process aggregation is cheap.
+//   need a trigger + backfill migration); for a 2,000-row per-AE
+//   office set the in-process aggregation is cheap.
 //
 // RESPONSE
 //   * `offices`        — up to OFFICE_LIST_LIMIT items (200), sorted.
@@ -59,8 +66,8 @@ import {
 //   * `truncated`      — true when more rows existed than the DB
 //                        query pulled (>= OFFICE_LIST_QUERY_LIMIT).
 //                        Hint to the UI that an even broader sort
-//                        across the full sandbox would need a tighter
-//                        search.
+//                        across the AE's full office set would need
+//                        a tighter search.
 //
 // ERROR HANDLING
 //   Raw Supabase error text never reaches the caller. Failures log
@@ -124,7 +131,8 @@ type VisitTimestampRow = {
 
 export async function GET(req: Request) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
 
     const url = new URL(req.url);
     const rawQ = url.searchParams.get("q");
@@ -136,7 +144,10 @@ export async function GET(req: Request) {
 
     const supabase = getServerSupabase();
 
-    // Base query: this AE's sandbox offices, alphabetical pre-fetch.
+    // Base query: this AE's offices in their slice (production for
+    // real AEs, test for the test account — derived per-caller by
+    // officeEnvironmentFor so test data never bleeds into production
+    // AEs' lists and vice-versa). Alphabetical pre-fetch.
     // Archived offices (`archived_at IS NOT NULL`) are excluded so a
     // soft-deleted row disappears from the List view immediately.
     let officeQuery = supabase
@@ -145,7 +156,7 @@ export async function GET(req: Request) {
         "id, name, street, city, state, zip, next_action, next_action_due_date",
       )
       .eq("salesperson_id", me.id)
-      .eq("environment", "test")
+      .eq("environment", environment)
       .is("archived_at", null)
       .order("name", { ascending: true })
       .limit(OFFICE_LIST_QUERY_LIMIT);
@@ -184,7 +195,7 @@ export async function GET(req: Request) {
         .from(OFFICE_VISITS_TABLE)
         .select("office_id, visited_at")
         .eq("salesperson_id", me.id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         .in("office_id", officeIds);
 
       if (visitsRes.error) {
@@ -284,14 +295,15 @@ export async function GET(req: Request) {
 //   List immediately, just not on the Map until coords appear.
 //
 // OWNERSHIP / SCOPE
-//   `requireTestAccount` gate (same as the rest of the office
+//   `requireAeToolAccess` gate (same as the rest of the office
 //   surface). `salesperson_id` is the caller's id, `environment`
-//   is pinned to "test", `dedupe_key` is derived from name+street+zip
-//   (same builder the import uses) so duplicate detection is
-//   consistent between manual + bulk paths. A duplicate insert
-//   surfaces as a uniform 409 "An office with this name and
-//   address is already in your list." rather than the raw
-//   23505 text.
+//   is derived per-caller via `officeEnvironmentFor` (test for the
+//   test account, production for real AEs). `dedupe_key` is derived
+//   from name+street+zip (same builder the import uses) so
+//   duplicate detection is consistent between manual + bulk paths.
+//   A duplicate insert surfaces as a uniform 409 "An office with
+//   this name and address is already in your list." rather than
+//   the raw 23505 text.
 //
 // IDEMPOTENT
 //   Repeated submits with the same name/address against the same
@@ -352,7 +364,8 @@ const NEW_OFFICE_COLUMNS =
 
 export async function POST(req: Request) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const body = await parseBody(req, CreateOfficeSchema);
     const supabase = getServerSupabase();
 
@@ -378,7 +391,7 @@ export async function POST(req: Request) {
       next_action_due_date: string | null;
       source: string;
       dedupe_key: string;
-      environment: "test";
+      environment: typeof environment;
     } = {
       salesperson_id: me.id,
       name: body.name,
@@ -398,7 +411,7 @@ export async function POST(req: Request) {
       // self-describing.
       source: "Manual add",
       dedupe_key: dedupeKey,
-      environment: "test",
+      environment,
     };
 
     const insertRes = await supabase

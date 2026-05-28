@@ -114,7 +114,7 @@ export async function POST(req: Request) {
     // skips the check entirely so manual tasks pay no extra round
     // trip.
     if (typeof body.office_id === "string") {
-      await assertCallerOwnsOffice(supabase, body.office_id, me.id);
+      await assertCallerOwnsOffice(supabase, body.office_id, me);
     }
 
     const res = await supabase

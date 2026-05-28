@@ -8,10 +8,11 @@ import {
   handleApiError,
   notFound,
   parseBody,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
   buildOfficeDedupeKey,
+  officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   OFFICE_VISITS_DETAIL_LIMIT,
@@ -22,22 +23,28 @@ import {
 
 // /api/offices/[id]
 //
-// Phase 1A office-detail surface — test-only.
+// AE office-detail surface.
 //
 // GET    → aggregate OfficeDetail (office row + visit history + counts).
-// PATCH  → updates persistent `office_notes` / `next_action`.
+// PATCH  → updates office identity (name/street/city/state/zip/lat/lng/
+//          phone/email) and / or persistent memory (office_notes /
+//          next_action / next_action_due_date).
+// DELETE → archives (soft-delete) the office; visit history + ae_tasks
+//          back-links are preserved.
 //
 // AUDIENCE
-//   `requireTestAccount` — the seeded test salesperson row (and admins
-//   who sign in as that account to test). Real AEs, real admins, and
-//   juice_box_only are rejected. Server-trusted identity comes from
-//   the signed session token; we never accept a salesperson_id from
-//   the caller.
+//   `requireAeToolAccess` — every signed-in salesperson except
+//   juice_box_only reaches their own office detail. Server-trusted
+//   identity comes from the signed session token; we never accept a
+//   salesperson_id from the caller.
 //
-// SANDBOX SCOPING
-//   Every read and write pins `environment = "test"`. Wrong-env reads
-//   collapse to a 404 ("Office not found.") so the response never
-//   confirms whether a production office with this id exists.
+// ENVIRONMENT
+//   Every read and write pins `environment = officeEnvironmentFor(me)`
+//   — `"test"` for the test account, `"production"` for real AEs.
+//   Wrong-env reads collapse to a 404 ("Office not found.") so the
+//   response never confirms whether a parallel-env office with this
+//   id exists; this also keeps test data invisible to production
+//   AEs and vice-versa.
 //
 // OWNERSHIP
 //   The caller must own the office: `offices.salesperson_id === me.id`.
@@ -74,7 +81,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const { id } = await params;
 
     const parsed = UuidSchema.safeParse(id);
@@ -101,7 +109,7 @@ export async function GET(
         .from(OFFICES_TABLE)
         .select(OFFICE_COLUMNS)
         .eq("id", id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         .eq("salesperson_id", me.id)
         // Archived offices disappear from every read surface so the
         // soft-delete on the detail page hides the row from List,
@@ -114,7 +122,7 @@ export async function GET(
         .from(OFFICE_VISITS_TABLE)
         .select(VISIT_COLUMNS, { count: "exact" })
         .eq("office_id", id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         .eq("salesperson_id", me.id)
         .order("visited_at", { ascending: false })
         .limit(OFFICE_VISITS_DETAIL_LIMIT),
@@ -274,7 +282,8 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const { id } = await params;
 
     const parsedId = UuidSchema.safeParse(id);
@@ -378,7 +387,7 @@ export async function PATCH(
         .from(OFFICES_TABLE)
         .select("name, street, zip")
         .eq("id", id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         .eq("salesperson_id", me.id)
         .is("archived_at", null)
         .maybeSingle();
@@ -415,7 +424,7 @@ export async function PATCH(
       .from(OFFICES_TABLE)
       .update(update)
       .eq("id", id)
-      .eq("environment", "test")
+      .eq("environment", environment)
       .eq("salesperson_id", me.id)
       // PATCH only succeeds against active rows. An archived office
       // appears as 404 to the caller, same as a wrong-owner or wrong-
@@ -453,7 +462,7 @@ export async function PATCH(
     // Belt-and-braces — the update predicate already enforces these,
     // but a future refactor that loosens the predicate must not silently
     // mutate the wrong row.
-    if (office.environment !== "test" || office.salesperson_id !== me.id) {
+    if (office.environment !== environment || office.salesperson_id !== me.id) {
       console.warn(
         `[office-detail] patch returned wrong row office_id=${id} ae=${me.id} env=${office.environment} owner=${office.salesperson_id}`,
       );
@@ -480,7 +489,7 @@ export async function PATCH(
 // rationale.
 //
 // Owner-only: the UPDATE predicate pins `salesperson_id = me.id` AND
-// `environment = "test"` AND `archived_at IS NULL`. A miss on any of
+// `environment = officeEnvironmentFor(me)` AND `archived_at IS NULL`. A miss on any of
 // those collapses to 404 — the response never reveals which case it
 // was (wrong owner, wrong env, missing, or already archived).
 //
@@ -492,7 +501,7 @@ export async function PATCH(
 //   200  { archived_at: string }
 //   400  invalid uuid
 //   401  no session
-//   403  not the test account / juice_box_only / no `is_test` flag
+//   403  juice_box_only caller (AE office tools not available)
 //   404  office doesn't exist / wrong owner / wrong env / already archived
 //   500  sanitized — raw DB error logged with the `[office-archive]` prefix
 
@@ -501,7 +510,8 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const { id } = await params;
 
     const parsed = UuidSchema.safeParse(id);
@@ -516,7 +526,7 @@ export async function DELETE(
       .from(OFFICES_TABLE)
       .update({ archived_at: archivedAt })
       .eq("id", id)
-      .eq("environment", "test")
+      .eq("environment", environment)
       .eq("salesperson_id", me.id)
       .is("archived_at", null)
       .select("id, archived_at")

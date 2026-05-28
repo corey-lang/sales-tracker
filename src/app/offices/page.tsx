@@ -45,7 +45,7 @@ import {
 // ---------------------------------------------------------------------------
 // /offices — consolidated Map + List office surface.
 //
-// Combines what were two pages (/offices = searchable sandbox list,
+// Combines what were two pages (/offices = searchable office list,
 // /offices/nearby = geo + map) into ONE destination with a top-level
 // view toggle. AEs think of "offices" as a single feature, not two
 // tools — splitting them across URLs made the workflow feel
@@ -53,14 +53,15 @@ import {
 // "I'm Here" tap after that).
 //
 // Layout, top → bottom:
-//   1. Header (Back + Test pill)
-//   2. Sandbox banner
+//   1. Header (Back + Test pill — test account only)
+//   2. Sandbox banner — test account only
 //   3. Title "Offices"
 //   4. View toggle [📍 Map | List] — defaults to Map
 //   5a. (Map) — auto-locate on entry, radius pills, the Leaflet map
 //        with branded pins; pin popups carry Directions / Log Visit /
 //        Open.
-//   5b. (List) — search input, full sandbox list sorted visited-first.
+//   5b. (List) — search input, full per-AE office list sorted
+//        visited-first.
 //   6. BottomNav (kept visible so the office workflow doesn't feel
 //      like a separate mini-app)
 //
@@ -73,10 +74,11 @@ import {
 //   denial / unavailability).
 //
 // ACCESS
-//   Same gate as the prior pages — `is_test === true` salesperson +
-//   not juice_box_only. Server routes (`/api/offices`,
-//   `/api/offices/nearby`, `/api/offices/[id]`) enforce the same
-//   contract independently.
+//   Every AE passes (real AEs operate in environment="production";
+//   the test account operates in environment="test"). juice_box_only
+//   is redirected. Server routes (`/api/offices`,
+//   `/api/offices/nearby`, `/api/offices/[id]`) enforce ownership
+//   (`salesperson_id = me.id`) and per-caller env independently.
 //
 // /offices/nearby
 //   Deprecated URL. A small redirect page at /offices/nearby/page.tsx
@@ -234,9 +236,7 @@ export default function OfficesPage() {
   // ---- Access gate ------------------------------------------------------
   const accessReady = sessionLoaded && permsLoaded;
   const canView =
-    !!salesperson &&
-    salesperson.role !== "juice_box_only" &&
-    salesperson.is_test === true;
+    !!salesperson && salesperson.role !== "juice_box_only";
 
   useEffect(() => {
     if (!accessReady) return;
@@ -552,9 +552,9 @@ export default function OfficesPage() {
   //     `listRefreshKey`) — refetch so the new row appears.
   //
   // Skipping the fetch while on Map view keeps the page lean — no
-  // need to pull the full sandbox until the user actually asks for
-  // it. `cancelled` guards against a stale response landing after
-  // the user types fast.
+  // need to pull the AE's full office set until the user actually
+  // asks for it. `cancelled` guards against a stale response landing
+  // after the user types fast.
   useEffect(() => {
     if (!accessReady || !canView) return;
     if (viewMode !== "list") return;
@@ -623,7 +623,7 @@ export default function OfficesPage() {
       <main
         className={`pwa-safe-top mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 ${BOTTOM_NAV_SPACER}`}
       >
-        {/* Header — Back + Test pill (consistent with other office surfaces). */}
+        {/* Header — Back + Test pill (test account only). */}
         <header className="flex flex-wrap items-center justify-between gap-2">
           <Link
             href="/dashboard"
@@ -632,9 +632,11 @@ export default function OfficesPage() {
             <ArrowLeft aria-hidden="true" className="size-4" />
             Back
           </Link>
-          <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
-            Test
-          </span>
+          {salesperson.is_test === true && (
+            <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 ring-1 ring-inset ring-amber-500/25 dark:text-amber-400">
+              Test
+            </span>
+          )}
         </header>
 
         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -642,9 +644,11 @@ export default function OfficesPage() {
             <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
               Offices
             </h1>
-            <p className="text-xs text-muted-foreground">
-              Sandbox office surface — visible only to the test account.
-            </p>
+            {salesperson.is_test === true && (
+              <p className="text-xs text-muted-foreground">
+                Sandbox office surface — visible only to the test account.
+              </p>
+            )}
           </div>
           {/* Add Office — view-mode-agnostic action that opens the
               manual-add modal. Surfacing it in the header keeps it
@@ -660,23 +664,25 @@ export default function OfficesPage() {
           </Button>
         </div>
 
-        {/* Sandbox banner. */}
-        <div
-          role="note"
-          className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-        >
-          <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-          <p className="leading-snug">
-            Map uses your device location to find offices in your sandbox.
-            Your location stays on your device — only lat/lng + radius
-            are sent to the server.
-          </p>
-        </div>
+        {/* Sandbox banner — test account only. */}
+        {salesperson.is_test === true && (
+          <div
+            role="note"
+            className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          >
+            <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+            <p className="leading-snug">
+              Map uses your device location to find offices in your sandbox.
+              Your location stays on your device — only lat/lng + radius
+              are sent to the server.
+            </p>
+          </div>
+        )}
 
         {/* View toggle — single source of truth for the unified office
             experience. Map default per product direction (AEs think
             geographically). List remains a peer for deep scanning +
-            search across the full sandbox. */}
+            search across the AE's full office set. */}
         <div
           role="radiogroup"
           aria-label="View"
@@ -984,7 +990,7 @@ function LocationBanner({
 }
 
 // ---------------------------------------------------------------------------
-// ListViewSection — searchable full-sandbox list
+// ListViewSection — searchable full per-AE office list
 // ---------------------------------------------------------------------------
 //
 // Mirrors the prior /offices behavior verbatim — same search input,
@@ -1072,7 +1078,7 @@ function ListViewSection({
             <p className="text-sm text-muted-foreground">
               {debouncedQuery.length > 0
                 ? `No offices match "${debouncedQuery}". Try a different search.`
-                : "No offices in your sandbox yet. Import some via Office Imports."}
+                : "No offices yet. Add one or ask an admin to import them via Office Imports."}
             </p>
           </CardContent>
         </Card>

@@ -33,21 +33,20 @@ import {
 //   was loaded and so the future detail page has a real shape to
 //   render against.
 //
-// SANDBOX SCOPING
-//   Both the office read AND the visits read are pinned to
-//   `environment = "test"`. The office import route is currently
-//   hard-coded to write only test rows, but a future production-mode
-//   flip on imports must NOT silently expose production offices
-//   through this surface. The wrong-environment case returns the
-//   same opaque 404 ("Office not found.") as a truly-missing id so
-//   the response doesn't leak whether a production office exists.
+// ENVIRONMENT SCOPING
+//   No env filter. The office id is globally unique and the caller
+//   gate (`requireOfficeImporter`) is the admin protection layer —
+//   admins / office-importers can inspect any office they imported,
+//   regardless of slice. AE-facing read surfaces (/api/offices/*)
+//   are pinned to `officeEnvironmentFor(me)` so cross-env exposure
+//   never reaches an AE.
 //
 // SHAPE
 //   200  { detail: OfficeDetail }
 //   400  invalid uuid
 //   401  no session token
 //   403  caller is missing the office-import permission
-//   404  office id doesn't exist in the test environment
+//   404  office id doesn't exist
 //
 // CAPPING
 //   The visits array is capped at OFFICE_VISITS_DETAIL_LIMIT (200) and
@@ -92,23 +91,21 @@ export async function GET(
     const supabase = getServerSupabase();
 
     // Two reads in parallel: office row + visit list w/ exact count.
-    // Both reads are pinned to `environment = "test"` — see SANDBOX
-    // SCOPING in the header. `count: "exact"` makes Supabase issue a
-    // Postgres `count(*) over()`, returning the true total alongside
-    // the page slice — so a visit_count of 27 + a visits.length of 27
-    // is the same fast call as a count of 412 + a visits.length of 200.
+    // No env filter — admin-only inspection of any office id.
+    // `count: "exact"` makes Supabase issue a Postgres `count(*) over()`,
+    // returning the true total alongside the page slice — so a
+    // visit_count of 27 + a visits.length of 27 is the same fast call
+    // as a count of 412 + a visits.length of 200.
     const [officeRes, visitsRes] = await Promise.all([
       supabase
         .from(OFFICES_TABLE)
         .select(OFFICE_COLUMNS)
         .eq("id", id)
-        .eq("environment", "test")
         .maybeSingle(),
       supabase
         .from(OFFICE_VISITS_TABLE)
         .select(VISIT_COLUMNS, { count: "exact" })
         .eq("office_id", id)
-        .eq("environment", "test")
         .order("visited_at", { ascending: false })
         .limit(OFFICE_VISITS_DETAIL_LIMIT),
     ]);
@@ -124,9 +121,6 @@ export async function GET(
       throw new ApiError(500, "Could not load office detail.");
     }
     if (!officeRes.data) {
-      // Real-not-found AND wrong-environment collapse here — the
-      // response never confirms whether a production office with this
-      // id exists.
       throw notFound("Office not found.");
     }
     if (visitsRes.error) {

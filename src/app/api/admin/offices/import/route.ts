@@ -12,6 +12,7 @@ import {
   OFFICES_TABLE,
   OFFICE_IMPORT_BATCHES_TABLE,
   buildOfficeDedupeKey,
+  officeEnvironmentFor,
   type OfficeEnvironment,
 } from "@/lib/offices";
 
@@ -50,11 +51,16 @@ import {
 //   `updated_at` (true on freshly-inserted rows; the BEFORE UPDATE
 //   trigger bumps updated_at on every UPDATE so they diverge there).
 //
-// SANDBOX GUARD
-//   This first iteration is sandbox-only. Only `environment === "test"`
-//   is accepted; an explicit `"production"` value returns 400. The
-//   schema's CHECK constraint already accepts both values so this gate
-//   can be lifted in a one-line route change when the feature ships.
+// ENVIRONMENT
+//   The environment slice each row lands in is derived per-row from
+//   the resolved AE via `officeEnvironmentFor`: the test account →
+//   `"test"`, every other AE → `"production"`. The request body does
+//   NOT carry an `environment` flag — the importer can't accidentally
+//   route real-AE rows into the test slice. The batch row itself
+//   takes the default AE's env (if a default was supplied) else
+//   `"production"`; a mixed-AE batch with no default lands the batch
+//   provenance row in `"production"` even when individual rows split
+//   across both slices (rare — the common case is a single-AE batch).
 //
 // ACCESS
 //   requireOfficeImporter(req) — admins pass automatically; anyone
@@ -130,12 +136,6 @@ type ParsedRow = z.infer<typeof RawRowSchema>;
 const RequestSchema = z.object({
   /** Free-form label stored on the import batch (e.g. "CRM-2026-Q1"). */
   source: NON_EMPTY(120),
-  /**
-   * Sandbox flag. The schema CHECK accepts "test" | "production", but
-   * this route enforces "test" only for the MVP (see SANDBOX GUARD).
-   * Default keeps casual callers in the sandbox without thinking about it.
-   */
-  environment: z.enum(["test", "production"]).default("test"),
   /**
    * Batch-level AE fallback. When a CSV row carries no per-row AE
    * (the common Badger case — Badger exports MY offices), the
@@ -220,11 +220,17 @@ function isMissingBadgerColumnError(
   return BADGER_MIGRATION_COLUMNS.some((c) => msg.includes(c));
 }
 
-/** Salesperson lookup result — mapped to id. Null = not found. */
+/** Resolved AE record carried through the upsert path. `is_test` is
+ *  read from the `salespeople` row at resolve time (never trusted from
+ *  the wire) and drives `officeEnvironmentFor(resolved)` for each row's
+ *  env slice. */
+type ResolvedAe = { id: string; is_test: boolean };
+
+/** Salesperson lookup result — mapped to {id, is_test}. Null = not found. */
 type SalespersonResolver = {
-  byId: Map<string, string>;
+  byId: Map<string, ResolvedAe>;
   /** Keyed by lowercased first_name; CITEXT unique → one row per name. */
-  byFirstName: Map<string, string>;
+  byFirstName: Map<string, ResolvedAe>;
 };
 
 /**
@@ -251,13 +257,14 @@ async function resolveSalespeople(
   if (defaults.id) wantedIds.add(defaults.id);
   if (defaults.firstName) wantedNames.add(defaults.firstName);
 
-  const byId = new Map<string, string>();
-  const byFirstName = new Map<string, string>();
+  const byId = new Map<string, ResolvedAe>();
+  const byFirstName = new Map<string, ResolvedAe>();
 
   // Two parallel reads. Service-role bypasses RLS so we get the full set.
   // We don't filter by role here — the import route can target any AE
   // (including the Test account). The admin gate already restricts who
-  // can call this route.
+  // can call this route. `is_test` is selected so the upsert path can
+  // derive each row's env slice via `officeEnvironmentFor(resolved)`.
   const idArr = Array.from(wantedIds);
   const nameArr = Array.from(wantedNames);
 
@@ -265,13 +272,13 @@ async function resolveSalespeople(
     idArr.length > 0
       ? supabase
           .from("salespeople")
-          .select("id, first_name")
+          .select("id, first_name, is_test")
           .in("id", idArr)
       : Promise.resolve({ data: [], error: null } as const),
     nameArr.length > 0
       ? supabase
           .from("salespeople")
-          .select("id, first_name")
+          .select("id, first_name, is_test")
           .in("first_name", nameArr)
       : Promise.resolve({ data: [], error: null } as const),
   ]);
@@ -303,29 +310,35 @@ async function resolveSalespeople(
   for (const row of (idRes.data ?? []) as Array<{
     id: string;
     first_name: string;
+    is_test: boolean | null;
   }>) {
-    byId.set(row.id, row.id);
+    byId.set(row.id, { id: row.id, is_test: row.is_test === true });
   }
   for (const row of (nameRes.data ?? []) as Array<{
     id: string;
     first_name: string;
+    is_test: boolean | null;
   }>) {
     // CITEXT unique on first_name → at most one row per name. Store the
     // canonical first_name lowercased so case-mismatch lookups still hit.
-    byFirstName.set(row.first_name.toLowerCase(), row.id);
+    byFirstName.set(row.first_name.toLowerCase(), {
+      id: row.id,
+      is_test: row.is_test === true,
+    });
   }
 
   return { byId, byFirstName };
 }
 
-/** Returns the resolved salesperson_id for a row, or null if not found.
+/** Returns the resolved AE record for a row, or null if not found.
  *  Falls back to the batch-level defaults when the row carries neither
- *  its own salesperson_id nor salesperson_first_name. */
+ *  its own salesperson_id nor salesperson_first_name. The returned
+ *  `is_test` flag drives `officeEnvironmentFor` on the upsert payload. */
 function resolveRowSalesperson(
   row: ParsedRow,
   resolver: SalespersonResolver,
   defaults: { id?: string | null; firstName?: string | null },
-): string | null {
+): ResolvedAe | null {
   if (row.salesperson_id) {
     return resolver.byId.get(row.salesperson_id) ?? null;
   }
@@ -351,14 +364,6 @@ export async function POST(req: Request) {
   try {
     const me = await requireOfficeImporter(req);
     const body = await parseBody(req, RequestSchema);
-
-    // SANDBOX GUARD — see header comment.
-    if (body.environment !== "test") {
-      throw badRequest(
-        "Office import is sandbox-only for now — only `environment: \"test\"` is accepted.",
-      );
-    }
-    const environment: OfficeEnvironment = "test";
 
     // Validate each row up front so the per-row reporting is structural
     // (not a mix of "couldn't parse" + "couldn't insert"). The
@@ -398,23 +403,6 @@ export async function POST(req: Request) {
       parsed.push({ idx: i + 1, row: r.data });
     }
 
-    if (parsed.length === 0) {
-      // Nothing to insert — return early without creating an empty batch.
-      return Response.json(
-        {
-          batch_id: null,
-          source: body.source,
-          environment,
-          created: 0,
-          updated: 0,
-          total_rows: body.rows.length,
-          skipped,
-          errors,
-        },
-        { status: 200 },
-      );
-    }
-
     const supabase = getServerSupabase();
 
     const defaults = {
@@ -423,7 +411,10 @@ export async function POST(req: Request) {
     };
 
     // Resolve every AE referenced by the payload + the batch-level
-    // default in one shot.
+    // default in one shot. Run before the early-return so we can pin
+    // a correct `batch_environment` on the response even when every
+    // row failed Zod (no rows to upsert, but the default-AE pre-flight
+    // still tells us where the import *would* have landed).
     const resolver = await resolveSalespeople(
       supabase,
       parsed.map((p) => p.row),
@@ -434,17 +425,46 @@ export async function POST(req: Request) {
     // when it doesn't resolve — every row that relied on the default
     // would individually skip with the same message, which is noisy
     // and misleading (the problem is the user's input, not the rows).
-    if (defaults.id && !resolver.byId.get(defaults.id)) {
+    const defaultResolved = defaults.id
+      ? resolver.byId.get(defaults.id) ?? null
+      : defaults.firstName
+        ? resolver.byFirstName.get(defaults.firstName.toLowerCase()) ?? null
+        : null;
+    if (defaults.id && !defaultResolved) {
       throw badRequest(
         `Default salesperson id ${defaults.id} not found. Pick a different default AE.`,
       );
     }
-    if (
-      defaults.firstName &&
-      !resolver.byFirstName.get(defaults.firstName.toLowerCase())
-    ) {
+    if (defaults.firstName && !defaultResolved) {
       throw badRequest(
         `Default salesperson "${defaults.firstName}" not found. Pick a different default AE.`,
+      );
+    }
+
+    // Env slice for the BATCH row. Per-row offices derive their own
+    // env from their resolved AE (see the upsert loop below); the
+    // batch provenance row takes the default AE's slice when a default
+    // was supplied, else "production" (the post-rollout common case).
+    // A mixed-AE batch with no default lands the batch row in
+    // "production" — rare in practice (admins usually pick a default).
+    const batchEnvironment: OfficeEnvironment = defaultResolved
+      ? officeEnvironmentFor(defaultResolved)
+      : "production";
+
+    if (parsed.length === 0) {
+      // Nothing to insert — return early without creating an empty batch.
+      return Response.json(
+        {
+          batch_id: null,
+          source: body.source,
+          environment: batchEnvironment,
+          created: 0,
+          updated: 0,
+          total_rows: body.rows.length,
+          skipped,
+          errors,
+        },
+        { status: 200 },
       );
     }
 
@@ -455,7 +475,7 @@ export async function POST(req: Request) {
       .insert({
         source: body.source,
         uploaded_by: me.id,
-        environment,
+        environment: batchEnvironment,
         row_count: 0,
       })
       .select("id")
@@ -466,7 +486,7 @@ export async function POST(req: Request) {
       // Raw provider error logged server-side so DB outages or schema
       // drift are debuggable; caller sees only the sanitized message.
       console.warn(
-        `[offices-import] batch create failed source=${body.source} env=${environment} code=${batchRes.error?.code ?? "?"} msg=${batchRes.error?.message ?? "no data"}`,
+        `[offices-import] batch create failed source=${body.source} env=${batchEnvironment} code=${batchRes.error?.code ?? "?"} msg=${batchRes.error?.message ?? "no data"}`,
       );
       throw new ApiError(
         500,
@@ -517,8 +537,8 @@ export async function POST(req: Request) {
       { idx: number; payload: UpsertPayload; notes: SeedNotes }
     >();
     for (const { idx, row } of parsed) {
-      const salespersonId = resolveRowSalesperson(row, resolver, defaults);
-      if (!salespersonId) {
+      const resolved = resolveRowSalesperson(row, resolver, defaults);
+      if (!resolved) {
         skipped.push({
           row: idx,
           reason: row.salesperson_id
@@ -530,15 +550,20 @@ export async function POST(req: Request) {
         continue;
       }
 
+      // Env slice is derived from the resolved AE — never from the
+      // request body. Real AEs land in "production", the test account
+      // in "test"; rows can't cross slices.
+      const rowEnvironment = officeEnvironmentFor(resolved);
+
       const dedupeKey = buildOfficeDedupeKey({
         name: row.name,
         street: row.street,
         zip: row.zip,
       });
 
-      const key = `${salespersonId}|${dedupeKey}`;
+      const key = `${resolved.id}|${rowEnvironment}|${dedupeKey}`;
       const payload: UpsertPayload = {
-        salesperson_id: salespersonId,
+        salesperson_id: resolved.id,
         import_batch_id: batchId,
         name: row.name,
         street: row.street,
@@ -552,7 +577,7 @@ export async function POST(req: Request) {
         longitude: row.longitude ?? null,
         source: body.source,
         dedupe_key: dedupeKey,
-        environment,
+        environment: rowEnvironment,
         office_phone: row.office_phone,
         office_email: row.office_email,
         external_badger_id: row.external_badger_id,
@@ -742,7 +767,7 @@ export async function POST(req: Request) {
       {
         batch_id: batchId,
         source: body.source,
-        environment,
+        environment: batchEnvironment,
         created,
         updated,
         total_rows: body.rows.length,

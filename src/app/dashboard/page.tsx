@@ -179,34 +179,29 @@ export default function DashboardPage() {
         {/* Offices entry point — sits directly under the weekly
             momentum hero so it's the first action the AE sees once
             they've scanned their numbers for the day. The Offices
-            surface now consolidates the old Map + List views under
-            a single `/offices` URL; the destination defaults to
-            the Map view with auto-locate so the AE lands ready to
-            see what's around them.
-            Gated on `is_test === true` because the /offices surface
-            is itself test-account-only today; showing the card to
-            non-test AEs would result in a tap → redirect dead-end.
-            Once the office surface graduates to all AEs, the gate
-            can drop. */}
-        {salesperson.is_test === true && (
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle>📍 Offices</CardTitle>
-              <CardDescription>
-                See what&apos;s around you on the map, search your full
-                office list, get directions, and log visits.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Link
-                href="/offices"
-                className={buttonVariants({ size: "sm" })}
-              >
-                Open Offices
-              </Link>
-            </CardContent>
-          </Card>
-        )}
+            surface consolidates Map + List under a single `/offices`
+            URL; the destination defaults to the Map view with auto-
+            locate so the AE lands ready to see what's around them.
+            Available to every AE — juice_box_only users were already
+            redirected away above so this card is gated by location
+            in the layout, not an explicit role check here. */}
+        <Card size="sm">
+          <CardHeader>
+            <CardTitle>📍 Offices</CardTitle>
+            <CardDescription>
+              See what&apos;s around you on the map, search your full
+              office list, get directions, and log visits.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href="/offices"
+              className={buttonVariants({ size: "sm" })}
+            >
+              Open Offices
+            </Link>
+          </CardContent>
+        </Card>
 
         <MessagesCard salespersonId={salesperson.id} />
 

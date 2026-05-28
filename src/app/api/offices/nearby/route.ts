@@ -5,11 +5,12 @@ import {
   ApiError,
   badRequest,
   handleApiError,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
   NEARBY_RADIUS_OPTIONS,
   NEARBY_RESULT_LIMIT,
+  officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
   type NearbyOfficeItem,
@@ -21,8 +22,9 @@ import { boundingBox, haversineMiles } from "@/lib/geo";
 //
 // "Find me offices within R miles of (lat, lng)" — the data half of
 // the /offices/nearby page (Map + List). Same audience + visibility
-// model as the rest of the office surface: requireTestAccount +
-// per-AE scoping + environment=test.
+// model as the rest of the office surface: requireAeToolAccess +
+// per-AE scoping + `environment = officeEnvironmentFor(me)`
+// (production for real AEs, test for the test account).
 //
 // PIPELINE
 //   1. Bounding-box pre-filter in Postgres so we only pull candidate
@@ -44,8 +46,8 @@ import { boundingBox, haversineMiles } from "@/lib/geo";
 // DENSE-TERRITORY CORRECTNESS
 //   Older versions of this route applied a single
 //   `.limit(BBOX_CANDIDATE_LIMIT)` against the bounding-box query
-//   to bound response time. That was UNSAFE for AEs whose sandbox
-//   has thousands of offices inside the bbox: PostgREST returns
+//   to bound response time. That was UNSAFE for AEs with thousands
+//   of offices inside the bbox: PostgREST returns
 //   rows in implementation-dependent order, so the closest 100
 //   could land outside the first 1,000 rows and be silently
 //   excluded from the response.
@@ -90,7 +92,7 @@ const PAGE_SIZE = 1000;
 
 /** Defensive ceiling on the total bounding-box candidate set. Set far
  *  above any realistic per-AE workload (the densest team-known
- *  sandbox is a few thousand offices; this is ~10x that). If a
+ *  per-AE office set is a few thousand; this is ~10x that). If a
  *  fetch ever exceeds this cap, the result is logged as a server-
  *  side anomaly and we return what we have — but unlike the prior
  *  `.limit(1000)` we have NOT silently dropped closer offices in
@@ -121,7 +123,8 @@ type OfficeCandidateRow = {
 
 export async function GET(req: Request) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
 
     const url = new URL(req.url);
     // Number("") === 0, which would silently look like a valid lat
@@ -173,7 +176,7 @@ export async function GET(req: Request) {
           "id, name, street, city, state, zip, latitude, longitude, next_action, next_action_due_date",
         )
         .eq("salesperson_id", me.id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         // Hide archived offices from the map. Same filter as the
         // List + detail routes; see offices_archived_at.sql for
         // why archive (not hard delete) is the right model.
@@ -240,7 +243,7 @@ export async function GET(req: Request) {
         .from(OFFICE_VISITS_TABLE)
         .select("office_id, visited_at")
         .eq("salesperson_id", me.id)
-        .eq("environment", "test")
+        .eq("environment", environment)
         .in("office_id", ids);
       if (visitsRes.error) {
         console.warn(

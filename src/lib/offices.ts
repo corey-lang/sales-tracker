@@ -11,17 +11,17 @@ export const OFFICE_VISITS_TABLE = "office_visits" as const;
 export const OFFICE_IMPORT_BATCHES_TABLE = "office_import_batches" as const;
 
 /**
- * Sandbox flag stored on every offices / office_visits / batch row.
+ * Environment slice stored on every offices / office_visits / batch row.
  *
- * Why a string column rather than a boolean: the same dataset will
- * eventually carry both kinds of records, and a self-documenting tag
- * keeps query plans + Vercel logs grep-friendly. The CHECK constraint
- * in the migration pins this to exactly two values.
+ * Why a string column rather than a boolean: the same dataset carries
+ * both kinds of records, and a self-documenting tag keeps query plans
+ * + Vercel logs grep-friendly. The CHECK constraint in the migration
+ * pins this to exactly two values.
  *
- * For the MVP, the import route hard-rejects anything but `"test"` so
- * a sandbox-only rollout is enforced server-side. The `"production"`
- * value already exists on the schema's CHECK so flipping live is a
- * one-line route change, not a migration.
+ * Every read/write goes through `officeEnvironmentFor(caller)` below
+ * so the slice is derived from identity, never trusted from the wire:
+ * real AEs land in `"production"`, the test account stays in `"test"`.
+ * Each slice is invisible to the other.
  */
 export const OFFICE_ENVIRONMENTS = ["test", "production"] as const;
 export type OfficeEnvironment = (typeof OFFICE_ENVIRONMENTS)[number];
@@ -30,6 +30,30 @@ export function isOfficeEnvironment(
   value: unknown,
 ): value is OfficeEnvironment {
   return value === "test" || value === "production";
+}
+
+/**
+ * Returns the office-table `environment` slice the calling salesperson
+ * operates in.
+ *
+ *   * Test account (`is_test === true`) → `"test"`. Keeps the test
+ *     data + workflow they already had during the sandbox phase
+ *     untouched after production rollout.
+ *   * Every other AE → `"production"`. Real AE office routes
+ *     read/write the production slice; their data is invisible to
+ *     the test account and vice-versa.
+ *
+ * Server routes call this on the authenticated caller; the import
+ * route calls it on each resolved AE (so a batch can land rows in
+ * `"test"` or `"production"` per-row based on the AE the row
+ * targets). Centralizing the rule here keeps the "which slice"
+ * decision out of the routes themselves — they just say
+ * `officeEnvironmentFor(me)` and trust it.
+ */
+export function officeEnvironmentFor(salesperson: {
+  is_test: boolean;
+}): OfficeEnvironment {
+  return salesperson.is_test ? "test" : "production";
 }
 
 /**
@@ -148,7 +172,7 @@ export type OfficeDetail = {
 export const OFFICE_VISITS_DETAIL_LIMIT = 200;
 
 /**
- * One row in the test AE's office list (Phase 1B).
+ * One row in the calling AE's office list.
  *
  * Trimmed shape of `OfficeRow` — only the fields the list UI renders,
  * plus the visit-derived fields that decide row sort order.
@@ -160,9 +184,9 @@ export const OFFICE_VISITS_DETAIL_LIMIT = 200;
  *     office. Surfaced inline so the list can show a count badge
  *     without a follow-up fetch.
  *
- * Both visit fields are scoped to the calling AE (and environment="test"),
- * not the office globally — the list is a personal "what have I done"
- * read.
+ * Both visit fields are scoped to the calling AE (and the env slice
+ * returned by `officeEnvironmentFor(me)`), not the office globally —
+ * the list is a personal "what have I done" read.
  */
 export type OfficeListItem = {
   id: string;
@@ -234,10 +258,10 @@ export const OFFICE_LIST_LIMIT = 200;
 /**
  * Pre-sort cap on rows pulled from `offices` before the JS sort runs.
  * Larger than OFFICE_LIST_LIMIT so the top-200 returned to the UI is
- * picked from a representative sample of the AE's full sandbox, not
- * just whichever 200 happened to come back alphabetically. For a
- * 2,000-row test sandbox this returns the full set; for larger sets
- * the alphabetical DB-side order is good enough as a pre-filter.
+ * picked from a representative sample of the AE's full office set,
+ * not just whichever 200 happened to come back alphabetically. For a
+ * 2,000-row per-AE office set this returns the full set; for larger
+ * sets the alphabetical DB-side order is good enough as a pre-filter.
  */
 export const OFFICE_LIST_QUERY_LIMIT = 2_000;
 

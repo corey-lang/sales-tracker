@@ -1,14 +1,15 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { ApiError, badRequest } from "@/lib/server/auth";
 import type { AeTask } from "@/lib/ae-tasks";
+import { officeEnvironmentFor } from "@/lib/offices";
 
 // Server-only helpers for the /api/tasks routes.
 //
 // Keeps the "look up office names for tasks with an office_id" pass
 // in one place so the GET / POST / PATCH routes can share it. Tasks
 // with no office_id are passed through with office_name=null; tasks
-// whose office_id no longer resolves (deleted office, sandbox
-// pruning) also get null — the UI degrades to "From office: (no
+// whose office_id no longer resolves (deleted office, archived,
+// other env) also get null — the UI degrades to "From office: (no
 // longer available)" rather than rendering a broken link.
 
 /** Shape returned by the raw `ae_tasks` SELECT in the route handlers.
@@ -116,11 +117,12 @@ export function isOfficeLinkForeignKeyError(
  * Validity predicate mirrors `/api/offices/[id]`:
  *   * office row exists,
  *   * its `salesperson_id` equals the caller,
- *   * its `environment` is `"test"`.
+ *   * its `environment` equals `officeEnvironmentFor(caller)` — real
+ *     AEs operate in `"production"`, the test account in `"test"`.
  *
- * All three branches collapse to a uniform 400 ("Office link is
- * invalid or no longer available.") so the response never confirms
- * whether a production or another AE's office sits at that id.
+ * All branches collapse to a uniform 400 ("Office link is invalid or
+ * no longer available.") so the response never confirms whether a
+ * cross-env or another AE's office sits at that id.
  *
  * Distinguishes between:
  *   * Provider error (connection blip, etc.) → log + 500 with a
@@ -135,14 +137,15 @@ export function isOfficeLinkForeignKeyError(
 export async function assertCallerOwnsOffice(
   supabase: ReturnType<typeof getServerSupabase>,
   officeId: string,
-  callerId: string,
+  caller: { id: string; is_test: boolean },
 ): Promise<void> {
+  const environment = officeEnvironmentFor(caller);
   const res = await supabase
     .from("offices")
     .select("id")
     .eq("id", officeId)
-    .eq("salesperson_id", callerId)
-    .eq("environment", "test")
+    .eq("salesperson_id", caller.id)
+    .eq("environment", environment)
     // Archived offices can't be linked to new tasks — same uniform
     // 400 as a not-found / wrong-owner miss.
     .is("archived_at", null)
@@ -150,7 +153,7 @@ export async function assertCallerOwnsOffice(
 
   if (res.error) {
     console.warn(
-      `[ae-tasks] office link verify failed office_id=${officeId} caller=${callerId} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+      `[ae-tasks] office link verify failed office_id=${officeId} caller=${caller.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
     );
     throw new ApiError(500, "Could not verify office link.");
   }

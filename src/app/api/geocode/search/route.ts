@@ -4,7 +4,7 @@ import {
   ApiError,
   badRequest,
   handleApiError,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
   GEOCODE_MAX_RESULTS,
@@ -43,10 +43,11 @@ import {
 //     client can fall back to the manual-address path.
 //
 // AUDIENCE
-//   `requireTestAccount` — same gate as the rest of the office
+//   `requireAeToolAccess` — same gate as the rest of the office
 //   surface. The autocomplete is only reachable from the Add Office
-//   modal (test-account only), so the gate keeps the proxy from
+//   modal (AE office tools), so the gate keeps the proxy from
 //   being a generic anonymous service abused by other clients.
+//   juice_box_only callers are rejected outright.
 //
 // MISSING KEY HANDLING
 //   When `GEOAPIFY_API_KEY` is unset (forgot to set the env in a
@@ -165,7 +166,7 @@ function normalizeResult(feature: GeoapifyFeature): GeocodeResult | null {
 
 export async function GET(req: Request) {
   try {
-    await requireTestAccount(req);
+    await requireAeToolAccess(req);
 
     const url = new URL(req.url);
     const parsed = QuerySchema.safeParse({

@@ -70,7 +70,7 @@ export async function PATCH(
     // null (clear the link) and omission (preserve the link) both
     // skip the check; only a caller-supplied UUID needs verification.
     if (typeof body.office_id === "string") {
-      await assertCallerOwnsOffice(supabase, body.office_id, me.id);
+      await assertCallerOwnsOffice(supabase, body.office_id, me);
     }
 
     // Only write fields the request actually included. `undefined` means

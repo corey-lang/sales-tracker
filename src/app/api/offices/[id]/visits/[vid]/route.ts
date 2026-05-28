@@ -7,30 +7,32 @@ import {
   handleApiError,
   notFound,
   parseBody,
-  requireTestAccount,
+  requireAeToolAccess,
 } from "@/lib/server/auth";
 import {
+  officeEnvironmentFor,
   OFFICE_VISITS_TABLE,
   type OfficeVisitRow,
 } from "@/lib/offices";
 
 // PATCH /api/offices/[id]/visits/[vid]
 //
-// Phase 1A — test-only visit edit.
+// AE visit edit.
 //
-// Lets the calling test AE correct the `visited_at` timestamp and / or
+// Lets the calling AE correct the `visited_at` timestamp and / or
 // the `note` on a visit they previously logged. The common case is
 // "I logged this visit when I got home that night; let me back-date
 // it to when I actually walked in" or "I forgot to write what
 // happened — add a note."
 //
 // AUDIENCE / IDENTITY
-//   `requireTestAccount` — same gate as POST. Ownership is enforced
+//   `requireAeToolAccess` — same gate as POST. Ownership is enforced
 //   by the UPDATE predicate: the row must match `id = :vid`,
 //   `office_id = :officeId`, `salesperson_id = me.id`,
-//   `environment = 'test'`. A miss on any of these collapses to a
-//   404 so the response never leaks whether a production visit, a
-//   teammate's visit, or a no-longer-existent visit lives at that id.
+//   `environment = officeEnvironmentFor(me)`. A miss on any of these
+//   collapses to a 404 so the response never leaks whether a cross-env
+//   visit, a teammate's visit, or a no-longer-existent visit lives at
+//   that id.
 //
 // FIELDS
 //   * `visited_at` — optional ISO 8601 timestamp. Range-checked the
@@ -46,7 +48,7 @@ import {
 //   200  { visit: OfficeVisitRow }
 //   400  invalid uuid / body / out-of-range visited_at
 //   401  no session
-//   403  not the test account / juice_box_only / no `is_test` flag
+//   403  juice_box_only caller (AE office tools not available)
 //   404  visit doesn't exist, wrong office, wrong env, wrong owner
 //
 // ERRORS
@@ -92,7 +94,8 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string; vid: string }> },
 ) {
   try {
-    const me = await requireTestAccount(req);
+    const me = await requireAeToolAccess(req);
+    const environment = officeEnvironmentFor(me);
     const { id: officeId, vid } = await params;
 
     if (!UuidSchema.safeParse(officeId).success) {
@@ -148,7 +151,7 @@ export async function PATCH(
       .update(update)
       .eq("id", vid)
       .eq("office_id", officeId)
-      .eq("environment", "test")
+      .eq("environment", environment)
       .eq("salesperson_id", me.id)
       .select(VISIT_COLUMNS)
       .maybeSingle();
