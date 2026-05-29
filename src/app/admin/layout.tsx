@@ -53,6 +53,7 @@ const ADMIN_NAV: NavItem[] = [
     items: [
       { href: "/admin/business-cards", label: "Business Cards" },
       { href: "/office-imports", label: "Office Imports" },
+      { href: "/admin/cogent", label: "Cogent Orders" },
     ],
   },
 ];
