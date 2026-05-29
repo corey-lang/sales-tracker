@@ -23,7 +23,7 @@ import { Label } from "@/components/ui/label";
 type LoginPerson = {
   id: string;
   first_name: string;
-  is_admin: boolean;
+  role: string;
 };
 
 /** Shape of a /api/auth/login response (success or error). */
@@ -55,11 +55,14 @@ export default function Home() {
       router.replace(landingPathFor(salesperson));
       return;
     }
-    // Bulk fetch deliberately excludes admin_pin — we only need id/name/is_admin
+    // Bulk fetch deliberately excludes admin_pin — we only need id/name/role
     // here to power autocomplete + decide whether to show the PIN field.
+    // role (not the legacy is_admin column) drives the PIN gate so the form
+    // agrees with the server's `requireAdmin` and `/api/auth/login` PIN
+    // check, which also key on role === 'admin'.
     supabase
       .from("salespeople")
-      .select("id, first_name, is_admin")
+      .select("id, first_name, role")
       .order("first_name", { ascending: true })
       .then(({ data, error }) => {
         if (error) {
@@ -79,8 +82,11 @@ export default function Home() {
     return people.find((p) => p.first_name.toLowerCase() === lower) ?? null;
   }, [people, typed]);
 
-  // Admins additionally enter a PIN.
-  const matchedAdmin = selectedPerson?.is_admin ? selectedPerson : null;
+  // Admins additionally enter a PIN. role is the single source of truth for
+  // admin status — the legacy is_admin column is not consulted here so a
+  // drifted row (is_admin=true, role='ae') doesn't display a PIN prompt
+  // the server-side gate wouldn't actually validate.
+  const matchedAdmin = selectedPerson?.role === "admin" ? selectedPerson : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

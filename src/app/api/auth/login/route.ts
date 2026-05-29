@@ -61,6 +61,13 @@ export async function POST(req: Request) {
       can_import_offices: boolean | null;
     };
     const role: UserRole = isUserRole(row.role) ? row.role : "ae";
+    // Admin status is `role === "admin"` — single source of truth shared
+    // with server-side requireAdmin and with the client's isAdminUser
+    // helper. The legacy `is_admin` boolean is still returned in the
+    // payload (so display surfaces that read `salesperson.is_admin`
+    // continue to work) but it's derived from role here rather than read
+    // from its own column, so a drifted DB row can't produce a
+    // partial-admin client session.
     const isAdmin = role === "admin";
 
     // Admins must present the correct PIN. The PIN is compared here and never
