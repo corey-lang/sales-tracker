@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { ApiError, badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import { getOrdersSummary } from "@/lib/server/cogent";
+import { todayInAppTimezone } from "@/lib/dates";
 
 // GET /api/cogent/orders-summary
 //
@@ -44,9 +45,17 @@ export async function GET(req: Request) {
       throw badRequest("startDate and endDate must be yyyy-MM-dd.");
     }
 
-    const now = new Date();
-    const today = format(now, "yyyy-MM-dd");
-    const startDate = parsed.data.startDate ?? format(startOfMonth(now), "yyyy-MM-dd");
+    // Anchor "today" and the month start to the app's business timezone
+    // (Denver), NOT server-local time. On Vercel the function runs in UTC, so
+    // `new Date()` after ~6pm Denver is already "tomorrow" in UTC — which
+    // would shift the today/MTD window a day forward and miss the day's
+    // orders. todayInAppTimezone() gives a Date whose calendar fields are the
+    // current Denver day. (endDate is inclusive here; the Cogent library adds
+    // the day needed for Cogent's exclusive end internally.)
+    const todayAnchor = todayInAppTimezone();
+    const today = format(todayAnchor, "yyyy-MM-dd");
+    const startDate =
+      parsed.data.startDate ?? format(startOfMonth(todayAnchor), "yyyy-MM-dd");
     const endDate = parsed.data.endDate ?? today;
 
     if (startDate > endDate) {

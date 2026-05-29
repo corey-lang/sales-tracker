@@ -22,6 +22,8 @@
  *   receive already counts toward AE production.
  */
 
+import { addDays, format, parseISO } from "date-fns";
+
 import { getServerSupabase } from "@/lib/supabase/server";
 
 export const COGENT_ORDERS_REPORT_URL =
@@ -238,6 +240,25 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/**
+ * Cogent's orders-report `endDate` is EXCLUSIVE — the window it counts is the
+ * half-open interval [startDate, endDate). Verified empirically:
+ *   [2026-05-29, 2026-05-29) → 0 orders   (empty interval)
+ *   [2026-05-29, 2026-05-30) → 1 order    (the 29th's order)
+ *   [2026-05-01, 2026-05-29) → 960        (excludes the 29th)
+ *   [2026-05-01, 2026-05-30) → 961        (includes the 29th)
+ *
+ * So a same-day [d, d] query always returns 0, and any [start, today] window
+ * silently drops *today's* orders. Every caller passes an INCLUSIVE end date
+ * (what a human means by "through today"); this converts it to the exclusive
+ * end Cogent wants by adding one calendar day. Single source of truth so no
+ * caller has to remember the off-by-one. */
+function exclusiveEnd(inclusiveEndYyyyMmDd: string): string {
+  // Parse as a plain calendar day and add one. format() round-trips it back to
+  // yyyy-MM-dd; no timezone math (these are date-only tokens).
+  return format(addDays(parseISO(inclusiveEndYyyyMmDd), 1), "yyyy-MM-dd");
+}
+
 // ---------------------------------------------------------------------------
 // Upstream fetch
 // ---------------------------------------------------------------------------
@@ -249,10 +270,12 @@ type FetchResult = {
 };
 
 /**
- * POSTs the production filter to Cogent for [startDate, endDate] and returns
- * parsed rows + safe metadata. Throws on missing key / network / non-200 /
- * non-JSON so the caller can translate to an HTTP error. Never logs or
- * returns the API key or the raw payload.
+ * POSTs the production filter to Cogent for the INCLUSIVE calendar range
+ * [startDate, endDate] and returns parsed rows + safe metadata. The endDate is
+ * converted to Cogent's exclusive end internally (see exclusiveEnd), so
+ * callers always think in inclusive "through this day" terms. Throws on
+ * missing key / network / non-200 / non-JSON so the caller can translate to an
+ * HTTP error. Never logs or returns the API key or the raw payload.
  */
 async function fetchOrdersReport(
   startDate: string,
@@ -266,7 +289,9 @@ async function fetchOrdersReport(
 
   const body = {
     startDate,
-    endDate,
+    // Cogent's endDate is exclusive — add one day so the INCLUSIVE end the
+    // caller passed (e.g. "through today") is actually counted.
+    endDate: exclusiveEnd(endDate),
     useEffectiveDate: false,
     ...COGENT_PRODUCTION_FILTER,
   };
