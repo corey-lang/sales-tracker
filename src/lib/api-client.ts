@@ -41,3 +41,68 @@ export function apiFetch(
   }
   return fetch(input, { ...init, headers });
 }
+
+/** An error from apiFetchJson carrying the HTTP status so callers can branch
+ *  (e.g. 401 → "sign in again"). `.message` is always human-readable. */
+export class ApiResponseError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+    this.name = "ApiResponseError";
+  }
+}
+
+/**
+ * apiFetch + safe JSON parsing. Use this instead of `apiFetch(...).then(r =>
+ * r.json())` so a NON-JSON response never throws the cryptic
+ * "Unexpected token '<', '<!DOCTYPE'... is not valid JSON".
+ *
+ * That symptom means the fetch resolved to an HTML page — almost always a
+ * Next 404/redirect page because the request hit the wrong origin or a route
+ * that isn't deployed, NOT a real API JSON error. We detect the non-JSON body
+ * and throw an ApiResponseError describing the HTTP status, content-type, and
+ * the first 200 chars of the body so the actual cause is visible.
+ *
+ * On a JSON error response (res not ok) it throws the server's `error` string.
+ */
+export async function apiFetchJson<T>(
+  input: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await apiFetch(input, init);
+  const text = await res.text();
+  const contentType = res.headers.get("content-type") ?? "";
+
+  let parsed: unknown;
+  let parseFailed = false;
+  if (text.length > 0) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parseFailed = true;
+    }
+  }
+
+  if (parseFailed) {
+    const snippet = text.slice(0, 200).replace(/\s+/g, " ").trim();
+    throw new ApiResponseError(
+      `Expected JSON but received ${contentType || "an unknown content type"} ` +
+        `(HTTP ${res.status}) from ${input}. First 200 chars: ${snippet}`,
+      res.status,
+    );
+  }
+
+  if (!res.ok) {
+    const message =
+      parsed &&
+      typeof parsed === "object" &&
+      "error" in parsed &&
+      typeof (parsed as { error?: unknown }).error === "string"
+        ? (parsed as { error: string }).error
+        : `Request to ${input} failed with HTTP ${res.status}.`;
+    throw new ApiResponseError(message, res.status);
+  }
+
+  return parsed as T;
+}

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { apiFetch } from "@/lib/api-client";
+import { apiFetchJson } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
 import {
@@ -61,19 +61,12 @@ export default function AdminCogentPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoad({ status: "loading" });
 
-    apiFetch("/api/cogent/orders-summary")
-      .then(async (res) => {
-        const body = (await res.json()) as Partial<Summary> & {
-          error?: string;
-        };
+    // apiFetchJson surfaces non-JSON responses (e.g. an HTML 404/redirect
+    // page) as a descriptive error with status + body snippet instead of
+    // crashing on "Unexpected token '<'".
+    apiFetchJson<Partial<Summary>>("/api/cogent/orders-summary")
+      .then((body) => {
         if (cancelled) return;
-        if (!res.ok) {
-          setLoad({
-            status: "error",
-            message: body.error ?? "Couldn't load the Cogent orders summary.",
-          });
-          return;
-        }
         setLoad({
           status: "ready",
           data: {
