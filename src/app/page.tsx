@@ -31,7 +31,6 @@ type LoginResponse = {
   salesperson?: {
     id: string;
     first_name: string;
-    is_admin: boolean;
     is_test: boolean;
     role: string;
   };
@@ -131,14 +130,11 @@ export default function Home() {
     setSalesperson({
       id: signedIn.id,
       first_name: signedIn.first_name,
-      is_admin: signedIn.is_admin,
       is_test: signedIn.is_test === true,
       role,
       token,
     });
-    router.push(
-      landingPathFor({ is_admin: signedIn.is_admin, role }),
-    );
+    router.push(landingPathFor({ role }));
   };
 
   return (

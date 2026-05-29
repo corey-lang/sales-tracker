@@ -65,7 +65,7 @@ export default function MorePage() {
             </p>
             <p className="text-lg font-semibold">{salesperson.first_name}</p>
             <p className="text-xs text-muted-foreground">
-              {salesperson.is_admin
+              {salesperson.role === "admin"
                 ? "Admin"
                 : salesperson.role === "assistant"
                   ? "Assistant"
@@ -90,7 +90,7 @@ export default function MorePage() {
         </Card>
 
         <div className="flex flex-col gap-2">
-          {salesperson.is_admin && (
+          {salesperson.role === "admin" && (
             <Link
               href="/admin"
               className={buttonVariants({ variant: "outline" })}
@@ -120,7 +120,6 @@ export default function MorePage() {
               permissions ??
               (salesperson
                 ? {
-                    is_admin: salesperson.is_admin === true,
                     role: salesperson.role,
                     can_import_offices:
                       salesperson.can_import_offices === true,
@@ -129,7 +128,7 @@ export default function MorePage() {
             if (!effective) return null;
             if (effective.role === "juice_box_only") return null;
             const allowed =
-              effective.is_admin === true ||
+              effective.role === "admin" ||
               effective.can_import_offices === true;
             if (!allowed) return null;
             return (

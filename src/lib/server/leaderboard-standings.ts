@@ -72,13 +72,12 @@ export async function computeStandings(
     // Only true AEs compete. Filtering positively on `role = 'ae'` (vs.
     // excluding known non-AE roles) keeps juice_box_only guests (Travis,
     // Rizz, …) off every leaderboard surface and means any future role
-    // can't accidentally leak in. is_admin / is_test are kept in the
-    // predicate as belt-and-suspenders against a misconfigured row.
+    // can't accidentally leak in. is_test stays as belt-and-suspenders
+    // against the seeded test account leaking into team standings.
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("role", "ae")
-      .eq("is_admin", false)
       .eq("is_test", false),
     supabase
       .from("activity_entries")

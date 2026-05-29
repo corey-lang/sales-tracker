@@ -86,11 +86,12 @@ export default function DashboardPage() {
           {/* Assistant header mirrors the AE header's account chrome: a
               small Settings gear linking to /more (which hosts the
               account summary, notification opt-in when Juice Box-
-              eligible, the admin shortcut, and Log out). Without this
-              link, role === "assistant" users had no way to reach /more
-              — the bottom nav also drops it for them. The Admin link
-              is rendered alongside for admin-assistant accounts (e.g.
-              Tonja) so the admin queue stays one tap away. */}
+              eligible, and Log out). Without this link, role === "assistant"
+              users had no way to reach /more — the bottom nav also drops
+              it for them. Under role-as-truth a row has exactly one role,
+              so the prior assistant-AND-admin hybrid path (which would have
+              rendered an Admin link alongside) no longer applies; a user
+              who needs the admin queue must have role='admin'. */}
           <header className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div>
@@ -101,14 +102,6 @@ export default function DashboardPage() {
               <Logo width={180} height={55} priority className="shrink-0" />
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {salesperson.is_admin && (
-                <Link
-                  href="/admin"
-                  className={buttonVariants({ variant: "outline", size: "sm" })}
-                >
-                  Admin
-                </Link>
-              )}
               <Link
                 href="/more"
                 aria-label="Account and notification settings"
@@ -153,7 +146,7 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {salesperson.is_admin && (
+            {salesperson.role === "admin" && (
               <Link
                 href="/admin"
                 className={buttonVariants({ variant: "outline", size: "sm" })}

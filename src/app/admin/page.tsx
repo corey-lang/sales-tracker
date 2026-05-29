@@ -43,15 +43,15 @@ export default function AdminDashboardPage() {
     // Real AEs only. Filtering positively on `role = 'ae'` (vs. excluding
     // known non-AE roles) keeps juice_box_only guests (Travis, Rizz, Faith,
     // …) and any future role out of the admin selector, filters, totals,
-    // and goal scope automatically. is_admin = false stays in the predicate
-    // as belt-and-suspenders against a misconfigured row. The test account
-    // is the lone AE-role exception we still want visible — kept and pushed
-    // to the bottom of the list via the is_test ordering.
+    // and goal scope automatically. role is now the single source of truth
+    // for admin status (the legacy is_admin column is unused in app logic),
+    // so the previous belt-and-suspenders is_admin filter is gone. The test
+    // account is the lone AE-role exception we still want visible — kept
+    // and pushed to the bottom of the list via the is_test ordering.
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("role", "ae")
-      .eq("is_admin", false)
       .order("is_test", { ascending: true })
       .order("first_name", { ascending: true })
       .then(({ data }) => {

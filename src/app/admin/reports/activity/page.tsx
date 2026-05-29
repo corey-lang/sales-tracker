@@ -141,13 +141,12 @@ export default function ActivityReportPage() {
       // Real AEs only — admins, the assistant, the test account, and
       // juice_box_only guests (Travis, Rizz, Faith, …) don't have goal
       // progress to report on. Positive `role = 'ae'` allow-list keeps any
-      // future role out automatically; is_admin / is_test stay in the
-      // predicate as belt-and-suspenders against a misconfigured row.
+      // future role out automatically; is_test stays as belt-and-suspenders
+      // against the seeded test account leaking into the report.
       supabase
         .from("salespeople")
         .select("id, first_name")
         .eq("role", "ae")
-        .eq("is_admin", false)
         .eq("is_test", false)
         .order("first_name", { ascending: true }),
       supabase

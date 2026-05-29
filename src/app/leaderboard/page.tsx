@@ -124,10 +124,10 @@ export default function LeaderboardPage() {
         </div>
         <Logo width={180} height={55} priority className="shrink-0" />
         <Link
-          href={salesperson.is_admin ? "/admin" : "/dashboard"}
+          href={salesperson.role === "admin" ? "/admin" : "/dashboard"}
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
-          ← {salesperson.is_admin ? "Admin" : "Dashboard"}
+          ← {salesperson.role === "admin" ? "Admin" : "Dashboard"}
         </Link>
       </header>
 

@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ChevronDown, Settings } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { isAdminUser } from "@/lib/role-routing";
 import { useSalesperson } from "@/lib/use-salesperson";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -22,7 +23,7 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
  *  destinations.
  *
  *  /office-imports lives outside /admin so non-admin assistants (who
- *  can't pass this layout's is_admin gate) can still reach it via /more.
+ *  can't pass this layout's role==='admin' gate) can still reach it via /more.
  *  It still nests cleanly under the admin "Tools" group here because the
  *  active-state matcher keys off pathname, not URL ancestry. */
 type NavLeaf = { href: string; label: string };
@@ -80,12 +81,14 @@ export default function AdminLayout({
       router.replace("/");
       return;
     }
-    if (!salesperson.is_admin) {
+    // Same admin gate as landingPathFor and server-side requireAdmin:
+    // role === 'admin'. Non-admins get bounced to /dashboard.
+    if (!isAdminUser(salesperson)) {
       router.replace("/dashboard");
     }
   }, [loaded, salesperson, router]);
 
-  if (!loaded || !salesperson || !salesperson.is_admin) {
+  if (!loaded || !salesperson || !isAdminUser(salesperson)) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>

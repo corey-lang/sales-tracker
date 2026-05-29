@@ -54,7 +54,7 @@ export function MessagesCard({ salespersonId }: Props) {
       supabase
         .from("salespeople")
         .select("first_name")
-        .eq("is_admin", true)
+        .eq("role", "admin")
         .order("first_name"),
     ]).then(([p, g, admins]) => {
       if (cancelled) return;

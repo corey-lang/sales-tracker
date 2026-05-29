@@ -62,7 +62,7 @@ export async function buildScorecard(
   goalAsOf: string,
 ): Promise<{ rows: ScorecardRow[]; error: string | null }> {
   // Standings gives us the AE roster + score % + manual visit totals in
-  // one shot (it already filters to role='ae', is_admin=false, is_test=false).
+  // one shot (it already filters to role='ae', is_test=false).
   const standings = await computeStandings(supabase, since, through, goalAsOf);
   if (standings.error) {
     return { rows: [], error: standings.error };

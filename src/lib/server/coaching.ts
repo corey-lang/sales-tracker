@@ -432,13 +432,12 @@ export async function buildAeSummaries(
 ): Promise<{ summaries: CoachingAeSummary[]; error: string | null }> {
   // Coaching surface is AE-only. Filtering on `role = 'ae'` directly
   // (rather than excluding known non-AE roles) means a future role
-  // can't accidentally leak in. is_admin / is_test are kept in the
-  // predicate as belt-and-suspenders against a misconfigured row.
+  // can't accidentally leak in. is_test stays as belt-and-suspenders
+  // against the seeded test account leaking into coaching summaries.
   const peopleRes = await supabase
     .from("salespeople")
     .select("id, first_name")
     .eq("role", COACHABLE_ROLE)
-    .eq("is_admin", false)
     .eq("is_test", false)
     .order("first_name", { ascending: true });
   if (peopleRes.error) return { summaries: [], error: peopleRes.error.message };

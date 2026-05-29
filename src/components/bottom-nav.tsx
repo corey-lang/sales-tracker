@@ -99,7 +99,7 @@ function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   // Admin Home points at /admin so Home stays consistent with where
   // admins land after login (see landingPathFor). Every other role's
   // Home is the AE /dashboard.
-  const home = salesperson.is_admin ? HOME_ADMIN : HOME_AE;
+  const home = salesperson.role === "admin" ? HOME_ADMIN : HOME_AE;
   // Juice Box is otherwise open to the whole team; every signed-in
   // user gets the tab. To-Dos and Scan Biz Card stay AE-only since
   // assistants have a restricted (VerificationCenter) dashboard and

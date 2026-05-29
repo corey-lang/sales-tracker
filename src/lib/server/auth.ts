@@ -164,12 +164,12 @@ export type AuthedSalesperson = {
   id: string;
   first_name: string;
   role: UserRole;
-  is_admin: boolean;
   /** True for the seeded test account — routes use this to stay test-safe. */
   is_test: boolean;
   /** Scoped permission for the office-import surface (migration #26).
-   *  Admins bypass this flag entirely; non-admins must have it set to
-   *  reach `/api/admin/offices/import`. See `requireOfficeImporter`. */
+   *  Admins (role === 'admin') bypass this flag entirely; non-admins must
+   *  have it set to reach `/api/admin/offices/import`. See
+   *  `requireOfficeImporter`. */
   can_import_offices: boolean;
 };
 
@@ -242,7 +242,6 @@ export async function requireSalesperson(
     id: row.id,
     first_name: row.first_name,
     role,
-    is_admin: role === "admin",
     is_test: isTestAccount(row),
     can_import_offices: row.can_import_offices === true,
   };
@@ -306,7 +305,7 @@ export async function requireReviewer(
 /**
  * Requires the caller to be allowed to import offices.
  *
- * Gate: `is_admin === true` OR `can_import_offices === true`.
+ * Gate: `role === "admin"` OR `can_import_offices === true`.
  *   * Admins always pass (bypass the per-user flag).
  *   * Non-admins must have the scoped `salespeople.can_import_offices`
  *     permission set (see migration #26).
@@ -328,7 +327,7 @@ export async function requireOfficeImporter(
   if (me.role === "juice_box_only") {
     throw forbidden("This action is not available for your account.");
   }
-  if (!me.is_admin && !me.can_import_offices) {
+  if (me.role !== "admin" && !me.can_import_offices) {
     throw forbidden(
       "Office import access is required for this action.",
     );

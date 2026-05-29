@@ -9,7 +9,11 @@ export const STORAGE_KEY = "sales-tracker:salesperson";
 export type StoredSalesperson = {
   id: string;
   first_name: string;
-  is_admin: boolean;
+  /** Authoritative permission signal. Every gate — client guards, server
+   *  `requireAdmin`, the login PIN check — keys on `role === "admin"`.
+   *  The legacy `is_admin` boolean column still exists on the DB row but
+   *  is no longer carried in this session shape. */
+  role: UserRole;
   /** Test-account flag from `salespeople.is_test`. Still surfaced so server
    *  code (e.g. the scan route's `is_test_data` tagging) can read it via the
    *  session, even though the UI no longer gates anything on it. Optional for
@@ -21,7 +25,6 @@ export type StoredSalesperson = {
    *  value from `salespeople.can_import_offices` on every request, so this
    *  client copy is only a UX hint — never the source of truth. */
   can_import_offices?: boolean;
-  role: UserRole;
   /** Signed session token issued by /api/auth/login; sent on every API call. */
   token: string;
 };
@@ -39,12 +42,12 @@ function hydrate(raw: unknown): StoredSalesperson | null {
   if (typeof obj.token !== "string" || obj.token.length === 0) {
     return null;
   }
-  const is_admin = !!obj.is_admin;
-  const role: UserRole = isUserRole(obj.role)
-    ? obj.role
-    : is_admin
-      ? "admin"
-      : "ae";
+  // role is authoritative. Older stored sessions that pre-date the role
+  // rollout (still carrying only `is_admin`) are downgraded to "ae" — they
+  // would need to re-sign in to regain admin chrome, which is acceptable
+  // since `signSessionToken` has always populated the role claim and any
+  // current token round-trips it back here.
+  const role: UserRole = isUserRole(obj.role) ? obj.role : "ae";
   const is_test =
     typeof obj.is_test === "boolean" ? obj.is_test : undefined;
   // Optional — sessions issued before the column shipped won't carry it.
@@ -57,10 +60,9 @@ function hydrate(raw: unknown): StoredSalesperson | null {
   return {
     id: obj.id,
     first_name: obj.first_name,
-    is_admin,
+    role,
     is_test,
     can_import_offices,
-    role,
     token: obj.token,
   };
 }

@@ -28,7 +28,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export type LivePermissionsResponse = {
-  is_admin: boolean;
   role: "admin" | "assistant" | "ae" | "juice_box_only";
   can_import_offices: boolean;
 };
@@ -37,7 +36,6 @@ export async function GET(req: Request) {
   try {
     const me = await requireSalesperson(req);
     const body: LivePermissionsResponse = {
-      is_admin: me.is_admin,
       role: me.role,
       can_import_offices: me.can_import_offices,
     };

@@ -455,7 +455,7 @@ export function VerificationCenter() {
   // Editing extracted contact fields is admin-only (the route enforces it too);
   // the assistant can still approve / reject / mark-duplicate.
   const { salesperson } = useSalesperson();
-  const canEdit = Boolean(salesperson?.is_admin);
+  const canEdit = salesperson?.role === "admin";
   const [editingScanId, setEditingScanId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);

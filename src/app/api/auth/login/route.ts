@@ -61,19 +61,16 @@ export async function POST(req: Request) {
       can_import_offices: boolean | null;
     };
     const role: UserRole = isUserRole(row.role) ? row.role : "ae";
-    // Admin status is `role === "admin"` — single source of truth shared
-    // with server-side requireAdmin and with the client's isAdminUser
-    // helper. The legacy `is_admin` boolean is still returned in the
-    // payload (so display surfaces that read `salesperson.is_admin`
-    // continue to work) but it's derived from role here rather than read
-    // from its own column, so a drifted DB row can't produce a
-    // partial-admin client session.
-    const isAdmin = role === "admin";
 
-    // Admins must present the correct PIN. The PIN is compared here and never
-    // included in the response. The error is deliberately generic — it does
-    // not reveal whether a PIN is set or how long it is.
-    if (isAdmin) {
+    // Admins must present the correct PIN. `role === "admin"` is the single
+    // source of truth for admin status — same gate as server-side
+    // `requireAdmin` and the client's `isAdminUser`. The legacy `is_admin`
+    // column is intentionally NOT consulted; the no-drift audit confirmed
+    // it's already in sync with role, and trusting only role keeps every
+    // gate in the app on the same signal. The PIN is compared here and
+    // never returned. The error is deliberately generic — it does not
+    // reveal whether a PIN is set or how long it is.
+    if (role === "admin") {
       const dbPin =
         row.admin_pin == null ? "" : String(row.admin_pin).trim();
       if (!dbPin) {
@@ -96,7 +93,6 @@ export async function POST(req: Request) {
       salesperson: {
         id: row.id,
         first_name: row.first_name,
-        is_admin: isAdmin,
         is_test: row.is_test === true,
         // Scoped permission flag — sent in the session payload so the
         // UI can gate office-import surfaces client-side. Server route

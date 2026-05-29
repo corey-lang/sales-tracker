@@ -35,7 +35,6 @@ import type { UserRole } from "@/lib/permissions";
  *   cannot perform a forbidden action.
  */
 export type LivePermissions = {
-  is_admin: boolean;
   role: UserRole;
   can_import_offices: boolean;
 };
@@ -67,7 +66,6 @@ export function useLivePermissions(): {
           | null;
         if (cancelled || !payload || typeof payload !== "object") return;
         setPermissions({
-          is_admin: payload.is_admin === true,
           role: payload.role,
           can_import_offices: payload.can_import_offices === true,
         });

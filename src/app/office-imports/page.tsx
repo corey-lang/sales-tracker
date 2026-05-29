@@ -28,8 +28,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
 // Office Imports — CSV office import tool. Access is gated on
-// `is_admin` or the per-user `can_import_offices` permission (see
-// migration #26), NOT on role membership.
+// `role === "admin"` or the per-user `can_import_offices` permission
+// (see migration #26).
 //
 // ENVIRONMENT
 //   The request body no longer carries an `environment` flag. The
@@ -40,7 +40,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 //   import will go live for a real AE before submitting.
 //
 // ACCESS
-//   `is_admin === true` OR `can_import_offices === true` on the
+//   `role === "admin"` OR `can_import_offices === true` on the
 //   salespeople row (see migration #26). Non-flagged users (AEs,
 //   juice_box_only, plain assistants without the flag) are redirected.
 //   The server route enforces the same gate via `requireOfficeImporter`,
@@ -605,7 +605,6 @@ export default function OfficeImportsPage() {
     permissions ??
     (permsLoaded && salesperson
       ? {
-          is_admin: salesperson.is_admin === true,
           role: salesperson.role,
           can_import_offices: salesperson.can_import_offices === true,
         }
@@ -614,7 +613,7 @@ export default function OfficeImportsPage() {
   const canImport =
     !!effectivePermissions &&
     effectivePermissions.role !== "juice_box_only" &&
-    (effectivePermissions.is_admin === true ||
+    (effectivePermissions.role === "admin" ||
       effectivePermissions.can_import_offices === true);
 
   // Wait for BOTH the session hydration (so we know who's logged in
@@ -896,7 +895,7 @@ export default function OfficeImportsPage() {
           // since we're past the canImport guard, which requires it
           // to be non-null.
           href={
-            effectivePermissions?.is_admin ? "/admin" : "/dashboard"
+            effectivePermissions?.role === "admin" ? "/admin" : "/dashboard"
           }
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >

@@ -593,7 +593,7 @@ export default function JuiceBoxPage() {
         <JuiceBoxFeed
           currentUserId={salesperson.id}
           currentUserName={salesperson.first_name}
-          isAdmin={salesperson.is_admin}
+          isAdmin={salesperson.role === "admin"}
         />
       </main>
       <BottomNav salesperson={salesperson} />
