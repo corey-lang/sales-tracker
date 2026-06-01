@@ -7,8 +7,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
-  adjustedTargetsFrom,
-  averagePercent,
+  adjustedWeekScore,
   resolveActiveGoal,
   weeklyTargetsFrom,
   type WeeklyGoal,
@@ -123,13 +122,15 @@ export async function buildActivityReport(
       adjustments,
       today,
     });
-    // Original targets (DB, never mutated) and the time-off-adjusted targets
-    // the AE is actually scored against this week.
-    const originalTargets = weeklyTargetsFrom(resolvedGoal);
-    const adjustedTargets = adjustedTargetsFrom(
+    // Score + adjusted targets from the SHARED helper — the same call the
+    // leaderboard makes, so the report % and leaderboard % are identical.
+    const { percent, adjustedTargets } = adjustedWeekScore(
+      actual,
       resolvedGoal,
       avail.availableDays,
     );
+    // Original targets (DB, never mutated) for the "16 / 20" context.
+    const originalTargets = weeklyTargetsFrom(resolvedGoal);
     const cells = {} as Record<ActivityKey, ActivityReportCell>;
     for (const k of ACTIVITY_KEYS) {
       const goal = adjustedTargets[k];
@@ -144,9 +145,7 @@ export async function buildActivityReport(
       id: p.id,
       first_name: p.first_name,
       cells,
-      // Score uses the ADJUSTED targets — achievement % reflects the reduced
-      // week.
-      score: averagePercent(actual, adjustedTargets, ACTIVITY_KEYS),
+      score: percent,
       available_days: avail.availableDays,
       expected_percent: avail.expectedPercent,
       is_holiday_week: avail.isHolidayWeek,

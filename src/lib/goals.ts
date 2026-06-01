@@ -180,6 +180,31 @@ export function averagePercent<K extends string>(
   return Math.round(sum / count);
 }
 
+/** All activity keys, derived from the canonical ZERO_ACTIVITY shape. */
+const ALL_ACTIVITY_KEYS = Object.keys(ZERO_ACTIVITY) as ActivityKey[];
+
+/**
+ * THE single source of truth for an AE's weekly achievement % against
+ * time-off-adjusted goals. Every scoring surface (leaderboard standings AND
+ * the activity report) MUST call this so they can never drift apart:
+ *
+ *   adjustedTargets = round(original × availableDays / 5)   per activity
+ *   percent         = averagePercent(actuals, adjustedTargets)
+ *
+ * Returns both the percent and the adjusted targets, so a consumer that also
+ * needs per-activity targets (the report) shows the exact numbers the score
+ * was computed from. The DB goal row is never mutated.
+ */
+export function adjustedWeekScore(
+  actuals: Partial<ActivityValues>,
+  goal: WeeklyGoal | null,
+  availableDays: number,
+): { percent: number | null; adjustedTargets: ActivityValues } {
+  const adjustedTargets = adjustedTargetsFrom(goal, availableDays);
+  const percent = averagePercent(actuals, adjustedTargets, ALL_ACTIVITY_KEYS);
+  return { percent, adjustedTargets };
+}
+
 export function progressColor(percent: number): {
   bar: string;
   text: string;

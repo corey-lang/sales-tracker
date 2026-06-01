@@ -6,25 +6,26 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { averagePercent } from "@/lib/goals";
-import { adjustGoalValue, weekAvailability } from "@/lib/working-days";
+import {
+  adjustedWeekScore,
+  resolveActiveGoal,
+  type WeeklyGoal,
+} from "@/lib/goals";
+import { weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
 
 // Shared leaderboard aggregation — used by GET /api/leaderboard (current week,
 // AE-facing) and GET /api/admin/leaderboard (prior weeks, admin-only).
 //
-// Keeping the math here means BOTH routes score identically (the same
-// averagePercent diminishing-returns logic, the same goal resolution) and
-// neither ever returns goal targets — only leaderboard-safe standings.
+// SCORING is delegated to goals.adjustedWeekScore() and goal resolution to
+// goals.resolveActiveGoal() — the EXACT same helpers the admin activity report
+// uses — so the leaderboard % and the report % share one adjusted-goal
+// denominator and can never drift. Neither route ever returns goal targets,
+// only leaderboard-safe standings.
 
 type Person = { id: string; first_name: string };
 
-type GoalRow = ActivityValues & {
-  id: string;
-  salesperson_id: string | null;
-  effective_from: string;
-  created_at?: string;
-};
+type GoalRow = WeeklyGoal;
 
 export type LeaderboardStanding = {
   id: string;
@@ -45,28 +46,6 @@ export type LeaderboardStanding = {
 };
 
 const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
-
-// Goal resolution — identical to the prior client-side logic.
-function sortGoalsByRecency(a: GoalRow, b: GoalRow) {
-  const eff = b.effective_from.localeCompare(a.effective_from);
-  if (eff !== 0) return eff;
-  return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-}
-
-function activeGoalFor(
-  personId: string,
-  allGoals: GoalRow[],
-  asOf: string,
-): GoalRow | null {
-  const personal = allGoals
-    .filter((g) => g.salesperson_id === personId && g.effective_from <= asOf)
-    .sort(sortGoalsByRecency);
-  if (personal[0]) return personal[0];
-  const global = allGoals
-    .filter((g) => g.salesperson_id === null && g.effective_from <= asOf)
-    .sort(sortGoalsByRecency);
-  return global[0] ?? null;
-}
 
 /**
  * Computes leaderboard standings for the Mon-Fri range [`since`, `through`],
@@ -146,27 +125,17 @@ export async function computeStandings(
       (sum, k) => sum + totals[k],
       0,
     );
-    const goal = activeGoalFor(p.id, allGoals, goalAsOf);
+    const goal = resolveActiveGoal(p.id, allGoals, goalAsOf);
     const avail = weekAvailability({
       weekStart: since,
       salespersonId: p.id,
       adjustments,
       today,
     });
-    // Targets are REDUCED for approved time off:
-    // adjusted = round(original × availableDays / 5). The achievement % scores
-    // against the adjusted target, so an AE isn't penalised for days they were
-    // approved to be out. The DB goal row is never mutated.
-    const weeklyTargets = { ...ZERO_ACTIVITY };
-    if (goal) {
-      for (const a of ACTIVITIES) {
-        weeklyTargets[a.key] = adjustGoalValue(
-          Number(goal[a.key as ActivityKey] ?? 0),
-          avail.availableDays,
-        );
-      }
-    }
-    const percent = averagePercent(totals, weeklyTargets, ACTIVITY_KEYS);
+    // Score against TIME-OFF-ADJUSTED goals via the shared helper — the exact
+    // same math the admin activity report uses, so the two never diverge. The
+    // DB goal row is never mutated.
+    const { percent } = adjustedWeekScore(totals, goal, avail.availableDays);
     return {
       id: p.id,
       first_name: p.first_name,
