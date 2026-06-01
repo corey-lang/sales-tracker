@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
-import { CheckCircle2, Navigation } from "lucide-react";
+import { Check, CheckCircle2, Navigation, Plus } from "lucide-react";
 import L from "leaflet";
 import {
   CircleMarker,
@@ -45,20 +46,16 @@ import type { NearbyOfficeItem, NearbyRadius } from "@/lib/offices";
 //     one new SVG string.
 // ---------------------------------------------------------------------------
 
-/** Per-pin styling variant. Today always "default"; reserved as the
- *  single hook a future "office overdue" / "recently visited" /
- *  "priority" differentiation would extend. */
-type PinVariant = "default";
+/** Per-pin styling variant. "selected" = chosen for the current route
+ *  (green); "default" = brand orange. The seam still reserves room for a
+ *  future "overdue" / "priority" style. */
+type PinVariant = "default" | "selected";
 
-/** Future seam — given a `NearbyOfficeItem`, return the variant its
- *  pin should render as. Today every office gets the brand-orange
- *  default; tomorrow this is where last-visit recency, overdue
- *  next-action, etc. would map to differentiated pin styles. The
- *  argument is intentionally received but not consumed today so the
- *  signature documents the future-proofed seam. */
-function pinVariantFor(item: NearbyOfficeItem): PinVariant {
-  void item;
-  return "default";
+/** Given an office + the current route selection, return the variant its pin
+ *  should render as. Selected offices turn green so the lassoed set is
+ *  obvious against the orange defaults. */
+function pinVariantFor(item: NearbyOfficeItem, selected: boolean): PinVariant {
+  return selected ? "selected" : "default";
 }
 
 /**
@@ -70,17 +67,129 @@ function pinVariantFor(item: NearbyOfficeItem): PinVariant {
  * only place to touch when adding a new style.
  */
 function renderPinHtml(variant: PinVariant): string {
-  const FILL = "#ff7a00";
-  switch (variant) {
-    case "default":
-    default:
-      return `
-        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" aria-hidden="true" style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35));">
-          <path d="M14 0C6.27 0 0 6.27 0 14c0 10.5 14 22 14 22s14-11.5 14-22C28 6.27 21.73 0 14 0z" fill="${FILL}"/>
-          <circle cx="14" cy="14" r="5" fill="#ffffff"/>
-        </svg>
-      `;
+  // Orange = default; green = selected for the route.
+  const FILL = variant === "selected" ? "#16a34a" : "#ff7a00";
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36" aria-hidden="true" style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35));">
+      <path d="M14 0C6.27 0 0 6.27 0 14c0 10.5 14 22 14 22s14-11.5 14-22C28 6.27 21.73 0 14 0z" fill="${FILL}"/>
+      <circle cx="14" cy="14" r="5" fill="#ffffff"/>
+    </svg>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Lasso (freehand area select)
+// ---------------------------------------------------------------------------
+
+type ScreenPoint = { x: number; y: number };
+
+/** Ray-casting point-in-polygon over container (screen) coordinates. */
+function pointInPolygon(pt: ScreenPoint, poly: ScreenPoint[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x;
+    const yi = poly[i].y;
+    const xj = poly[j].x;
+    const yj = poly[j].y;
+    const intersect =
+      yi > pt.y !== yj > pt.y &&
+      pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
   }
+  return inside;
+}
+
+/** Lifts the Leaflet map instance up to the parent so the lasso overlay can
+ *  convert office lat/lng → container points. */
+function MapReady({ onReady }: { onReady: (map: L.Map) => void }) {
+  const map = useMap();
+  useEffect(() => {
+    onReady(map);
+  }, [map, onReady]);
+  return null;
+}
+
+/**
+ * Freehand lasso overlay. When active it sits ON TOP of the map (so the map
+ * never pans/zooms or opens popups while drawing) and captures a pointer
+ * stroke. On release it converts each VISIBLE office's lat/lng to a container
+ * point and selects those inside the drawn polygon. Because `items` is already
+ * the filtered/visible set, hidden offices can never be selected.
+ */
+function LassoOverlay({
+  map,
+  items,
+  onSelect,
+}: {
+  map: L.Map;
+  items: NearbyOfficeItem[];
+  onSelect: (ids: string[]) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const pathRef = useRef<ScreenPoint[]>([]);
+  const drawingRef = useRef(false);
+  const [path, setPath] = useState<ScreenPoint[]>([]);
+
+  const localPoint = (e: ReactPointerEvent): ScreenPoint => {
+    const rect = ref.current?.getBoundingClientRect();
+    return {
+      x: e.clientX - (rect?.left ?? 0),
+      y: e.clientY - (rect?.top ?? 0),
+    };
+  };
+
+  const onPointerDown = (e: ReactPointerEvent) => {
+    drawingRef.current = true;
+    ref.current?.setPointerCapture(e.pointerId);
+    pathRef.current = [localPoint(e)];
+    setPath(pathRef.current);
+  };
+  const onPointerMove = (e: ReactPointerEvent) => {
+    if (!drawingRef.current) return;
+    pathRef.current = [...pathRef.current, localPoint(e)];
+    setPath(pathRef.current);
+  };
+  const finish = () => {
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    const poly = pathRef.current;
+    if (poly.length >= 3) {
+      const ids = items
+        .filter((it) => {
+          const p = map.latLngToContainerPoint([it.latitude, it.longitude]);
+          return pointInPolygon({ x: p.x, y: p.y }, poly);
+        })
+        .map((it) => it.id);
+      if (ids.length > 0) onSelect(ids);
+    }
+    pathRef.current = [];
+    setPath([]);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className="absolute inset-0 z-[1200] cursor-crosshair"
+      style={{ touchAction: "none" }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finish}
+      onPointerCancel={finish}
+    >
+      {path.length > 1 && (
+        <svg className="pointer-events-none absolute inset-0 h-full w-full">
+          <polyline
+            points={path.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill="rgba(255,122,0,0.12)"
+            stroke="#ff7a00"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
+    </div>
+  );
 }
 
 /** Builds the actual Leaflet icon. `iconAnchor` puts the tip of the
@@ -227,6 +336,17 @@ export type NearbyOfficesMapProps = {
    *  parent state map so a log from the map AND a log from the list
    *  apply to the same per-id slot. */
   onLogVisit: (officeId: string) => void;
+  // ---- Lasso / route selection (V1) ----
+  /** When true, the lasso overlay captures pointer strokes (map pan is
+   *  suppressed) and a release selects the offices inside the drawn shape. */
+  lassoActive?: boolean;
+  /** Ids currently chosen for the route — drives the green pin styling. */
+  selectedIds?: ReadonlySet<string>;
+  /** Lasso completed: add these offices (already filtered to the visible set)
+   *  to the selection. */
+  onLassoSelect?: (ids: string[]) => void;
+  /** Tap a pin's Add/Remove button to toggle one office in the selection. */
+  onToggleSelect?: (officeId: string) => void;
 };
 
 export default function NearbyOfficesMap({
@@ -238,18 +358,25 @@ export default function NearbyOfficesMap({
   logErrorById,
   isLogDisabled,
   onLogVisit,
+  lassoActive = false,
+  selectedIds,
+  onLassoSelect,
+  onToggleSelect,
 }: NearbyOfficesMapProps) {
-  // Pre-build one icon per variant up front (today: just "default").
-  // Building inside useMemo and treating the result as read-only
-  // satisfies react-hooks/immutability — adding a new variant means
-  // appending another entry to the literal below, not mutating an
-  // in-flight cache.
+  // Pre-build one icon per variant up front. Building inside useMemo and
+  // treating the result as read-only satisfies react-hooks/immutability —
+  // adding a new variant means appending another entry to the literal below.
   const iconByVariant = useMemo<Readonly<Record<PinVariant, L.DivIcon>>>(
     () => ({
       default: buildPinIcon("default"),
+      selected: buildPinIcon("selected"),
     }),
     [],
   );
+
+  // Leaflet map instance, lifted from a child so the lasso overlay (a sibling
+  // of MapContainer) can convert office coords to screen points.
+  const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
   return (
     <div
@@ -338,7 +465,8 @@ export default function NearbyOfficesMap({
         {/* Office pins. Tap a pin → branded popup with the same
             actions the List view's card row carries. */}
         {items.map((item) => {
-          const variant = pinVariantFor(item);
+          const selected = selectedIds?.has(item.id) ?? false;
+          const variant = pinVariantFor(item, selected);
           const mapsHref = mapsUrlFor(item);
           const notice = logNoticeById.get(item.id) ?? null;
           const error = logErrorById.get(item.id) ?? null;
@@ -384,9 +512,30 @@ export default function NearbyOfficesMap({
                     </p>
                   )}
                   <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    {onToggleSelect && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={selected ? "outline" : "default"}
+                        onClick={() => onToggleSelect(item.id)}
+                      >
+                        {selected ? (
+                          <>
+                            <Check aria-hidden="true" className="size-4" />
+                            In route
+                          </>
+                        ) : (
+                          <>
+                            <Plus aria-hidden="true" className="size-4" />
+                            Add to route
+                          </>
+                        )}
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       size="sm"
+                      variant="outline"
                       onClick={() => onLogVisit(item.id)}
                       disabled={logging || disabled}
                     >
@@ -447,7 +596,18 @@ export default function NearbyOfficesMap({
           radius={radius}
         />
         <MapResizer />
+        <MapReady onReady={setMapInstance} />
       </MapContainer>
+
+      {/* Lasso draw surface — only mounted while active so normal map
+          interaction (pan/zoom/popups) is untouched otherwise. */}
+      {lassoActive && mapInstance && onLassoSelect && (
+        <LassoOverlay
+          map={mapInstance}
+          items={items}
+          onSelect={onLassoSelect}
+        />
+      )}
     </div>
   );
 }

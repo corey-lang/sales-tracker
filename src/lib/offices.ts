@@ -308,3 +308,94 @@ export function buildOfficeDedupeKey(parts: {
     normalizeForDedupe(parts.zip),
   ].join("|");
 }
+
+// ---------------------------------------------------------------------------
+// Map "Not visited" filters + route building (Lasso Route foundation V1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Visit-recency filters for the office map. "Not visited" is per the product
+ * rule scoped to the LOGGED-IN AE's own assigned offices — and the only data
+ * this operates on (the /api/offices/nearby response) is already AE-scoped
+ * server-side, so applying these client-side never widens the data set.
+ *
+ *   all    — every mapped office (assigned, not archived, has coords).
+ *   30/60/90 — last visit is null OR older than X days ago.
+ *   never  — no visit has ever been logged for that office by this AE.
+ */
+export type OfficeVisitFilter = "all" | "30" | "60" | "90" | "never";
+
+export const OFFICE_VISIT_FILTERS: {
+  key: OfficeVisitFilter;
+  label: string;
+  /** Lookback window in days; null for "all"/"never". */
+  days: number | null;
+}[] = [
+  { key: "all", label: "All", days: null },
+  { key: "30", label: "Not visited 30d", days: 30 },
+  { key: "60", label: "Not visited 60d", days: 60 },
+  { key: "90", label: "Not visited 90d", days: 90 },
+  { key: "never", label: "Never visited", days: null },
+];
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Does an office match a visit filter, given its last-visit timestamp?
+ *   * all   → always true.
+ *   * never → last_visit_at is null.
+ *   * N     → last_visit_at is null OR strictly older than (now - N days).
+ * `nowMs` is injected so callers stay testable / timezone-explicit.
+ */
+export function officeMatchesVisitFilter(
+  lastVisitAt: string | null,
+  filter: OfficeVisitFilter,
+  nowMs: number,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "never") return lastVisitAt === null;
+  if (lastVisitAt === null) return true; // never visited counts as "not visited in X"
+  const days = filter === "30" ? 30 : filter === "60" ? 60 : 90;
+  const visitedMs = Date.parse(lastVisitAt);
+  if (Number.isNaN(visitedMs)) return true; // unparseable → treat as stale, not hidden
+  return visitedMs < nowMs - days * MS_PER_DAY;
+}
+
+/**
+ * Google Maps supports a limited number of stops in a single directions URL
+ * (up to 9 intermediate waypoints + 1 destination via the `dir/?api=1` form).
+ * With the rep's current location as the implicit origin, that's 10 office
+ * stops in one route.
+ */
+export const MAX_ROUTE_STOPS = 10;
+export const MIN_ROUTE_STOPS = 2;
+
+export type RouteStop = { latitude: number; longitude: number };
+
+/**
+ * Builds a Google Maps DIRECTIONS url from selected offices, using lat/lng
+ * waypoints. Origin is left implicit (Google uses the device's current
+ * location). The last stop is the destination; the rest are ordered waypoints
+ * — V1 does NOT optimize the route order.
+ *
+ * Returns `{ url }` on success or `{ error }` with friendly copy when there
+ * are too few or too many stops.
+ */
+export function buildOfficeRouteUrl(
+  stops: RouteStop[],
+): { url: string; error?: undefined } | { url?: undefined; error: string } {
+  if (stops.length < MIN_ROUTE_STOPS) {
+    return { error: "Select at least 2 offices to create a route." };
+  }
+  if (stops.length > MAX_ROUTE_STOPS) {
+    return { error: "Too many stops for one route. Select fewer offices." };
+  }
+  const coords = stops.map((s) => `${s.latitude},${s.longitude}`);
+  const destination = coords[coords.length - 1];
+  const waypoints = coords.slice(0, -1).join("|");
+  const url =
+    `https://www.google.com/maps/dir/?api=1&travelmode=driving` +
+    `&destination=${encodeURIComponent(destination)}` +
+    (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : "");
+  return { url };
+}

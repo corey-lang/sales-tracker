@@ -13,7 +13,9 @@ import {
   Map as MapIcon,
   MapPin,
   Plus,
+  Route as RouteIcon,
   Search,
+  Spline,
   X,
 } from "lucide-react";
 
@@ -26,10 +28,14 @@ import { cn } from "@/lib/utils";
 import {
   NEARBY_DEFAULT_RADIUS,
   NEARBY_RADIUS_OPTIONS,
+  OFFICE_VISIT_FILTERS,
+  buildOfficeRouteUrl,
+  officeMatchesVisitFilter,
   type NearbyOfficeItem,
   type NearbyRadius,
   type OfficeListItem,
   type OfficeRow,
+  type OfficeVisitFilter,
 } from "@/lib/offices";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -775,6 +781,87 @@ function MapViewSection({
   logNoticeById: Map<string, string>;
   onLogVisit: (officeId: string) => void;
 }) {
+  // ---- Filter + route-selection state (Lasso Route V1) -------------------
+  const [visitFilter, setVisitFilter] = useState<OfficeVisitFilter>("all");
+  const [lassoActive, setLassoActive] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [routeError, setRouteError] = useState<string | null>(null);
+
+  const results =
+    mapFetchState.kind === "ready" ? mapFetchState.results : EMPTY_RESULTS;
+  // "now" for the 30/60/90-day windows. Date.now() can't be called during
+  // render, so it's synced into state from an effect and refreshed per data
+  // load. The default "all" filter ignores it, so the initial 0 never
+  // mis-renders.
+  const [nowMs, setNowMs] = useState(0);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setNowMs(Date.now());
+  }, [results]);
+  const filtered = useMemo(
+    () =>
+      results.filter((o) =>
+        officeMatchesVisitFilter(o.last_visit_at, visitFilter, nowMs),
+      ),
+    [results, visitFilter, nowMs],
+  );
+  // The selection only ever counts/uses offices that are currently visible,
+  // so a hidden (filtered-out) pin can never end up in a route.
+  const visibleSelected = useMemo(
+    () => filtered.filter((o) => selectedIds.has(o.id)),
+    [filtered, selectedIds],
+  );
+
+  const changeFilter = useCallback((next: OfficeVisitFilter) => {
+    // Switching filters clears the selection so the lassoed set always
+    // matches the active filter's visible pins.
+    setVisitFilter(next);
+    setSelectedIds(new Set());
+    setRouteError(null);
+  }, []);
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setRouteError(null);
+  }, []);
+  const lassoSelect = useCallback((ids: string[]) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    setRouteError(null);
+  }, []);
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setRouteError(null);
+  }, []);
+  const createRoute = useCallback(() => {
+    const res = buildOfficeRouteUrl(
+      visibleSelected.map((o) => ({
+        latitude: o.latitude,
+        longitude: o.longitude,
+      })),
+    );
+    if (res.error) {
+      setRouteError(res.error);
+      return;
+    }
+    setRouteError(null);
+    window.open(res.url, "_blank", "noopener,noreferrer");
+  }, [visibleSelected]);
+
+  const hasResults =
+    location.kind === "ready" &&
+    mapFetchState.kind === "ready" &&
+    results.length > 0;
+
   return (
     <>
       {/* Radius pills — closed set, server enforces the same list. */}
@@ -810,6 +897,36 @@ function MapViewSection({
           })}
         </div>
       </div>
+
+      {/* Visit-recency filter chips — operate on the AE's own mapped offices. */}
+      {hasResults && (
+        <div
+          role="radiogroup"
+          aria-label="Visit filter"
+          className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5"
+        >
+          {OFFICE_VISIT_FILTERS.map((f) => {
+            const active = visitFilter === f.key;
+            return (
+              <button
+                key={f.key}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => changeFilter(f.key)}
+                className={cn(
+                  "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                  active
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Location banner — covers every state of the location machine,
           including the auto-locate path's "Locating…" transition. */}
@@ -849,26 +966,54 @@ function MapViewSection({
           </Card>
         )}
 
-      {location.kind === "ready" &&
-        mapFetchState.kind === "ready" &&
-        mapFetchState.results.length > 0 && (
-          <>
-            <p className="px-0.5 text-xs text-muted-foreground">
-              {mapFetchState.results.length === 1
-                ? "1 office nearby"
-                : `${mapFetchState.results.length} offices nearby`}
-              {mapFetchState.truncated && (
+      {hasResults && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
+            <p className="text-xs text-muted-foreground">
+              {filterCountLabel(filtered.length, visitFilter)}
+              {mapFetchState.kind === "ready" && mapFetchState.truncated && (
                 <span className="text-amber-700 dark:text-amber-400">
                   {" "}
-                  · showing closest {mapFetchState.results.length} of{" "}
-                  {mapFetchState.totalInRange}
+                  · closest {results.length} of {mapFetchState.totalInRange}
                 </span>
               )}
             </p>
+            <button
+              type="button"
+              onClick={() => setLassoActive((v) => !v)}
+              aria-pressed={lassoActive}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-colors",
+                lassoActive
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <Spline aria-hidden="true" className="size-3.5" />
+              {lassoActive ? "Done" : "Lasso"}
+            </button>
+          </div>
+
+          {lassoActive && (
+            <p className="px-0.5 text-xs text-primary">
+              Draw around offices to select them.
+            </p>
+          )}
+
+          {filtered.length === 0 ? (
+            <Card>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  No offices match this filter in range. Try “All” or a wider
+                  radius.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
             <NearbyOfficesMap
               center={{ lat: location.lat, lng: location.lng }}
-              items={mapFetchState.results}
-              radius={mapFetchState.radius}
+              items={filtered}
+              radius={mapFetchState.kind === "ready" ? mapFetchState.radius : radius}
               loggingId={loggingId}
               logNoticeById={logNoticeById}
               logErrorById={logErrorById}
@@ -876,11 +1021,94 @@ function MapViewSection({
                 loggingId !== null && loggingId !== officeId
               }
               onLogVisit={onLogVisit}
+              lassoActive={lassoActive}
+              selectedIds={selectedIds}
+              onLassoSelect={lassoSelect}
+              onToggleSelect={toggleSelect}
             />
-          </>
-        )}
+          )}
+        </>
+      )}
+
+      {/* Selection sheet — floats above the bottom nav once offices are
+          chosen, so Create Route is reachable right after drawing. */}
+      {visibleSelected.length > 0 && (
+        <div className="fixed inset-x-0 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-30 px-4">
+          <div className="mx-auto max-w-2xl">
+            <Card className="border-primary/30 shadow-lg">
+              <CardContent className="space-y-2 py-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold">
+                    {visibleSelected.length}{" "}
+                    {visibleSelected.length === 1 ? "office" : "offices"}{" "}
+                    selected
+                  </p>
+                  <button
+                    type="button"
+                    onClick={clearSelection}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    Clear selection
+                  </button>
+                </div>
+                <ul className="max-h-28 space-y-1 overflow-y-auto">
+                  {visibleSelected.map((o) => (
+                    <li
+                      key={o.id}
+                      className="flex items-center justify-between gap-2 text-sm"
+                    >
+                      <span className="min-w-0 truncate">{o.name}</span>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${o.name}`}
+                        onClick={() => toggleSelect(o.id)}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
+                      >
+                        <X aria-hidden="true" className="size-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {routeError && (
+                  <p role="alert" className="text-xs text-destructive">
+                    {routeError}
+                  </p>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  className="w-full"
+                  onClick={createRoute}
+                >
+                  <RouteIcon aria-hidden="true" className="size-4" />
+                  Create route
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      )}
     </>
   );
+}
+
+/** Stable empty array so `results` keeps a constant identity while the map
+ *  is loading — avoids re-running the visit filter every render. */
+const EMPTY_RESULTS: NearbyOfficeItem[] = [];
+
+/** "42 offices" / "18 not visited in 60 days" / "6 never visited". */
+function filterCountLabel(count: number, filter: OfficeVisitFilter): string {
+  const noun = count === 1 ? "office" : "offices";
+  switch (filter) {
+    case "never":
+      return `${count} never visited`;
+    case "30":
+    case "60":
+    case "90":
+      return `${count} not visited in ${filter} days`;
+    default:
+      return `${count} ${noun}`;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -237,45 +237,53 @@ export async function GET(req: Request) {
     // Annotate with each office's most-recent visit (per-AE).
     // Skip the lookup when there's nothing to annotate.
     //
-    // NON-FATAL: a failure here used to 500 the entire map. The
-    // map's primary value is "show me what's around me" — visit
-    // recency is a useful but not load-blocking annotation. We
-    // now log + skip on failure and ship the map without the
-    // last-visit pills rather than blocking the whole surface.
-    // (The visible cap is NEARBY_RESULT_LIMIT = 100 IDs, well
-    // under any proxy URL limit, so the IN clause is fine without
-    // chunking here.)
+    // FAILS CLOSED: visit recency drives the "Not visited 30/60/90 / Never"
+    // map filters. If this lookup fails we must NOT ship offices with
+    // last_visit_at=null — that would make every office look "never visited"
+    // and the filters silently wrong. Instead we surface a safe, generic
+    // error so the UI can tell the AE the filters are unavailable rather than
+    // showing incorrect recency. Raw provider text is logged server-side only.
+    // (The visible cap is NEARBY_RESULT_LIMIT = 100 IDs, well under any proxy
+    // URL limit, so the IN clause is fine without chunking here.)
     const lastByOffice = new Map<string, string>();
     if (visible.length > 0) {
       const ids = visible.map((o) => o.id);
       const visitsStartedAt = Date.now();
+      let visitsRes;
       try {
-        const visitsRes = await supabase
+        visitsRes = await supabase
           .from(OFFICE_VISITS_TABLE)
           .select("office_id, visited_at")
           .eq("salesperson_id", me.id)
           .eq("environment", environment)
           .in("office_id", ids);
-        if (visitsRes.error) {
-          console.warn(
-            `[offices-nearby] visits fetch failed ae=${me.id} office_count=${ids.length} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
-          );
-        } else {
-          for (const v of (visitsRes.data ?? []) as Array<{
-            office_id: string;
-            visited_at: string;
-          }>) {
-            const existing = lastByOffice.get(v.office_id);
-            if (!existing || v.visited_at > existing) {
-              lastByOffice.set(v.office_id, v.visited_at);
-            }
-          }
-        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
           `[offices-nearby] visits fetch threw ae=${me.id} office_count=${ids.length} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
         );
+        throw new ApiError(
+          502,
+          "Couldn't load office visit history. Map filters are unavailable right now.",
+        );
+      }
+      if (visitsRes.error) {
+        console.warn(
+          `[offices-nearby] visits fetch failed ae=${me.id} office_count=${ids.length} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        );
+        throw new ApiError(
+          502,
+          "Couldn't load office visit history. Map filters are unavailable right now.",
+        );
+      }
+      for (const v of (visitsRes.data ?? []) as Array<{
+        office_id: string;
+        visited_at: string;
+      }>) {
+        const existing = lastByOffice.get(v.office_id);
+        if (!existing || v.visited_at > existing) {
+          lastByOffice.set(v.office_id, v.visited_at);
+        }
       }
     }
 
