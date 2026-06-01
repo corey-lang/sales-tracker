@@ -27,5 +27,17 @@ export function getServerSupabase() {
 
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      // Force every server-side read/write to bypass Next.js's fetch Data
+      // Cache. Without this, a GET inside a route handler can be memoised by
+      // Next and serve STALE rows — e.g. an admin adds a working-day holiday,
+      // but /api/admin/leaderboard keeps returning a cached
+      // working_day_adjustments result (availableDays=5) so the leaderboard
+      // never reflects the adjustment. This is a live admin dashboard; reads
+      // must always hit the database. `no-store` also disables request
+      // memoisation so concurrent reads in one request stay correct.
+      fetch: (input, init) =>
+        fetch(input, { ...init, cache: "no-store" }),
+    },
   });
 }
