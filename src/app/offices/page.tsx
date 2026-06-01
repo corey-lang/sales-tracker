@@ -1038,7 +1038,8 @@ function MapViewSection({
         <div className="fixed inset-x-0 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-30 px-4">
           <div className="mx-auto max-w-2xl">
             <Card className="border-primary/30 shadow-lg">
-              <CardContent className="space-y-2 py-3">
+              <CardContent className="space-y-3 py-3">
+                {/* 1. Header */}
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-semibold">
                     {visibleSelected.length}{" "}
@@ -1053,48 +1054,86 @@ function MapViewSection({
                     Clear selection
                   </button>
                 </div>
-                <ul className="max-h-28 space-y-1 overflow-y-auto">
-                  {visibleSelected.map((o) => (
-                    <li
-                      key={o.id}
-                      className="flex items-center justify-between gap-2 text-sm"
-                    >
-                      <span className="min-w-0 truncate">{o.name}</span>
-                      <button
-                        type="button"
-                        aria-label={`Remove ${o.name}`}
-                        onClick={() => toggleSelect(o.id)}
-                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
-                      >
-                        <X aria-hidden="true" className="size-4" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+
+                {/* 2. Route Limit — reads like a notification, not body text. */}
                 {visibleSelected.length > MAX_ROUTE_STOPS && (
-                  <div className="space-y-1 rounded-md bg-muted/60 px-2.5 py-1.5 text-xs text-muted-foreground">
-                    <p>
-                      Google Maps supports up to {MAX_ROUTE_STOPS} stops per
-                      route.
-                    </p>
-                    <p className="text-foreground/80">
-                      We&apos;ll create a route using the first{" "}
-                      {MAX_ROUTE_STOPS} offices.
-                    </p>
-                    <p>
-                      {visibleSelected.length - MAX_ROUTE_STOPS}{" "}
-                      {visibleSelected.length - MAX_ROUTE_STOPS === 1
-                        ? "office"
-                        : "offices"}{" "}
-                      will be left out of this route.
-                    </p>
+                  <div
+                    role="alert"
+                    className="flex gap-2.5 rounded-lg border border-amber-500/50 bg-amber-50 px-3 py-2.5 dark:border-amber-500/30 dark:bg-amber-950/30"
+                  >
+                    <AlertTriangle
+                      aria-hidden="true"
+                      className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+                    />
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                        Route Limit
+                      </p>
+                      <p className="text-xs text-amber-800 dark:text-amber-200/80">
+                        Google Maps supports up to {MAX_ROUTE_STOPS} stops per
+                        route.
+                      </p>
+                      <p className="text-xs text-amber-800 dark:text-amber-200/80">
+                        We&apos;ll create a route using the first{" "}
+                        {MAX_ROUTE_STOPS} offices.
+                      </p>
+                      <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
+                        {visibleSelected.length - MAX_ROUTE_STOPS}{" "}
+                        {visibleSelected.length - MAX_ROUTE_STOPS === 1
+                          ? "office"
+                          : "offices"}{" "}
+                        will be left out of this route.
+                      </p>
+                    </div>
                   </div>
                 )}
+
+                {/* 3. Selected Offices label + scroll discovery */}
+                <div className="space-y-0.5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Selected Offices
+                  </p>
+                  {visibleSelected.length > SCROLL_HINT_THRESHOLD && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Scroll to review all {visibleSelected.length} offices
+                    </p>
+                  )}
+                </div>
+
+                {/* 4. Scrollable list with a subtle bottom fade hinting at
+                    more content below. */}
+                <div className="relative">
+                  <ul className="max-h-28 space-y-1 overflow-y-auto pr-0.5">
+                    {visibleSelected.map((o) => (
+                      <li
+                        key={o.id}
+                        className="flex items-center justify-between gap-2 text-sm"
+                      >
+                        <span className="min-w-0 truncate">{o.name}</span>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${o.name}`}
+                          onClick={() => toggleSelect(o.id)}
+                          className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
+                        >
+                          <X aria-hidden="true" className="size-4" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {visibleSelected.length > SCROLL_HINT_THRESHOLD && (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-card to-transparent" />
+                  )}
+                </div>
+
+                {/* 5. Min-2 / route error */}
                 {routeError && (
                   <p role="alert" className="text-xs text-destructive">
                     {routeError}
                   </p>
                 )}
+
+                {/* 6. Action */}
                 <Button
                   type="button"
                   size="sm"
@@ -1116,6 +1155,10 @@ function MapViewSection({
 /** Stable empty array so `results` keeps a constant identity while the map
  *  is loading — avoids re-running the visit filter every render. */
 const EMPTY_RESULTS: NearbyOfficeItem[] = [];
+
+/** Above this many selected offices the list (max-h-28 ≈ 5 rows) scrolls, so
+ *  we show the "scroll to review" hint + bottom fade. */
+const SCROLL_HINT_THRESHOLD = 5;
 
 /** "42 offices" / "18 not visited in 60 days" / "6 never visited". */
 function filterCountLabel(count: number, filter: OfficeVisitFilter): string {
