@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, ShieldCheck, MapPin } from "lucide-react";
+import { LogOut, ShieldCheck, MapPin, BarChart3 } from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -90,6 +90,18 @@ export default function MorePage() {
         </Card>
 
         <div className="flex flex-col gap-2">
+          {/* My Activity — the AE's own range report. Open to anyone with the
+              AE surface (i.e. not juice_box_only); the page + route both
+              hard-scope to the signed-in salesperson. */}
+          {salesperson.role !== "juice_box_only" && (
+            <Link
+              href="/my-activity"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              <BarChart3 aria-hidden="true" className="size-4" />
+              My Activity
+            </Link>
+          )}
           {salesperson.role === "admin" && (
             <Link
               href="/admin"
