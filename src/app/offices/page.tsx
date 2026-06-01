@@ -26,6 +26,7 @@ import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { formatActivityStamp } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import {
+  MAX_ROUTE_STOPS,
   NEARBY_DEFAULT_RADIUS,
   NEARBY_RADIUS_OPTIONS,
   OFFICE_VISIT_FILTERS,
@@ -843,11 +844,12 @@ function MapViewSection({
     setRouteError(null);
   }, []);
   const createRoute = useCallback(() => {
+    // Over the limit is NOT an error: route the FIRST MAX_ROUTE_STOPS offices
+    // (in the current selection order). The minimum-2 requirement still
+    // surfaces as a friendly error via buildOfficeRouteUrl.
+    const stops = visibleSelected.slice(0, MAX_ROUTE_STOPS);
     const res = buildOfficeRouteUrl(
-      visibleSelected.map((o) => ({
-        latitude: o.latitude,
-        longitude: o.longitude,
-      })),
+      stops.map((o) => ({ latitude: o.latitude, longitude: o.longitude })),
     );
     if (res.error) {
       setRouteError(res.error);
@@ -1069,6 +1071,25 @@ function MapViewSection({
                     </li>
                   ))}
                 </ul>
+                {visibleSelected.length > MAX_ROUTE_STOPS && (
+                  <div className="space-y-1 rounded-md bg-muted/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+                    <p>
+                      Google Maps supports up to {MAX_ROUTE_STOPS} stops per
+                      route.
+                    </p>
+                    <p className="text-foreground/80">
+                      We&apos;ll create a route using the first{" "}
+                      {MAX_ROUTE_STOPS} offices.
+                    </p>
+                    <p>
+                      {visibleSelected.length - MAX_ROUTE_STOPS}{" "}
+                      {visibleSelected.length - MAX_ROUTE_STOPS === 1
+                        ? "office"
+                        : "offices"}{" "}
+                      will be left out of this route.
+                    </p>
+                  </div>
+                )}
                 {routeError && (
                   <p role="alert" className="text-xs text-destructive">
                     {routeError}
