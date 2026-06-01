@@ -207,9 +207,16 @@ function ScorecardCard({ rank, row }: { rank: number; row: ScorecardRow }) {
             <span className="text-lg font-semibold tabular-nums text-muted-foreground">
               #{rank}
             </span>
-            <CardTitle className="truncate text-base">
-              {row.first_name}
-            </CardTitle>
+            <div className="min-w-0">
+              <CardTitle className="truncate text-base">
+                {row.first_name}
+              </CardTitle>
+              {row.available_days < DEFAULT_WORKING_DAYS ? (
+                <p className="text-xs text-muted-foreground">
+                  Goals adjusted for approved time off
+                </p>
+              ) : null}
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <PaceChip

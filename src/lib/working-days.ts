@@ -133,6 +133,31 @@ export function formatAvailableDays(days: number): string {
   return Number.isInteger(days) ? String(days) : days.toFixed(1);
 }
 
+/**
+ * Adjusts ONE activity goal for a week's available days:
+ *
+ *   adjusted = round(original × availableDays / 5)
+ *
+ * Approved time off reduces that week's KPI target proportionally — a holiday
+ * Monday (4 of 5 days) scales every goal to 80%; 4.5 days → 90%. The original
+ * goal in the DB is never mutated; this is a runtime computation.
+ *
+ * Rules:
+ *   * Whole-number targets (round to nearest).
+ *   * A positive original goal never drops below 1, even on a 1-day week.
+ *   * A 0 (disabled) goal stays 0.
+ *   * availableDays of 5 (a normal week) returns the original unchanged.
+ */
+export function adjustGoalValue(
+  originalGoal: number,
+  availableDays: number,
+): number {
+  if (originalGoal <= 0) return 0;
+  const factor = availableDays / DEFAULT_WORKING_DAYS;
+  const adjusted = Math.round(originalGoal * factor);
+  return Math.max(1, adjusted);
+}
+
 export type PaceVerdict = "ahead" | "on_pace" | "behind" | "none";
 
 /** Neutral pace verdict for admin surfaces (leaderboard/scorecard/reports):

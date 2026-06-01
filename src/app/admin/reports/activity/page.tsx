@@ -10,8 +10,6 @@ import { formatDateMDY } from "@/lib/dates";
 import {
   DEFAULT_WORKING_DAYS,
   formatAvailableDays,
-  paceVerdict,
-  paceVerdictLabel,
 } from "@/lib/working-days";
 import { cn } from "@/lib/utils";
 
@@ -48,7 +46,12 @@ const SHORT_LABELS: Record<ActivityKey, string> = {
   gold_list_touches: "Gold",
 };
 
-type Cell = { actual: number; goal: number; percent: number | null };
+type Cell = {
+  actual: number;
+  goal: number;
+  original_goal: number;
+  percent: number | null;
+};
 type ReportRow = {
   id: string;
   first_name: string;
@@ -305,12 +308,8 @@ function AeReportCard({ row, tab }: { row: ReportRow; tab: Tab }) {
             {row.available_days < DEFAULT_WORKING_DAYS ? (
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {row.is_holiday_week ? "Holiday • " : ""}
-                {formatAvailableDays(row.available_days)} avail days ·{" "}
-                <span className="font-medium">
-                  {paceVerdictLabel(
-                    paceVerdict(row.score, row.expected_percent),
-                  )}
-                </span>
+                {formatAvailableDays(row.available_days)} available days ·
+                targets adjusted for approved time off
               </p>
             ) : null}
           </div>
@@ -351,9 +350,11 @@ function AeReportCard({ row, tab }: { row: ReportRow; tab: Tab }) {
   );
 }
 
-/** Goal Progress tile: actual/goal with a percentage bar. */
+/** Goal Progress tile: actual / adjusted-goal with a percentage bar. When the
+ *  goal was reduced for time off, the original target is shown for context. */
 function ProgressTile({ label, cell }: { label: string; cell: Cell }) {
   const t = tone(cell.percent);
+  const adjusted = cell.goal !== cell.original_goal;
   return (
     <div className="rounded-lg border bg-muted/20 p-2.5">
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
@@ -363,6 +364,14 @@ function ProgressTile({ label, cell }: { label: string; cell: Cell }) {
           /{cell.goal}
         </span>
       </p>
+      {adjusted ? (
+        <p
+          className="text-[10px] text-muted-foreground"
+          title={`Adjusted target ${cell.goal} · original ${cell.original_goal}`}
+        >
+          adjusted · was {cell.original_goal}
+        </p>
+      ) : null}
       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
         <div
           className={cn("h-full rounded-full", t.bar)}

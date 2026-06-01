@@ -185,9 +185,14 @@ function ThisWeekBody({
   return (
     <div className="space-y-3">
       {availabilityLabel ? (
-        <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary">
-          <CalendarDays aria-hidden="true" className="size-3.5" />
-          {availabilityLabel}
+        <div className="flex items-start gap-1.5 rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary">
+          <CalendarDays aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            {availabilityLabel}
+            <span className="block font-normal text-primary/80">
+              Targets adjusted for approved time off
+            </span>
+          </span>
         </div>
       ) : null}
       <Momentum mine={mine} rank={myIndex + 1} total={ranked.length} />

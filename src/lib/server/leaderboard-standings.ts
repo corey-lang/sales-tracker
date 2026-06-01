@@ -7,7 +7,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import { averagePercent } from "@/lib/goals";
-import { weekAvailability } from "@/lib/working-days";
+import { adjustGoalValue, weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
 
 // Shared leaderboard aggregation — used by GET /api/leaderboard (current week,
@@ -147,19 +147,26 @@ export async function computeStandings(
       0,
     );
     const goal = activeGoalFor(p.id, allGoals, goalAsOf);
-    const weeklyTargets = { ...ZERO_ACTIVITY };
-    if (goal) {
-      for (const a of ACTIVITIES) {
-        weeklyTargets[a.key] = Number(goal[a.key as ActivityKey] ?? 0);
-      }
-    }
-    const percent = averagePercent(totals, weeklyTargets, ACTIVITY_KEYS);
     const avail = weekAvailability({
       weekStart: since,
       salespersonId: p.id,
       adjustments,
       today,
     });
+    // Targets are REDUCED for approved time off:
+    // adjusted = round(original × availableDays / 5). The achievement % scores
+    // against the adjusted target, so an AE isn't penalised for days they were
+    // approved to be out. The DB goal row is never mutated.
+    const weeklyTargets = { ...ZERO_ACTIVITY };
+    if (goal) {
+      for (const a of ACTIVITIES) {
+        weeklyTargets[a.key] = adjustGoalValue(
+          Number(goal[a.key as ActivityKey] ?? 0),
+          avail.availableDays,
+        );
+      }
+    }
+    const percent = averagePercent(totals, weeklyTargets, ACTIVITY_KEYS);
     return {
       id: p.id,
       first_name: p.first_name,

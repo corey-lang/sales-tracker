@@ -7,6 +7,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
+  adjustedTargetsFrom,
   averagePercent,
   resolveActiveGoal,
   weeklyTargetsFrom,
@@ -29,7 +30,12 @@ const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
 
 export type ActivityReportCell = {
   actual: number;
+  /** The ADJUSTED weekly target (original × availableDays / 5, rounded).
+   *  Equals `original_goal` on a normal 5-day week. */
   goal: number;
+  /** The unadjusted weekly goal from the DB, for "16 / 20" context. */
+  original_goal: number;
+  /** actual ÷ adjusted goal × 100. */
   percent: number | null;
 };
 
@@ -110,27 +116,37 @@ export async function buildActivityReport(
 
   const rows: ActivityReportRow[] = people.map((p) => {
     const actual = totals.get(p.id) ?? { ...ZERO_ACTIVITY };
-    const targets = weeklyTargetsFrom(resolveActiveGoal(p.id, goals, goalAsOf));
-    const cells = {} as Record<ActivityKey, ActivityReportCell>;
-    for (const k of ACTIVITY_KEYS) {
-      const goal = targets[k];
-      cells[k] = {
-        actual: actual[k],
-        goal,
-        percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
-      };
-    }
+    const resolvedGoal = resolveActiveGoal(p.id, goals, goalAsOf);
     const avail = weekAvailability({
       weekStart: since,
       salespersonId: p.id,
       adjustments,
       today,
     });
+    // Original targets (DB, never mutated) and the time-off-adjusted targets
+    // the AE is actually scored against this week.
+    const originalTargets = weeklyTargetsFrom(resolvedGoal);
+    const adjustedTargets = adjustedTargetsFrom(
+      resolvedGoal,
+      avail.availableDays,
+    );
+    const cells = {} as Record<ActivityKey, ActivityReportCell>;
+    for (const k of ACTIVITY_KEYS) {
+      const goal = adjustedTargets[k];
+      cells[k] = {
+        actual: actual[k],
+        goal,
+        original_goal: originalTargets[k],
+        percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
+      };
+    }
     return {
       id: p.id,
       first_name: p.first_name,
       cells,
-      score: averagePercent(actual, targets, ACTIVITY_KEYS),
+      // Score uses the ADJUSTED targets — achievement % reflects the reduced
+      // week.
+      score: averagePercent(actual, adjustedTargets, ACTIVITY_KEYS),
       available_days: avail.availableDays,
       expected_percent: avail.expectedPercent,
       is_holiday_week: avail.isHolidayWeek,

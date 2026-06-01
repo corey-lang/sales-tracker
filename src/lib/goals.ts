@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase/client";
 import type { ActivityKey, ActivityValues } from "@/lib/activities";
 import { ZERO_ACTIVITY } from "@/lib/activities";
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
+import { adjustGoalValue } from "@/lib/working-days";
 
 // The `weekly_goals` table stores Monday-Friday weekly targets.
 // `salesperson_id IS NULL` = global default; a UUID = per-person override.
@@ -22,6 +23,24 @@ export function weeklyTargetsFrom(goal: WeeklyGoal | null): ActivityValues {
   const out = { ...ZERO_ACTIVITY };
   for (const key of Object.keys(ZERO_ACTIVITY) as ActivityKey[]) {
     out[key] = Number(goal[key] ?? 0);
+  }
+  return out;
+}
+
+/**
+ * The week's targets after reducing each goal for approved unavailable days:
+ * `adjusted = round(original × availableDays / 5)`. The DB goal row is never
+ * touched — this is computed at read time everywhere a target/score is shown.
+ * `availableDays = 5` (normal week) returns the original targets unchanged.
+ */
+export function adjustedTargetsFrom(
+  goal: WeeklyGoal | null,
+  availableDays: number,
+): ActivityValues {
+  const raw = weeklyTargetsFrom(goal);
+  const out = { ...ZERO_ACTIVITY };
+  for (const key of Object.keys(ZERO_ACTIVITY) as ActivityKey[]) {
+    out[key] = adjustGoalValue(raw[key], availableDays);
   }
   return out;
 }
