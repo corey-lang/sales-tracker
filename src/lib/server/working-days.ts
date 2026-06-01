@@ -60,3 +60,33 @@ export async function getAvailableDaysForWeek(
   if (error) throw new Error(error);
   return availableDaysForWeek(weekStart, salespersonId, adjustments);
 }
+
+/**
+ * All adjustment rows whose date falls inside [startDate, endDate], as
+ * `{ adjustments, error }`. Powers the Range Goal Engine. Only in-range days
+ * affect range targets, so this query covers everything the engine needs.
+ * FAILS CLOSED exactly like fetchWeekAdjustments — a non-null `error` is a
+ * user-safe string and an empty list; callers MUST surface it, never compute
+ * as if there were no adjustments.
+ */
+export async function fetchRangeAdjustments(
+  supabase: SupabaseClient,
+  startDate: string,
+  endDate: string,
+): Promise<{ adjustments: WorkingDayAdjustment[]; error: string | null }> {
+  const res = await supabase
+    .from("working_day_adjustments")
+    .select("*")
+    .gte("adjustment_date", startDate)
+    .lte("adjustment_date", endDate);
+  if (res.error) {
+    console.warn(
+      `[working-days] range fetch failed [${startDate}..${endDate}] code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    return { adjustments: [], error: ADJUSTMENTS_READ_ERROR };
+  }
+  return {
+    adjustments: (res.data ?? []) as WorkingDayAdjustment[],
+    error: null,
+  };
+}

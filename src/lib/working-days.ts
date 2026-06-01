@@ -1,4 +1,4 @@
-import { addDays, format, parseISO } from "date-fns";
+import { addDays, format, parseISO, startOfWeek } from "date-fns";
 
 // Working-day adjustments — pure availability + pace math.
 //
@@ -196,4 +196,85 @@ export function availableDaysLabel(avail: WeekAvailability): string | null {
   if (avail.availableDays >= DEFAULT_WORKING_DAYS) return null;
   const count = `${formatAvailableDays(avail.availableDays)} Available Days`;
   return avail.isHolidayWeek ? `Holiday Week • ${count}` : `${count} This Week`;
+}
+
+// ---------------------------------------------------------------------------
+// Range support — powering the shared Range Goal Engine (src/lib/range-targets).
+// A date range is split into business weeks; each week is prorated to the
+// business days that actually fall inside the range, then reduced for that
+// week's holiday/PTO. These helpers only handle the DAY math; the goal scaling
+// lives in range-targets.ts.
+// ---------------------------------------------------------------------------
+
+/** The Monday (yyyy-MM-dd) of every business week that overlaps the inclusive
+ *  range [startDate, endDate]. The first/last weeks may be partial — callers
+ *  intersect each week with the range via rangeWeekAvailability. */
+export function businessWeeksInRange(
+  startDate: string,
+  endDate: string,
+): string[] {
+  const start = parseISO(startDate);
+  const end = parseISO(endDate);
+  if (end < start) return [];
+  const lastMonday = startOfWeek(end, { weekStartsOn: 1 });
+  const out: string[] = [];
+  let monday = startOfWeek(start, { weekStartsOn: 1 });
+  // Guard against any pathological loop (max ~53 weeks/yr; cap generously).
+  for (let i = 0; i < 366 && monday <= lastMonday; i += 1) {
+    out.push(format(monday, "yyyy-MM-dd"));
+    monday = addDays(monday, 7);
+  }
+  return out;
+}
+
+export type RangeWeekAvailability = {
+  /** Mon-Fri days of this week that fall inside the range (0..5). */
+  businessDaysInRange: number;
+  /** Those in-range days minus holiday/PTO (0..5, may be fractional via
+   *  half-days). This is what the week's goal is scaled by. */
+  availableDaysInRange: number;
+  /** A GLOBAL holiday lands on an in-range day of this week. */
+  isHolidayWeek: boolean;
+  /** First / last in-range business day (yyyy-MM-dd), or null when the week
+   *  contributes no business days to the range. `lastInRangeDay` is the
+   *  as-of date for resolving that week's goal. */
+  firstInRangeDay: string | null;
+  lastInRangeDay: string | null;
+};
+
+/** For one week and one AE, intersect the week's Mon-Fri days with the range
+ *  and subtract holiday/PTO. Reuses the same per-day off math (`dayOffValue`)
+ *  as weekAvailability — no duplicated adjustment logic. */
+export function rangeWeekAvailability(opts: {
+  weekStart: string;
+  salespersonId: string;
+  adjustments: WorkingDayAdjustment[];
+  rangeStart: string;
+  rangeEnd: string;
+}): RangeWeekAvailability {
+  const { weekStart, salespersonId, adjustments, rangeStart, rangeEnd } = opts;
+  let businessDaysInRange = 0;
+  let availableDaysInRange = 0;
+  let isHolidayWeek = false;
+  let firstInRangeDay: string | null = null;
+  let lastInRangeDay: string | null = null;
+
+  for (const d of businessDaysOfWeek(weekStart)) {
+    if (d < rangeStart || d > rangeEnd) continue;
+    businessDaysInRange += 1;
+    if (firstInRangeDay === null) firstInRangeDay = d;
+    lastInRangeDay = d;
+    availableDaysInRange += 1 - dayOffValue(adjustments, d, salespersonId);
+    if (adjustments.some((a) => a.adjustment_date === d && a.applies_to_all)) {
+      isHolidayWeek = true;
+    }
+  }
+
+  return {
+    businessDaysInRange,
+    availableDaysInRange,
+    isHolidayWeek,
+    firstInRangeDay,
+    lastInRangeDay,
+  };
 }
