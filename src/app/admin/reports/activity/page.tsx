@@ -2,22 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { apiFetch } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
-import { supabase } from "@/lib/supabase/client";
+import { ACTIVITIES, type ActivityKey } from "@/lib/activities";
+import { recentBusinessWeeks } from "@/lib/goals";
+import { formatDateMDY } from "@/lib/dates";
 import {
-  ACTIVITIES,
-  ZERO_ACTIVITY,
-  type ActivityKey,
-  type ActivityValues,
-} from "@/lib/activities";
-import {
-  averagePercent,
-  recentBusinessWeeks,
-  resolveActiveGoal,
-  weeklyTargetsFrom,
-  type WeeklyGoal,
-} from "@/lib/goals";
-import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
+  DEFAULT_WORKING_DAYS,
+  formatAvailableDays,
+  paceVerdict,
+  paceVerdictLabel,
+} from "@/lib/working-days";
 import { cn } from "@/lib/utils";
 
 import {
@@ -30,15 +25,16 @@ import {
 
 // Activity Reports — per-AE progress toward weekly goals for a selectable
 // business week. Two views: Goal Progress (actual/goal counts) and Percentage
-// (completion % per activity). Both are admin-only (admin/layout.tsx guard),
-// so showing goal targets here is intended — the AE-facing leaderboard still
-// never sees goals.
+// (completion % per activity).
 //
-// Scoring is the app's existing logic: per-activity % is raw actual/goal, and
-// the overall Score reuses averagePercent() (per-activity average with
-// diminishing returns) — the same helper the leaderboard uses.
-
-const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
+// SECURITY BOUNDARY: the data is computed SERVER-SIDE behind the admin-gated
+// GET /api/admin/reports/activity (requireAdmin). The browser no longer reads
+// weekly_goals / activity_entries / working_day_adjustments directly with the
+// anon key, so raw goals and private PTO context never reach the client. The
+// admin/layout.tsx role gate is UX only; the server check is the boundary.
+//
+// Scoring is unchanged (the shared averagePercent helper, server-side); the
+// available-days/pace chip sits ALONGSIDE the score and never changes it.
 
 /** Compact column labels matching the admin shorthand. */
 const SHORT_LABELS: Record<ActivityKey, string> = {
@@ -52,20 +48,22 @@ const SHORT_LABELS: Record<ActivityKey, string> = {
   gold_list_touches: "Gold",
 };
 
-type Person = { id: string; first_name: string };
 type Cell = { actual: number; goal: number; percent: number | null };
 type ReportRow = {
   id: string;
   first_name: string;
   cells: Record<ActivityKey, Cell>;
   score: number | null;
+  available_days: number;
+  expected_percent: number;
+  is_holiday_week: boolean;
 };
 type Tab = "progress" | "percent";
 type Tone = { text: string; bar: string; chip: string };
 type Load =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; rows: ReportRow[] };
+  | { status: "ready"; rows: ReportRow[]; through: string };
 
 /** Color cue for a completion percentage. null = no goal set for that activity. */
 function tone(percent: number | null): Tone {
@@ -104,6 +102,18 @@ function tone(percent: number | null): Tone {
   };
 }
 
+/** Rank by score; AEs with no goal (null) sort last; name as tiebreak. */
+function rankRows(rows: ReportRow[]): ReportRow[] {
+  return [...rows].sort((a, b) => {
+    if (a.score === null && b.score === null) {
+      return a.first_name.localeCompare(b.first_name);
+    }
+    if (a.score === null) return 1;
+    if (b.score === null) return -1;
+    return b.score - a.score || a.first_name.localeCompare(b.first_name);
+  });
+}
+
 export default function ActivityReportPage() {
   useScrollToTop();
 
@@ -118,115 +128,49 @@ export default function ActivityReportPage() {
   const [tab, setTab] = useState<Tab>("progress");
   const [load, setLoad] = useState<Load>({ status: "loading" });
 
-  // The week's reporting end — the Friday, or today for the still-running
-  // week. "Today" is the Denver business-day, NOT a UTC slice — otherwise
-  // the report's "through" date could disagree with the leaderboard's and
-  // Weekly Focus's by up to a day at the UTC boundary.
-  const today = useMemo(() => {
-    const d = todayInAppTimezone();
-    // YYYY-MM-DD slice of the Denver date that todayInAppTimezone()
-    // already pegs to local midnight, so direct ISO slice is safe.
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-      d.getDate(),
-    ).padStart(2, "0")}`;
-  }, []);
-  const through = week.friday < today ? week.friday : today;
-
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoad({ status: "loading" });
 
-    Promise.all([
-      // Real AEs only — admins, the assistant, the test account, and
-      // juice_box_only guests (Travis, Rizz, Faith, …) don't have goal
-      // progress to report on. Positive `role = 'ae'` allow-list keeps any
-      // future role out automatically; is_test stays as belt-and-suspenders
-      // against the seeded test account leaking into the report.
-      supabase
-        .from("salespeople")
-        .select("id, first_name")
-        .eq("role", "ae")
-        .eq("is_test", false)
-        .order("first_name", { ascending: true }),
-      supabase
-        .from("activity_entries")
-        .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
-        .gte("entry_date", week.weekStart)
-        .lte("entry_date", through),
-      supabase.from("weekly_goals").select("*"),
-    ])
-      .then(([peopleRes, entriesRes, goalsRes]) => {
+    // Admin-gated server route does the read + aggregation; apiFetch attaches
+    // the session token so a bare fetch would 401/403.
+    apiFetch(`/api/admin/reports/activity?weekStart=${weekStart}`)
+      .then(async (res) => {
+        const body = (await res.json()) as {
+          rows?: ReportRow[];
+          through?: string;
+          error?: string;
+        };
         if (cancelled) return;
-        const err = peopleRes.error ?? entriesRes.error ?? goalsRes.error;
-        if (err) {
-          setLoad({ status: "error", message: err.message });
+        if (!res.ok) {
+          setLoad({
+            status: "error",
+            message: body.error ?? "Couldn't load the report.",
+          });
           return;
         }
-        const people = (peopleRes.data ?? []) as Person[];
-        const entries = (entriesRes.data ?? []) as unknown as Array<
-          Partial<ActivityValues> & { salesperson_id: string }
-        >;
-        const goals = (goalsRes.data ?? []) as WeeklyGoal[];
-
-        // Sum each AE's activity over the week.
-        const totals = new Map<string, ActivityValues>();
-        for (const p of people) totals.set(p.id, { ...ZERO_ACTIVITY });
-        for (const e of entries) {
-          const bucket = totals.get(e.salesperson_id);
-          if (!bucket) continue;
-          for (const k of ACTIVITY_KEYS) bucket[k] += Number(e[k] ?? 0);
-        }
-
-        const computed: ReportRow[] = people.map((p) => {
-          const actual = totals.get(p.id) ?? { ...ZERO_ACTIVITY };
-          // The goal in effect for this AE during the selected week.
-          const targets = weeklyTargetsFrom(
-            resolveActiveGoal(p.id, goals, through),
-          );
-          const cells = {} as Record<ActivityKey, Cell>;
-          for (const k of ACTIVITY_KEYS) {
-            const goal = targets[k];
-            cells[k] = {
-              actual: actual[k],
-              goal,
-              percent:
-                goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
-            };
-          }
-          return {
-            id: p.id,
-            first_name: p.first_name,
-            cells,
-            // Overall score reuses the shared scoring helper.
-            score: averagePercent(actual, targets, ACTIVITY_KEYS),
-          };
+        setLoad({
+          status: "ready",
+          rows: rankRows(body.rows ?? []),
+          through: body.through ?? week.friday,
         });
-
-        // Rank by score; AEs with no goal (null) sort last.
-        computed.sort((a, b) => {
-          if (a.score === null && b.score === null) {
-            return a.first_name.localeCompare(b.first_name);
-          }
-          if (a.score === null) return 1;
-          if (b.score === null) return -1;
-          return b.score - a.score || a.first_name.localeCompare(b.first_name);
-        });
-        setLoad({ status: "ready", rows: computed });
       })
-      .catch((e: unknown) => {
+      .catch((err: unknown) => {
         if (cancelled) return;
         setLoad({
           status: "error",
-          message: e instanceof Error ? e.message : "Couldn't load the report.",
+          message:
+            err instanceof Error ? err.message : "Couldn't load the report.",
         });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [week.weekStart, through]);
+  }, [weekStart, week.friday]);
 
+  const through = load.status === "ready" ? load.through : week.friday;
   const partialWeek = through < week.friday;
 
   return (
@@ -356,7 +300,20 @@ function AeReportCard({ row, tab }: { row: ReportRow; tab: Tab }) {
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between gap-3">
-          <CardTitle className="text-base">{row.first_name}</CardTitle>
+          <div className="min-w-0">
+            <CardTitle className="text-base">{row.first_name}</CardTitle>
+            {row.available_days < DEFAULT_WORKING_DAYS ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {row.is_holiday_week ? "Holiday • " : ""}
+                {formatAvailableDays(row.available_days)} avail days ·{" "}
+                <span className="font-medium">
+                  {paceVerdictLabel(
+                    paceVerdict(row.score, row.expected_percent),
+                  )}
+                </span>
+              </p>
+            ) : null}
+          </div>
           <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             Score
             <span

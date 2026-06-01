@@ -5,6 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-client";
 import { formatActivityStamp } from "@/lib/dates";
 import { progressColor, recentBusinessWeeks } from "@/lib/goals";
+import {
+  DEFAULT_WORKING_DAYS,
+  formatAvailableDays,
+  paceVerdict,
+  paceVerdictLabel,
+} from "@/lib/working-days";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { cn } from "@/lib/utils";
 
@@ -28,6 +34,9 @@ type ScorecardRow = {
   id: string;
   first_name: string;
   percent: number | null;
+  available_days: number;
+  expected_percent: number;
+  is_holiday_week: boolean;
   manual_visits: number;
   crm_visits: number;
   cards_scanned: number;
@@ -202,23 +211,38 @@ function ScorecardCard({ rank, row }: { rank: number; row: ScorecardRow }) {
               {row.first_name}
             </CardTitle>
           </div>
-          <div className="flex flex-col items-end gap-0.5">
-            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Score
-            </span>
-            <span
-              className={cn(
-                "text-2xl font-bold tabular-nums",
-                percentColor,
-              )}
-            >
-              {percent === null ? "—" : `${percent}%`}
-            </span>
+          <div className="flex items-center gap-3">
+            <PaceChip
+              percent={percent}
+              expectedPercent={row.expected_percent}
+            />
+            <div className="flex flex-col items-end gap-0.5">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Score
+              </span>
+              <span
+                className={cn(
+                  "text-2xl font-bold tabular-nums",
+                  percentColor,
+                )}
+              >
+                {percent === null ? "—" : `${percent}%`}
+              </span>
+            </div>
           </div>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Tile
+            label="Available Days"
+            value={
+              row.available_days < DEFAULT_WORKING_DAYS
+                ? `${formatAvailableDays(row.available_days)}${row.is_holiday_week ? " (holiday)" : ""}`
+                : formatAvailableDays(row.available_days)
+            }
+            muted={row.available_days >= DEFAULT_WORKING_DAYS}
+          />
           <Tile label="Manual Visits" value={row.manual_visits} />
           <Tile label="Office CRM Visits" value={row.crm_visits} />
           <Tile label="Cards Scanned" value={row.cards_scanned} />
@@ -230,6 +254,41 @@ function ScorecardCard({ rank, row }: { rank: number; row: ScorecardRow }) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/** Available-days-aware pace chip shown alongside the raw score. Does NOT
+ *  change the score — it's the "on pace given approved time off" read. */
+function PaceChip({
+  percent,
+  expectedPercent,
+}: {
+  percent: number | null;
+  expectedPercent: number;
+}) {
+  const verdict = paceVerdict(percent, expectedPercent);
+  if (verdict === "none") return null;
+  const tone =
+    verdict === "ahead"
+      ? "bg-green-500/10 text-green-700 dark:text-green-400"
+      : verdict === "on_pace"
+        ? "bg-green-500/10 text-green-700 dark:text-green-400"
+        : "bg-amber-500/10 text-amber-700 dark:text-amber-400";
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+        Pace
+      </span>
+      <span
+        className={cn(
+          "rounded-full px-2 py-0.5 text-xs font-semibold",
+          tone,
+        )}
+        title={`Expected ~${expectedPercent}% by now`}
+      >
+        {paceVerdictLabel(verdict)}
+      </span>
+    </div>
   );
 }
 

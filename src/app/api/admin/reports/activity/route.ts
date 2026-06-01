@@ -3,22 +3,22 @@ import { addDays, format, isValid, parseISO, startOfWeek } from "date-fns";
 import { getServerSupabase } from "@/lib/supabase/server";
 import { todayInAppTimezone } from "@/lib/dates";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
-import { buildScorecard } from "@/lib/server/scorecard";
+import { buildActivityReport } from "@/lib/server/activity-report";
 
-// GET /api/admin/scorecard?weekStart=YYYY-MM-DD
+// GET /api/admin/reports/activity?weekStart=YYYY-MM-DD
 //
-// Admin-only operating scorecard for a chosen business week. Returns one
-// row per AE with score % plus raw KPI counts (visits, cards, to-dos,
-// offices, last-active) — manager-facing only. The AE leaderboard remains
-// percentage-only; raw counts never leak there.
+// Admin-only. Returns the per-AE activity report (actual/goal per activity,
+// overall score, available-days + pace) for a chosen business week.
 //
-// AUTHORIZATION
-//   requireAdmin() rejects any non-admin caller (401/403) before any data
-//   is read. There is no AE-facing variant of this route.
+// WHY THIS EXISTS
+//   The report used to be computed in the browser, reading every AE's
+//   weekly_goals, activity_entries, and working_day_adjustments (incl. PTO)
+//   with the anon key — readable by anyone. This route does the read +
+//   aggregation server-side behind requireAdmin, so the raw rows (and private
+//   PTO context) never cross the wire. Client-side layout gating is NOT the
+//   security boundary; this server check is.
 //
-// Mirrors the week-normalization rules in /api/admin/leaderboard: clamps
-// the through-date to today (Denver business day) and resolves goals as
-// of the week's end so prior weeks score against the goal in effect then.
+// Mirrors the week-normalization rules in /api/admin/scorecard.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,22 +47,16 @@ export async function GET(req: Request) {
     if (through > todayStr) through = todayStr;
     const goalAsOf = through;
 
-    const { rows, error } = await buildScorecard(
+    const { rows, error } = await buildActivityReport(
       getServerSupabase(),
       since,
       through,
       goalAsOf,
-      // Real today for pace — past weeks read 100% expected, current week its
-      // true to-date pace.
       todayStr,
     );
     if (error) {
-      // buildScorecard/computeStandings already logged any raw provider text;
-      // return a safe generic message.
-      return Response.json(
-        { error: "Could not load the scorecard right now." },
-        { status: 500 },
-      );
+      // `error` is already a user-safe string (no raw provider message).
+      return Response.json({ error }, { status: 502 });
     }
 
     return Response.json(

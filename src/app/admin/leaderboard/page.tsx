@@ -5,6 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { progressColor, recentBusinessWeeks } from "@/lib/goals";
+import {
+  DEFAULT_WORKING_DAYS,
+  formatAvailableDays,
+  paceVerdict,
+  paceVerdictLabel,
+} from "@/lib/working-days";
 import { cn } from "@/lib/utils";
 
 import {
@@ -28,6 +34,9 @@ type Standing = {
   id: string;
   first_name: string;
   percent: number | null;
+  availableDays?: number;
+  expectedPercent?: number;
+  isHolidayWeek?: boolean;
 };
 type Load =
   | { status: "loading" }
@@ -156,15 +165,28 @@ function StandingRow({
   const { percent } = standing;
   const percentColor =
     percent === null ? "text-muted-foreground" : progressColor(percent).text;
+  const availableDays = standing.availableDays ?? DEFAULT_WORKING_DAYS;
+  const reducedDays = availableDays < DEFAULT_WORKING_DAYS;
+  const verdict = paceVerdict(percent, standing.expectedPercent ?? 0);
   return (
     <li className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
       <div className="flex min-w-0 items-baseline gap-3">
         <span className="text-lg font-semibold tabular-nums text-muted-foreground">
           #{rank}
         </span>
-        <span className="truncate text-base font-medium">
-          {standing.first_name}
-        </span>
+        <div className="min-w-0">
+          <span className="truncate text-base font-medium">
+            {standing.first_name}
+          </span>
+          {/* Available-days context — pace only; the score is unchanged. */}
+          {reducedDays ? (
+            <p className="text-xs text-muted-foreground">
+              {standing.isHolidayWeek ? "Holiday • " : ""}
+              {formatAvailableDays(availableDays)} avail days ·{" "}
+              {paceVerdictLabel(verdict)}
+            </p>
+          ) : null}
+        </div>
       </div>
       {/* Score only — raw activity counts live on /admin/reports/activity. */}
       <span

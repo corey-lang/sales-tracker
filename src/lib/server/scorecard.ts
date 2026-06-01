@@ -19,8 +19,16 @@ import { computeStandings } from "@/lib/server/leaderboard-standings";
 export type ScorecardRow = {
   id: string;
   first_name: string;
-  /** Weekly goal score % — same math as the leaderboard. null when no goal. */
+  /** Weekly goal score % — same math as the leaderboard. null when no goal.
+   *  Unchanged by working-day adjustments. */
   percent: number | null;
+  /** Available working days this week (5 minus holiday/PTO, clamped >= 1). */
+  available_days: number;
+  /** Expected-to-date pace % from available days elapsed — pace context that
+   *  sits ALONGSIDE `percent` (which still measures the full weekly goal). */
+  expected_percent: number;
+  /** True when a global holiday falls in this week. */
+  is_holiday_week: boolean;
   /** activity_entries.office_visits for the week (rep-reported daily count). */
   manual_visits: number;
   /** Count of office_visits rows for the week (production environment only). */
@@ -60,10 +68,20 @@ export async function buildScorecard(
   since: string,
   through: string,
   goalAsOf: string,
+  // Real today (yyyy-MM-dd) for pace; see computeStandings. Defaults to
+  // `through` for the current-week case.
+  today: string = through,
 ): Promise<{ rows: ScorecardRow[]; error: string | null }> {
-  // Standings gives us the AE roster + score % + manual visit totals in
-  // one shot (it already filters to role='ae', is_test=false).
-  const standings = await computeStandings(supabase, since, through, goalAsOf);
+  // Standings gives us the AE roster + score % + manual visit totals + the
+  // available-day/pace fields in one shot (it already filters to role='ae',
+  // is_test=false).
+  const standings = await computeStandings(
+    supabase,
+    since,
+    through,
+    goalAsOf,
+    today,
+  );
   if (standings.error) {
     return { rows: [], error: standings.error };
   }
@@ -151,6 +169,9 @@ export async function buildScorecard(
     id: s.id,
     first_name: s.first_name,
     percent: s.percent,
+    available_days: s.availableDays,
+    expected_percent: s.expectedPercent,
+    is_holiday_week: s.isHolidayWeek,
     manual_visits: s.totals.office_visits,
     crm_visits: crmVisits.get(s.id) ?? 0,
     cards_scanned: cardsScanned.get(s.id) ?? 0,

@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api-client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { progressColor } from "@/lib/goals";
+import { DEFAULT_WORKING_DAYS, formatAvailableDays } from "@/lib/working-days";
 import { cn } from "@/lib/utils";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -29,6 +30,8 @@ type Standing = {
   id: string;
   first_name: string;
   percent: number | null;
+  availableDays?: number;
+  isHolidayWeek?: boolean;
 };
 
 export default function LeaderboardPage() {
@@ -190,12 +193,27 @@ function StandingRow({
         <span className="text-lg font-semibold tabular-nums text-muted-foreground">
           #{rank}
         </span>
-        <span className="truncate text-base font-medium">
-          {standing.first_name}
-          {isMe && (
-            <span className="ml-2 text-xs text-muted-foreground">(you)</span>
-          )}
-        </span>
+        <div className="min-w-0">
+          <span className="truncate text-base font-medium">
+            {standing.first_name}
+            {isMe && (
+              <span className="ml-2 text-xs text-muted-foreground">(you)</span>
+            )}
+          </span>
+          {/* Time-off context for the signed-in rep only — informational,
+              never a goal reduction, and never exposes teammates' PTO. */}
+          {isMe &&
+          (standing.availableDays ?? DEFAULT_WORKING_DAYS) <
+            DEFAULT_WORKING_DAYS ? (
+            <p className="text-xs text-primary">
+              {standing.isHolidayWeek ? "Holiday Week • " : ""}
+              {formatAvailableDays(
+                standing.availableDays ?? DEFAULT_WORKING_DAYS,
+              )}{" "}
+              Available Days This Week
+            </p>
+          ) : null}
+        </div>
       </div>
       <span
         className={cn(

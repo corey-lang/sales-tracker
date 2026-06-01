@@ -7,6 +7,7 @@ import { CalendarDays, Trophy, Zap } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { todayInAppTimezone } from "@/lib/dates";
 import { progressColor } from "@/lib/goals";
+import { DEFAULT_WORKING_DAYS, formatAvailableDays } from "@/lib/working-days";
 import { cn } from "@/lib/utils";
 
 import { Card, CardContent } from "@/components/ui/card";
@@ -21,7 +22,16 @@ type Props = {
   refreshKey: number;
 };
 
-type Standing = { id: string; first_name: string; percent: number | null };
+type Standing = {
+  id: string;
+  first_name: string;
+  percent: number | null;
+  // Working-day-adjustment context from the server. Older payloads may omit
+  // these, so consumers default to a full 5-day week.
+  availableDays?: number;
+  expectedPercent?: number;
+  isHolidayWeek?: boolean;
+};
 
 /**
  * Business days remaining in the current Mon-Fri week, including today.
@@ -40,11 +50,17 @@ type Tone = "good" | "warn" | "bad" | "neutral";
 
 /**
  * A human, context-aware status for the weekly momentum pill. Reads percent
- * progress against where the Mon-Fri week expects the rep to be, and leans
+ * progress against where the week expects the rep to be, and leans
  * encouraging — never discouraging. "On pace" is never shown at 0%.
+ *
+ * `expectedPercent` is the share of this rep's AVAILABLE working days already
+ * completed (server-computed from holiday/PTO adjustments). On a normal week
+ * it equals (5 − daysLeft) / 5 × 100; on a 4-day week it scales so a rep out
+ * for an approved day isn't judged "behind" for that day.
  */
 function paceStatus(
   percent: number,
+  expectedPercent: number,
   daysLeft: number,
 ): { label: string; tone: Tone } {
   // Over target — celebrate first, regardless of the day.
@@ -54,13 +70,11 @@ function paceStatus(
   // Nothing logged yet — a fresh, neutral starting point, not "on pace".
   if (percent <= 0) return { label: "Ready to start", tone: "neutral" };
 
-  // `expected` = the share of the week's workdays already completed before
-  // today, i.e. where a perfectly even week would have the rep right now.
-  const expected = ((5 - daysLeft) / 5) * 100;
   // Clearly ahead of the week's pace.
-  if (percent >= expected + 15) return { label: "Strong week", tone: "good" };
+  if (percent >= expectedPercent + 15)
+    return { label: "Strong week", tone: "good" };
   // At pace, with a small grace band so a near-miss still reads as healthy.
-  if (percent >= expected - 10) return { label: "On pace", tone: "good" };
+  if (percent >= expectedPercent - 10) return { label: "On pace", tone: "good" };
   // Some progress, but behind pace — keep it gentle and motivating.
   return { label: "Getting started", tone: "warn" };
 }
@@ -158,8 +172,24 @@ function ThisWeekBody({
     rows.push({ standing: mine, rank: myIndex + 1, detached: true });
   }
 
+  // Informational time-off banner — never a goal reduction, just context.
+  // Shown for any rep whose available days dropped below a full week.
+  const availableDays = mine?.availableDays ?? DEFAULT_WORKING_DAYS;
+  const availabilityLabel =
+    mine && availableDays < DEFAULT_WORKING_DAYS
+      ? mine.isHolidayWeek
+        ? `Holiday Week • ${formatAvailableDays(availableDays)} Available Days`
+        : `${formatAvailableDays(availableDays)} Available Days This Week`
+      : null;
+
   return (
     <div className="space-y-3">
+      {availabilityLabel ? (
+        <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary">
+          <CalendarDays aria-hidden="true" className="size-3.5" />
+          {availabilityLabel}
+        </div>
+      ) : null}
       <Momentum mine={mine} rank={myIndex + 1} total={ranked.length} />
       <Leaderboard rows={rows} currentSalespersonId={salespersonId} />
     </div>
@@ -186,7 +216,11 @@ function Momentum({
 
   const percent = mine.percent;
   const daysLeft = businessDaysLeft();
-  const status = paceStatus(percent, daysLeft);
+  // Server-computed expected-to-date pace (available-days aware). Fall back to
+  // the even Mon-Fri curve if an older payload omits it.
+  const expectedPercent =
+    mine.expectedPercent ?? ((5 - daysLeft) / 5) * 100;
+  const status = paceStatus(percent, expectedPercent, daysLeft);
   const color = progressColor(percent);
   const daysLeftLabel =
     daysLeft === 0

@@ -42,7 +42,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    await requireAeToolAccess(req);
+    const me = await requireAeToolAccess(req);
 
     // Anchor to the app business zone (America/Denver) so the
     // leaderboard's "this week" rolls over at the same instant as the
@@ -56,15 +56,39 @@ export async function GET(req: Request) {
       since,
       through,
       todayStr,
+      todayStr,
     );
     if (error) {
-      return Response.json({ error }, { status: 500 });
+      // `error` is already sanitized by computeStandings (raw provider text is
+      // logged there, not here). Return a fixed safe message regardless.
+      return Response.json(
+        { error: "Could not load leaderboard right now." },
+        { status: 500 },
+      );
     }
+
+    // AEs only see their OWN available-days / pace context. Strip those fields
+    // from every other rep's standing so one AE can't infer a teammate's PTO
+    // from a reduced available-day count. The full leaderboard still shows
+    // everyone's % (unchanged); the pace fields ride along only for `me`.
+    const sanitized = standings.map((s) => {
+      if (s.id === me.id) return s;
+      const {
+        availableDays: _ad,
+        expectedPercent: _ep,
+        isHolidayWeek: _hw,
+        ...rest
+      } = s;
+      void _ad;
+      void _ep;
+      void _hw;
+      return rest;
+    });
 
     // Only `standings` leaves the server. Sorting is intentionally left to
     // each consumer so the full page and the mini card keep their own ranking.
     return Response.json(
-      { standings },
+      { standings: sanitized },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

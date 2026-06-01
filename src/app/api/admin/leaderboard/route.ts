@@ -59,9 +59,17 @@ export async function GET(req: Request) {
       since,
       through,
       goalAsOf,
+      // Real today (not the clamped `through`) so a fully-past week reads
+      // 100% expected pace, while the current week reads its true to-date pace.
+      todayStr,
     );
     if (error) {
-      return Response.json({ error }, { status: 500 });
+      // computeStandings already logged any raw provider text; return a safe
+      // generic message.
+      return Response.json(
+        { error: "Could not load leaderboard right now." },
+        { status: 500 },
+      );
     }
 
     return Response.json(
