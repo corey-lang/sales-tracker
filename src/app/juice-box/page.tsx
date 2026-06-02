@@ -551,7 +551,7 @@ export default function JuiceBoxPage() {
         // header below owns top-safe-area padding itself (via the inline
         // paddingTop on its container) so the translucent backdrop
         // covers the notch area both at scroll=0 and while stuck.
-        className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+var(--app-safe-bottom))]"
+        className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+var(--app-safe-bottom,0px))]"
       >
         {/*
           Sticky header. -mx-4 px-4 lets the translucent backdrop bleed
@@ -1447,7 +1447,7 @@ function JuiceBoxFeed({
       <div
         id="juice-composer-bar"
         className="fixed inset-x-0 z-30 border-t border-border bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70"
-        style={{ bottom: "calc(5rem + var(--app-safe-bottom))" }}
+        style={{ bottom: "calc(5rem + var(--app-safe-bottom, 0px))" }}
       >
         {/* Floating "Jump to latest" pill. Positioned `absolute` above
             this fixed composer wrapper so its offset automatically

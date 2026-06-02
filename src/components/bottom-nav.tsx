@@ -86,7 +86,7 @@ const SCAN_BIZ_CARD: NavItem = {
  * still get the nav clearance they asked for.
  */
 export const BOTTOM_NAV_SPACER =
-  "pb-[calc(7rem+env(safe-area-inset-bottom))]!";
+  "pb-[calc(7rem+var(--app-safe-bottom,0px))]!";
 
 function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   if (!salesperson) return [HOME_AE];
@@ -143,7 +143,7 @@ export function BottomNav({
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/70"
       style={{
-        paddingBottom: "env(safe-area-inset-bottom)",
+        paddingBottom: "var(--app-safe-bottom, 0px)",
       }}
     >
       <ul className={cn("mx-auto grid w-full max-w-2xl", gridClass)}>
