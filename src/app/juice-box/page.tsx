@@ -510,6 +510,7 @@ function snapshotForCache(
 export default function JuiceBoxPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
+  const [searchOpen, setSearchOpen] = useState(false);
   // useScrollToTop is intentionally NOT called here. The feed's own scroll
   // effect lands the viewport on the most recent post once initial data
   // resolves — see FeedList. Calling useScrollToTop would race with that.
@@ -573,27 +574,41 @@ export default function JuiceBoxPage() {
             <p className="text-sm text-muted-foreground">Live team feed</p>
             <LiveBadge />
           </div>
-          {/* juice_box_only users have no Home tab — and therefore no
-              Home-header settings gear — so the only path to /more
-              (notifications opt-in, sign-in summary, log out) lives
-              right here in the Juice Box header. Other roles still
-              reach /more via the gear on /dashboard. */}
-          {salesperson.role === "juice_box_only" && (
-            <Link
-              href="/more"
-              aria-label="Account and notification settings"
-              className="absolute right-3 top-1/2 -translate-y-1/2 inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-              style={{ top: "calc(50% + env(safe-area-inset-top) / 2)" }}
+          <div
+            className="absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center gap-1"
+            style={{ top: "calc(50% + env(safe-area-inset-top) / 2)" }}
+          >
+            <button
+              type="button"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search Juice Box history"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
             >
-              <Settings aria-hidden="true" className="size-5" />
-            </Link>
-          )}
+              <Search aria-hidden="true" className="size-5" />
+            </button>
+            {/* juice_box_only users have no Home tab — and therefore no
+                Home-header settings gear — so the only path to /more
+                (notifications opt-in, sign-in summary, log out) lives
+                right here in the Juice Box header. Other roles still
+                reach /more via the gear on /dashboard. */}
+            {salesperson.role === "juice_box_only" && (
+              <Link
+                href="/more"
+                aria-label="Account and notification settings"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                <Settings aria-hidden="true" className="size-5" />
+              </Link>
+            )}
+          </div>
         </header>
 
         <JuiceBoxFeed
           currentUserId={salesperson.id}
           currentUserName={salesperson.first_name}
           isAdmin={salesperson.role === "admin"}
+          searchOpen={searchOpen}
+          onSearchOpenChange={setSearchOpen}
         />
       </main>
       <BottomNav salesperson={salesperson} />
@@ -627,6 +642,8 @@ function JuiceBoxFeed({
   currentUserId,
   currentUserName,
   isAdmin,
+  searchOpen,
+  onSearchOpenChange,
 }: {
   currentUserId: string;
   /** The current user's first_name. Passed through to optimistic reaction
@@ -634,6 +651,8 @@ function JuiceBoxFeed({
    *  before the realtime echo arrives. */
   currentUserName: string;
   isAdmin: boolean;
+  searchOpen: boolean;
+  onSearchOpenChange: (next: boolean) => void;
 }) {
   // Local cache read once at mount. Subsequent state initializers below
   // pull from this single shared object so we don't hit localStorage
@@ -827,6 +846,10 @@ function JuiceBoxFeed({
   // `loadingMore` disables the button while the fetch is in flight.
   const [hasMore, setHasMore] = useState<boolean>(() => cached?.hasMore ?? true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  useEffect(() => {
+    loadingMoreRef.current = loadingMore;
+  }, [loadingMore]);
 
   // Scroll-anchor restoration for "Load older". When the user prepends
   // older posts, we want their CURRENT top message to stay at the same
@@ -994,10 +1017,14 @@ function JuiceBoxFeed({
    * would visually slam the viewport to the top of the page.
    */
   const handleLoadOlder = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
-    if (state.kind !== "ready") return;
-    const topMessage = state.messages[0];
+    const snapshot = cacheSnapshotRef.current;
+    if (loadingMoreRef.current || !snapshot.hasMore) return;
+    const topMessage = snapshot.messages[0];
     if (!topMessage) return;
+    // Synchronous mutex for callers that invoke handleLoadOlder in tight
+    // async loops. The loadingMore state/effect path is still used for UI,
+    // but this ref lock prevents same-tick re-entry.
+    loadingMoreRef.current = true;
 
     // Snapshot anchor BEFORE setState so the layout effect has a stable
     // pre-prepend y-coordinate to restore against.
@@ -1022,7 +1049,6 @@ function JuiceBoxFeed({
         hasMore?: boolean;
       } | null;
       if (!res.ok || !body?.messages) {
-        setLoadingMore(false);
         // Drop the anchor snapshot so the layout effect doesn't try to
         // correct against a render that never happened.
         restoreAnchorRef.current = null;
@@ -1030,7 +1056,7 @@ function JuiceBoxFeed({
       }
 
       const aggregates = new Map<string, TeamMessageReaction[]>();
-      const older: TeamMessage[] = body.messages.map((m) => {
+      const olderRaw: TeamMessage[] = body.messages.map((m) => {
         if (m.reactions && m.reactions.length > 0) {
           aggregates.set(m.id, m.reactions);
         }
@@ -1039,9 +1065,16 @@ function JuiceBoxFeed({
         return rest;
       });
 
-      if (older.length === 0) {
+      const seen = new Set(snapshot.messages.map((m) => m.id));
+      const older = olderRaw.filter((m) => !seen.has(m.id));
+
+      if (olderRaw.length === 0) {
         setHasMore(false);
-        setLoadingMore(false);
+        restoreAnchorRef.current = null;
+        return;
+      }
+
+      if (older.length === 0) {
         restoreAnchorRef.current = null;
         return;
       }
@@ -1063,13 +1096,22 @@ function JuiceBoxFeed({
         return next;
       });
       setHasMore(body.hasMore === true);
+      // Keep the in-memory snapshot fresh synchronously so repeated
+      // await handleLoadOlder() calls in a single async loop advance
+      // their cursor even before useEffect mirrors state back to refs.
+      cacheSnapshotRef.current = {
+        ...cacheSnapshotRef.current,
+        messages: [...older, ...snapshot.messages],
+        hasMore: body.hasMore === true,
+      };
     } catch {
       // Network error — leave state untouched, drop the anchor.
       restoreAnchorRef.current = null;
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [hasMore, loadingMore, state]);
+  }, []);
 
   // Realtime subscription — team_messages. One channel per page mount;
   // cleaned up on unmount so navigating away closes the websocket cleanly.
@@ -1336,6 +1378,29 @@ function JuiceBoxFeed({
     };
   }, [reactionDetails, reactions]);
 
+  const handleSelectSearchResult = useCallback(
+    async (messageId: string) => {
+      onSearchOpenChange(false);
+
+      const elementId = `juice-message-${messageId}`;
+      const hasTargetInDom = () =>
+        typeof document !== "undefined" &&
+        document.getElementById(elementId) !== null;
+
+      let attempts = 0;
+      while (!hasTargetInDom() && cacheSnapshotRef.current.hasMore && attempts < 8) {
+        await handleLoadOlder();
+        await new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => resolve());
+        });
+        attempts += 1;
+      }
+
+      scrollToMessage(messageId);
+    },
+    [handleLoadOlder, onSearchOpenChange],
+  );
+
   // The sheet is rendered only when BOTH `reactionDetails` and a live
   // aggregate are present, so if the chip's last reactor un-reacts while
   // the sheet is open it naturally disappears without a setState-in-effect
@@ -1432,7 +1497,352 @@ function JuiceBoxFeed({
           onClose={closeLightbox}
         />
       )}
+      <JuiceBoxSearchSheet
+        open={searchOpen}
+        onOpenChange={onSearchOpenChange}
+        onSelectMessage={handleSelectSearchResult}
+      />
     </>
+  );
+}
+
+function JuiceBoxSearchSheet({
+  open,
+  onOpenChange,
+  onSelectMessage,
+}: {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  onSelectMessage: (messageId: string) => Promise<void> | void;
+}) {
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [peopleOnly, setPeopleOnly] = useState(false);
+  const [recentOnly, setRecentOnly] = useState(false);
+  const [mediaOnly, setMediaOnly] = useState(false);
+  const [mentionsMeOnly, setMentionsMeOnly] = useState(false);
+  const [results, setResults] = useState<TeamMessage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      setDebouncedQuery("");
+      setPeopleOnly(false);
+      setRecentOnly(false);
+      setMediaOnly(false);
+      setMentionsMeOnly(false);
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      setLoadingMore(false);
+      setHasMore(false);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => {
+      setDebouncedQuery(query.trim());
+    }, 220);
+    return () => window.clearTimeout(id);
+  }, [open, query]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onOpenChange(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onOpenChange]);
+
+  const runSearch = useCallback(
+    async ({ append, before }: { append: boolean; before?: string }) => {
+      const requestId = ++requestIdRef.current;
+      if (append) setLoadingMore(true);
+      else setLoading(true);
+      setError(null);
+
+      try {
+        const params = new URLSearchParams({ limit: "30" });
+        if (debouncedQuery.length > 0) params.set("q", debouncedQuery);
+        if (peopleOnly) params.set("peopleOnly", "true");
+        if (recentOnly) params.set("recentOnly", "true");
+        if (mediaOnly) params.set("hasMedia", "true");
+        if (mentionsMeOnly) params.set("mentionsMe", "true");
+        if (before) params.set("before", before);
+
+        const res = await apiFetch(`/api/team-messages/search?${params.toString()}`);
+        const body = (await res.json().catch(() => null)) as {
+          messages?: TeamMessage[];
+          hasMore?: boolean;
+          error?: string;
+        } | null;
+
+        if (requestId !== requestIdRef.current) return;
+        if (!res.ok) {
+          throw new Error(body?.error ?? `Search failed (${res.status}).`);
+        }
+
+        const fetched = body?.messages ?? [];
+        setResults((prev) => {
+          if (!append) return fetched;
+          const seen = new Set(prev.map((m) => m.id));
+          const unique = fetched.filter((m) => !seen.has(m.id));
+          return [...prev, ...unique];
+        });
+        setHasMore(body?.hasMore === true);
+      } catch (err) {
+        if (requestId !== requestIdRef.current) return;
+        setError(err instanceof Error ? err.message : "Couldn't search Juice Box.");
+        if (!append) {
+          setResults([]);
+          setHasMore(false);
+        }
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [debouncedQuery, mediaOnly, mentionsMeOnly, peopleOnly, recentOnly],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    void runSearch({ append: false });
+  }, [open, runSearch]);
+
+  const handleLoadMore = useCallback(() => {
+    if (loading || loadingMore || !hasMore || results.length === 0) return;
+    const last = results[results.length - 1];
+    if (!last) return;
+    void runSearch({ append: true, before: last.created_at });
+  }, [hasMore, loading, loadingMore, results, runSearch]);
+
+  const searchResults = useMemo(() => {
+    const mapped: Array<{ message: TeamMessage; hasMedia: boolean }> = [];
+    for (const message of results) {
+      const hasMedia = teamMessageMediaList(message).length > 0;
+      mapped.push({ message, hasMedia });
+    }
+    return mapped;
+  }, [results]);
+
+  const grouped = useMemo(() => {
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+    const buckets = new Map<string, JuiceBoxSearchResult[]>();
+    for (const result of searchResults) {
+      const key = formatter.format(new Date(result.message.created_at));
+      const arr = buckets.get(key);
+      if (arr) arr.push(result);
+      else buckets.set(key, [result]);
+    }
+    return [...buckets.entries()];
+  }, [searchResults]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Search Juice Box"
+      className="fixed inset-0 z-50 flex flex-col bg-background"
+      style={{
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}
+    >
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => onOpenChange(false)}
+          aria-label="Back"
+          className="inline-flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        >
+          <ChevronLeft aria-hidden="true" className="size-5" />
+        </button>
+        <p className="text-sm font-semibold">Search Juice Box</p>
+      </div>
+
+      <div className="border-b border-border/60 px-3 py-3">
+        <label className="relative block">
+          <Search
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="search"
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search messages, names, keywords..."
+            className="h-10 w-full rounded-lg border border-border bg-background pl-9 pr-9 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              aria-label="Clear search"
+              className="absolute right-1 top-1 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          )}
+        </label>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setPeopleOnly((v) => !v)}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+              peopleOnly
+                ? "border-primary/50 bg-primary/15 text-primary"
+                : "border-border/70 text-muted-foreground hover:bg-muted",
+            )}
+          >
+            People
+          </button>
+          <button
+            type="button"
+            onClick={() => setRecentOnly((v) => !v)}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+              recentOnly
+                ? "border-primary/50 bg-primary/15 text-primary"
+                : "border-border/70 text-muted-foreground hover:bg-muted",
+            )}
+          >
+            Date 30d
+          </button>
+          <button
+            type="button"
+            onClick={() => setMediaOnly((v) => !v)}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+              mediaOnly
+                ? "border-primary/50 bg-primary/15 text-primary"
+                : "border-border/70 text-muted-foreground hover:bg-muted",
+            )}
+          >
+            Has media
+          </button>
+          <button
+            type="button"
+            onClick={() => setMentionsMeOnly((v) => !v)}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+              mentionsMeOnly
+                ? "border-primary/50 bg-primary/15 text-primary"
+                : "border-border/70 text-muted-foreground hover:bg-muted",
+            )}
+          >
+            Mentions me
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Full history search across Juice Box messages.
+        </p>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {error ? (
+          <div className="rounded-lg border border-destructive/35 bg-destructive/10 px-3 py-4 text-sm text-destructive">
+            {error}
+          </div>
+        ) : loading ? (
+          <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
+            Searching Juice Box history...
+          </div>
+        ) : grouped.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border/70 bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
+            No matches yet. Try a name, keyword, or turn off one of the filters.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {grouped.map(([label, items]) => (
+              <section key={label}>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {label}
+                </p>
+                <div className="space-y-2">
+                  {items.map(({ message, hasMedia }) => {
+                    const hasText = message.message.trim().length > 0;
+                    const preview = hasText
+                      ? message.message
+                      : hasMedia
+                        ? "Media post"
+                        : "Message";
+                    return (
+                      <button
+                        key={message.id}
+                        type="button"
+                        onClick={() => {
+                          void onSelectMessage(message.id);
+                        }}
+                        className="w-full rounded-lg border border-border/70 bg-card px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="font-semibold text-foreground">
+                            {message.salesperson_name}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {formatDistanceToNow(new Date(message.created_at), {
+                              addSuffix: true,
+                            })}
+                          </span>
+                          {hasMedia && (
+                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                              Media
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-sm text-foreground/90">
+                          {preview}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+        {!loading && !error && grouped.length > 0 && (
+          <div className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleLoadMore}
+              disabled={loadingMore || !hasMore}
+              className="w-full"
+            >
+              {loadingMore ? (
+                <>
+                  <Loader2 aria-hidden="true" className="mr-2 size-4 animate-spin" />
+                  Loading more
+                </>
+              ) : hasMore ? (
+                "Load older results"
+              ) : (
+                "No more results"
+              )}
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
