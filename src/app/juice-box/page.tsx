@@ -1515,6 +1515,11 @@ function JuiceBoxSearchSheet({
   onOpenChange: (next: boolean) => void;
   onSelectMessage: (messageId: string) => Promise<void> | void;
 }) {
+  type JuiceBoxSearchResult = {
+    message: TeamMessage;
+    hasMedia: boolean;
+  };
+
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [peopleOnly, setPeopleOnly] = useState(false);
