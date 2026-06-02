@@ -1734,7 +1734,7 @@ function JuiceBoxSearchSheet({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search messages, names, keywords..."
-            className="h-10 w-full rounded-lg border border-border bg-background pl-9 pr-9 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
+            className="h-10 w-full rounded-lg border border-border bg-background pl-9 pr-9 text-base sm:text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
           />
           {query && (
             <button
