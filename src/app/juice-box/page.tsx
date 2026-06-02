@@ -1702,12 +1702,10 @@ function JuiceBoxSearchSheet({
       aria-label="Search Juice Box"
       className="fixed inset-x-0 z-50 flex flex-col overflow-hidden bg-background"
       style={{
-        top: 0,
+        top: viewportOffsetTop ? `${viewportOffsetTop}px` : "0px",
+        bottom: "auto",
         height: viewportHeight ? `${viewportHeight}px` : "100dvh",
-        transform:
-          viewportOffsetTop > 0
-            ? `translateY(${viewportOffsetTop}px)`
-            : undefined,
+        maxHeight: "100dvh",
         paddingTop: "env(safe-area-inset-top)",
         paddingBottom: "var(--app-safe-bottom, 0px)",
       }}
