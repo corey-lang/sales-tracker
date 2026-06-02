@@ -1531,6 +1531,8 @@ function JuiceBoxSearchSheet({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const [viewportOffsetTop, setViewportOffsetTop] = useState(0);
   const requestIdRef = useRef(0);
 
   useEffect(() => {
@@ -1546,7 +1548,42 @@ function JuiceBoxSearchSheet({
       setLoading(false);
       setLoadingMore(false);
       setHasMore(false);
+      setViewportHeight(null);
+      setViewportOffsetTop(0);
     }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || typeof window === "undefined") return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+
+    const syncViewport = () => {
+      setViewportHeight(Math.round(vv.height));
+      setViewportOffsetTop(Math.max(0, Math.round(vv.offsetTop)));
+    };
+
+    syncViewport();
+    vv.addEventListener("resize", syncViewport);
+    vv.addEventListener("scroll", syncViewport);
+    return () => {
+      vv.removeEventListener("resize", syncViewport);
+      vv.removeEventListener("scroll", syncViewport);
+      setViewportHeight(null);
+      setViewportOffsetTop(0);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || typeof document === "undefined") return;
+    const prevOverflow = document.body.style.overflow;
+    const prevTouchAction = document.body.style.touchAction;
+    document.body.style.overflow = "hidden";
+    document.body.style.touchAction = "none";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.body.style.touchAction = prevTouchAction;
+    };
   }, [open]);
 
   useEffect(() => {
@@ -1663,10 +1700,16 @@ function JuiceBoxSearchSheet({
       role="dialog"
       aria-modal="true"
       aria-label="Search Juice Box"
-      className="fixed inset-0 z-50 flex flex-col bg-background"
+      className="fixed inset-x-0 z-50 flex flex-col overflow-hidden bg-background"
       style={{
+        top: 0,
+        height: viewportHeight ? `${viewportHeight}px` : "100dvh",
+        transform:
+          viewportOffsetTop > 0
+            ? `translateY(${viewportOffsetTop}px)`
+            : undefined,
         paddingTop: "env(safe-area-inset-top)",
-        paddingBottom: "env(safe-area-inset-bottom)",
+        paddingBottom: "var(--app-safe-bottom, 0px)",
       }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
@@ -1761,7 +1804,7 @@ function JuiceBoxSearchSheet({
         </p>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3">
         {error ? (
           <div className="rounded-lg border border-destructive/35 bg-destructive/10 px-3 py-4 text-sm text-destructive">
             {error}
