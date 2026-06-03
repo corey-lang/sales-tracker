@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 
 import { apiFetchJson } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -372,6 +373,12 @@ export default function AdminCoveragePage() {
                         Make current
                       </Button>
                     )}
+                    <Link
+                      href={`/admin/coverage/${b.id}/review`}
+                      className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-[0.8rem] font-medium text-foreground transition-colors hover:bg-muted"
+                    >
+                      Review pending
+                    </Link>
                   </div>
 
                   {error && (
