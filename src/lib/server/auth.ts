@@ -64,11 +64,19 @@ export const notFound = (message = "Not found.") => new ApiError(404, message);
  */
 export function handleApiError(err: unknown): Response {
   if (err instanceof ApiError) {
+    // ApiError messages are author-written and safe to surface.
     return Response.json({ error: err.message }, { status: err.status });
   }
-  const message =
-    err instanceof Error ? err.message : "Unexpected server error.";
-  return Response.json({ error: message }, { status: 500 });
+  // Anything else is an UNEXPECTED failure. Its message can carry internal
+  // detail (stack-adjacent text, provider errors, query fragments), so it is
+  // logged server-side but never returned — the caller gets a generic 500.
+  console.error(
+    `[api] unhandled error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+  );
+  return Response.json(
+    { error: "Something went wrong. Please try again." },
+    { status: 500 },
+  );
 }
 
 // ---------------------------------------------------------------------------

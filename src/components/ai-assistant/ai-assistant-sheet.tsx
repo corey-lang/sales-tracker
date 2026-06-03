@@ -12,8 +12,17 @@ import { ChevronLeft, Loader2, Mic, Send, Sparkles, Square } from "lucide-react"
 import { apiFetchJson } from "@/lib/api-client";
 import { useSpeechRecognition } from "./use-speech-recognition";
 
+/** One guided-flow answer chip from the agent. */
+type AnswerOption = { label: string; value: string };
+
 /** Server contract for POST /api/ai/chat. */
-type ChatResponse = { reply: string; sessionId: string | null };
+type ChatResponse = {
+  reply: string;
+  sessionId: string | null;
+  answerOptions?: AnswerOption[];
+  threadId?: string | null;
+  currentStep?: string | null;
+};
 
 type ChatMessage = {
   id: string;
@@ -48,6 +57,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  // Guided-flow state. threadId/currentStep keep follow-up option taps in the
+  // same agent flow; pendingOptions are the chips shown under the latest reply.
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [currentStep, setCurrentStep] = useState<string | null>(null);
+  const [pendingOptions, setPendingOptions] = useState<AnswerOption[]>([]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -117,7 +131,10 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   }, [messages, sending]);
 
   const send = useCallback(
-    async (text: string) => {
+    // `text` is what's sent to the agent; `displayText` (when given) is what's
+    // shown in the user's bubble — used for answer-option taps, where we send
+    // the option's machine value but show its human label.
+    async (text: string, displayText?: string) => {
       const trimmed = text.trim();
       // Synchronous lock first so rapid chip/Send taps can't double-fire; the
       // `sending` state still drives the loading UI below.
@@ -131,9 +148,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
       setSending(true);
       setInput("");
       speechBaseRef.current = "";
+      // Moving forward — clear the previous turn's answer chips.
+      setPendingOptions([]);
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), role: "user", content: trimmed },
+        { id: nextId(), role: "user", content: (displayText ?? trimmed).trim() },
       ]);
 
       try {
@@ -145,13 +164,25 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             // Send the session id once the first response established it so
             // the agent keeps conversation state across turns.
             ...(sessionId ? { sessionId } : {}),
+            // Echo back the guided-flow context so option taps resume the
+            // same flow.
+            ...(threadId ? { threadId } : {}),
+            ...(currentStep ? { currentStep } : {}),
           }),
         });
         if (data.sessionId) setSessionId(data.sessionId);
+        // Mirror the server's flow state every turn. When the flow ends the
+        // server omits threadId/currentStep, so coalesce to null to clear them
+        // — otherwise a stale threadId would keep resuming a finished workflow.
+        setThreadId(data.threadId ?? null);
+        setCurrentStep(data.currentStep ?? null);
         setMessages((prev) => [
           ...prev,
           { id: nextId(), role: "assistant", content: data.reply },
         ]);
+        setPendingOptions(
+          Array.isArray(data.answerOptions) ? data.answerOptions : [],
+        );
       } catch (err) {
         const message =
           err instanceof Error && err.message
@@ -163,7 +194,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         inFlightRef.current = false;
       }
     },
-    [sessionId, listening, stop],
+    [sessionId, threadId, currentStep, listening, stop],
   );
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -277,6 +308,23 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                   />
                   Thinking…
                 </div>
+              </div>
+            )}
+            {/* Guided-flow answer chips, shown under the latest assistant
+                reply. Tapping sends the option's value but shows its label. */}
+            {!sending && pendingOptions.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {pendingOptions.map((opt, i) => (
+                  <button
+                    key={`${opt.value}-${i}`}
+                    type="button"
+                    disabled={sending}
+                    onClick={() => void send(opt.value, opt.label)}
+                    className="rounded-full border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
               </div>
             )}
           </div>
