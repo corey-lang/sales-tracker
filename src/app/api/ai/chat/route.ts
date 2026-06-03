@@ -69,8 +69,11 @@ function asString(value: unknown): string | null {
 }
 
 /** Reply-bearing field names, in priority order. Checked at every nesting
- *  level by the recursive extractor. */
+ *  level by the recursive extractor. `responseText` is the field the live
+ *  agent uses (data[0].responseText), so it leads. */
 const REPLY_FIELDS = [
+  "responseText",
+  "response_text",
   "reply",
   "message",
   "response",
@@ -103,13 +106,25 @@ function replyFromMessageObject(value: unknown): string | null {
   return asString(obj.content) ?? asString(obj.text) ?? null;
 }
 
-/** Picks the assistant reply from a chat-style array (messages / choices):
- *  scans from the END so the latest assistant turn wins, skipping user echoes. */
-function replyFromArray(arr: unknown[]): string | null {
+/** Picks the assistant reply from an array of result/message objects (e.g. the
+ *  live agent's `data: [{ responseText }]`, or chat `messages` / `choices`).
+ *  Scans from the END so the latest turn wins. Elements explicitly tagged with
+ *  a user/system role are skipped so a prompt echo is never returned; every
+ *  other element gets the full recursive reply extraction. */
+function replyFromArray(arr: unknown[], depth: number): string | null {
   for (let i = arr.length - 1; i >= 0; i--) {
-    const fromMsg = replyFromMessageObject(arr[i]);
+    const el = arr[i];
+    if (el && typeof el === "object" && !Array.isArray(el)) {
+      const role = (el as Record<string, unknown>).role;
+      if (typeof role === "string" && USER_ROLES.has(role.toLowerCase())) {
+        continue; // user/system prompt echo — never the assistant reply
+      }
+    }
+    const fromMsg = replyFromMessageObject(el);
     if (fromMsg) return fromMsg;
-    const plain = asString(arr[i]);
+    const deep = extractReply(el, depth + 1);
+    if (deep) return deep;
+    const plain = asString(el);
     if (plain) return plain;
   }
   return null;
@@ -128,7 +143,7 @@ function replyFromArray(arr: unknown[]): string | null {
 function extractReply(raw: unknown, depth = 0): string | null {
   if (typeof raw === "string") return asString(raw);
   if (depth > 6 || !raw || typeof raw !== "object") return null;
-  if (Array.isArray(raw)) return replyFromArray(raw);
+  if (Array.isArray(raw)) return replyFromArray(raw, depth);
 
   const obj = raw as Record<string, unknown>;
 
@@ -149,7 +164,7 @@ function extractReply(raw: unknown, depth = 0): string | null {
   for (const arrKey of ["messages", "choices"]) {
     const arr = obj[arrKey];
     if (Array.isArray(arr)) {
-      const fromArr = replyFromArray(arr);
+      const fromArr = replyFromArray(arr, depth);
       if (fromArr) return fromArr;
     }
   }
@@ -182,6 +197,14 @@ const SESSION_FIELDS = [
  */
 function extractSessionId(raw: unknown, depth = 0): string | null {
   if (depth > 6 || !raw || typeof raw !== "object") return null;
+  // Arrays (e.g. the live agent's `data: [{ sessionId }]`) — search elements.
+  if (Array.isArray(raw)) {
+    for (const el of raw) {
+      const found = extractSessionId(el, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
   const obj = raw as Record<string, unknown>;
 
   for (const key of SESSION_FIELDS) {
@@ -233,11 +256,9 @@ function collectStringFieldPaths(
  * Builds a REDACTED structural summary of an upstream value for server logs.
  * Strings collapse to `string(<length>)`, so no message text, customer data,
  * or secrets are ever logged — only the shape. Bounded in depth and breadth so
- * a large/recursive payload can't blow up the log line.
- *
- * TEMPORARY (debugging aid): added to map the real AgentExecutionResult shape
- * onto extractReply/extractSessionId. Safe to remove once the mapping is
- * confirmed from the logs.
+ * a large/recursive payload can't blow up the log line. Used only on the
+ * extraction-failure path, to identify an unmapped reply field if the upstream
+ * shape ever changes again.
  */
 function summarizeShape(value: unknown, depth = 0): unknown {
   if (value === null) return "null";
@@ -334,45 +355,21 @@ export async function POST(req: Request) {
       throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
-    // Redacted, top-level/data-level key view used by both the success-shape
-    // log and the failure diagnostics. Never includes string CONTENT.
-    const topLevelKeys =
-      raw && typeof raw === "object" && !Array.isArray(raw)
-        ? Object.keys(raw as object)
-        : Array.isArray(raw)
-          ? [`(array:${(raw as unknown[]).length})`]
-          : [typeof raw];
-    const dataValue =
-      raw && typeof raw === "object" && !Array.isArray(raw)
-        ? (raw as Record<string, unknown>).data
-        : undefined;
-    const dataLevelKeys =
-      dataValue && typeof dataValue === "object" && !Array.isArray(dataValue)
-        ? Object.keys(dataValue as object)
-        : Array.isArray(dataValue)
-          ? [`(array:${(dataValue as unknown[]).length})`]
-          : dataValue === undefined
-            ? ["(none)"]
-            : [typeof dataValue];
-
-    // TEMPORARY (debugging aid): log the REDACTED shape of every successful
-    // upstream 200 so we can confirm the AgentExecutionResult mapping. Strings
-    // are reduced to lengths by summarizeShape — no message text or secrets.
-    console.log(
-      `[ai-chat] upstream 200 top-level keys=${topLevelKeys.join(",")} data keys=${dataLevelKeys.join(
-        ",",
-      )} shape=${JSON.stringify(summarizeShape(raw))}`,
-    );
-
     const reply = extractReply(raw);
     if (!reply) {
-      // Failure diagnostics: top-level keys, data-level keys, the dotted paths
-      // of every string field (with lengths only), and a depth summary — no
-      // message bodies or secrets — so we can map the reply field next.
+      // Failure diagnostics only (fires only when extraction fails): top-level
+      // keys, the dotted paths of every string field (lengths only), and a
+      // depth summary — no message bodies or secrets — so an unmapped reply
+      // field can be identified. Redacted by summarizeShape/collectStringFieldPaths.
+      const topLevelKeys =
+        raw && typeof raw === "object" && !Array.isArray(raw)
+          ? Object.keys(raw as object).join(",")
+          : Array.isArray(raw)
+            ? `(array:${(raw as unknown[]).length})`
+            : typeof raw;
       console.warn(
         `[ai-chat] could not extract reply from upstream 200; ` +
-          `top-level keys=${topLevelKeys.join(",")}; ` +
-          `data keys=${dataLevelKeys.join(",")}; ` +
+          `top-level keys=${topLevelKeys}; ` +
           `string fields=${collectStringFieldPaths(raw).join(" | ") || "(none)"}; ` +
           `shape=${JSON.stringify(summarizeShape(raw))}`,
       );
