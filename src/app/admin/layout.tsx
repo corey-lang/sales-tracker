@@ -55,6 +55,7 @@ const ADMIN_NAV: NavItem[] = [
       { href: "/office-imports", label: "Office Imports" },
       { href: "/admin/cogent", label: "Cogent Orders" },
       { href: "/admin/working-days", label: "Working Day Adjustments" },
+      { href: "/admin/coverage", label: "Coverage Intelligence" },
     ],
   },
 ];
