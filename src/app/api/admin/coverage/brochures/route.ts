@@ -8,6 +8,7 @@ import {
 } from "@/lib/server/auth";
 import { listBrochures, registerBrochure } from "@/lib/coverage/brochures";
 import type { BrochureStatus } from "@/lib/coverage/types";
+import { validateBrochureUrlSync } from "@/lib/coverage/url-safety";
 
 // /api/admin/coverage/brochures — Coverage Intelligence brochure registry.
 //
@@ -53,6 +54,9 @@ export async function POST(req: Request) {
   try {
     await requireAdmin(req);
     const body = await parseBody(req, RegisterSchema);
+    // Enforce the SSRF host allowlist (https + trusted host) at registration
+    // for fast feedback; the fetch path re-validates with DNS/IP checks.
+    if (body.sourceUrl) validateBrochureUrlSync(body.sourceUrl);
     const brochure = await registerBrochure(body);
     return Response.json({ brochure }, { status: 201 });
   } catch (err) {
