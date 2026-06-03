@@ -28,6 +28,7 @@ import { EditWeekCard } from "@/components/edit-week-card";
 import { MessagesCard } from "@/components/messages-card";
 import { RecentActivityCard } from "@/components/recent-activity-card";
 import { VerificationCenter } from "@/components/verification-center";
+import { AiAssistantCard } from "@/components/ai-assistant/ai-assistant-card";
 
 // Home dashboard. Slimmer than the pre-nav-rollout version — the To-Do
 // section and the biz-card / log-activity quick actions have moved into
@@ -168,6 +169,12 @@ export default function DashboardPage() {
         </header>
 
         <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
+
+        {/* Test-AE-only AI Assistant beta. Renders null for every other
+            account, so it sits inline without an explicit role check here —
+            the gate lives inside the component (and is enforced server-side
+            on /api/ai/chat). Not yet in global nav. */}
+        <AiAssistantCard salesperson={salesperson} />
 
         {/* Offices entry point — sits directly under the weekly
             momentum hero so it's the first action the AE sees once

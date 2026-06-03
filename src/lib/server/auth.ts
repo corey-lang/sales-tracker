@@ -280,6 +280,26 @@ export async function requireAeToolAccess(
   return me;
 }
 
+/**
+ * Requires the caller to be the seeded test account (`salespeople.is_test`).
+ *
+ * Gate for isolated, opt-in beta surfaces — currently the AI Assistant proxy
+ * at `/api/ai/chat`. The check lives here, server-side, re-read from the DB by
+ * requireSalesperson, so a real production AE cannot reach a beta endpoint by
+ * crafting a direct POST even though the UI also hides the entry point. When a
+ * beta graduates to more users, widen this gate (or move callers onto a
+ * role/flag check) in ONE place rather than per route.
+ */
+export async function requireTestAccount(
+  req: Request,
+): Promise<AuthedSalesperson> {
+  const me = await requireSalesperson(req);
+  if (!me.is_test) {
+    throw forbidden("This feature isn't available for your account yet.");
+  }
+  return me;
+}
+
 /** True for roles that may act on ANY salesperson's business-card scan. */
 function isReviewerRole(role: UserRole): boolean {
   return role === "admin" || role === "assistant";
