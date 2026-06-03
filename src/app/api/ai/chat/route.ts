@@ -474,6 +474,86 @@ function extractToolFlow(raw: unknown): ToolFlow {
   };
 }
 
+/** Reads the NAME of a tool-call / tool-result element. Only name-ish fields —
+ *  never inputs, outputs, args, or results, which can carry prices or content. */
+function readToolName(el: unknown): string {
+  if (!el || typeof el !== "object" || Array.isArray(el)) return "(unnamed)";
+  const o = el as Record<string, unknown>;
+  const fn =
+    o.function && typeof o.function === "object" && !Array.isArray(o.function)
+      ? (o.function as Record<string, unknown>).name
+      : undefined;
+  return (
+    asString(o.name) ??
+    asString(o.toolName) ??
+    asString(o.tool) ??
+    asString(o.toolNamespace) ??
+    asString(fn) ??
+    "(unnamed)"
+  );
+}
+
+/** Tool names detected in the response, separated by source. */
+type ToolNames = { calls: string[]; results: string[] };
+
+/**
+ * Heuristic, NON-binding candidate check: does a tool name look like a
+ * coverage/pricing tool? Used ONLY for the `trustedToolDetected` diagnostic so
+ * we can spot likely-authoritative results in the logs. This is NOT an
+ * allowlist and does NOT grant trust or change the guardrail — it just flags
+ * names worth confirming before any real trust model is built.
+ */
+function looksLikeCoveragePricingTool(name: string): boolean {
+  const n = name.toLowerCase();
+  return (
+    n.includes("coverage") ||
+    n.includes("plan") ||
+    n.includes("pricing") ||
+    n.includes("price") ||
+    n.includes("quote") ||
+    n.includes("rate")
+  );
+}
+
+/**
+ * Shape-agnostic deep walk that collects tool NAMES only from any `toolCalls`
+ * / `tool_calls` and `toolResults` / `tool_results` arrays in the response.
+ * Reads no inputs/outputs/args — so prices, content, and secrets are never
+ * touched. Depth/breadth bounded.
+ */
+function collectToolNames(
+  raw: unknown,
+  depth: number,
+  acc: ToolNames,
+): void {
+  if (
+    depth > 8 ||
+    acc.calls.length + acc.results.length >= 200 ||
+    !raw ||
+    typeof raw !== "object"
+  ) {
+    return;
+  }
+  if (Array.isArray(raw)) {
+    for (const el of raw) collectToolNames(el, depth + 1, acc);
+    return;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const calls = readField(obj, "toolCalls", "tool_calls");
+  if (Array.isArray(calls)) {
+    for (const el of calls.slice(0, 50)) acc.calls.push(readToolName(el));
+  }
+  const results = readField(obj, "toolResults", "tool_results");
+  if (Array.isArray(results)) {
+    for (const el of results.slice(0, 50)) acc.results.push(readToolName(el));
+  }
+
+  for (const value of Object.values(obj)) {
+    collectToolNames(value, depth + 1, acc);
+  }
+}
+
 /**
  * Collects the dotted paths of every STRING-valued field in the payload, with
  * each value's length (never its content). Used only when extraction fails, so
@@ -714,6 +794,31 @@ export async function POST(req: Request) {
         "[ai-chat] response guardrail tripped: unsupported exact price/coverage claim replaced with safe framing",
       );
     }
+
+    // TEMPORARY (diagnostic): determine whether plan/coverage answers are
+    // tool-backed, so we can decide if the generic pricing guardrail should be
+    // bypassed for trusted tools. Logs tool NAMES + counts only — never prices,
+    // response text, tool inputs, tool outputs, or secrets. Remove once the
+    // tool-trust decision is made.
+    const toolNames: ToolNames = { calls: [], results: [] };
+    collectToolNames(raw, 0, toolNames);
+    const pricingGuardTriggered = safeReply !== reply;
+    // Candidate detection only: true when a tool RESULT (not merely a call)
+    // has a coverage/pricing-looking name. Heuristic + non-binding — it does
+    // NOT bypass the guardrail; it just surfaces likely-authoritative results
+    // so we can confirm real tool names before designing a trust model.
+    const trustedToolDetected = toolNames.results.some(
+      looksLikeCoveragePricingTool,
+    );
+    console.log(
+      `[ai-chat] tool diagnostics: ` +
+        `toolCallNames=[${toolNames.calls.join(", ")}] ` +
+        `toolResultNames=[${toolNames.results.join(", ")}] ` +
+        `answerOptionsCount=${flow.answerOptions.length} ` +
+        `currentStep=${flow.currentStep ?? "(none)"} ` +
+        `pricingGuardTriggered=${pricingGuardTriggered} ` +
+        `trustedToolDetected=${trustedToolDetected}`,
+    );
 
     const sessionId = extractSessionId(raw) ?? body.sessionId ?? null;
 
