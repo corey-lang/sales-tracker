@@ -50,6 +50,74 @@ const UNAVAILABLE_MESSAGE =
 const PLAN_DATA_NOT_CONNECTED_MESSAGE =
   "I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.";
 
+/** Department the request is routed to. Live testing shows the upstream agent
+ *  exposes the quote/pricing workflow under "plans" but only general coverage
+ *  guidance under "sales". */
+type DepartmentIntent = "sales" | "plans";
+
+/** Stage 1 — coaching/talk-track terms. A message asking HOW to talk about
+ *  pricing (vs. asking FOR a price) stays in "sales" even when it also mentions
+ *  pricing/cost. Checked before the pricing keywords so coaching always wins. */
+const COACHING_INTENT_KEYWORDS = [
+  "explain",
+  "handle",
+  "objection",
+  "position",
+  "talk track",
+  "pitch",
+  "what should i say",
+  "how should i say",
+  "help me sell",
+  "value conversation",
+];
+
+/** Stage 2 — pricing/quote terms that signal the user wants an actual number
+ *  or estimate (→ "plans"). Only consulted when no coaching intent matched.
+ *  Lowercased substring match; some entries are subsets of others but are
+ *  listed explicitly for clarity against the spec. */
+const PLANS_INTENT_KEYWORDS = [
+  "price",
+  "pricing",
+  "cost",
+  "quote",
+  "how much",
+  "add-on cost",
+  "addon cost",
+  "upgrade cost",
+  "pool cost",
+  "sprinkler cost",
+  "exact price",
+  "monthly cost",
+  "annual cost",
+  "rate",
+  "premium",
+  "fee",
+  "estimate",
+  "estimated",
+  "ballpark",
+  "what would this cost",
+  "what would this run",
+  "charge",
+  "quote me",
+];
+
+/**
+ * Lightweight, server-side intent detector with a two-stage rule:
+ *   1. Coaching/talk-track intent → "sales" (even if it also mentions pricing).
+ *   2. Otherwise pricing/quote intent → "plans".
+ *   3. Everything else → "sales".
+ * Keyword-based on purpose — coverage and coaching questions must stay in the
+ * sales flow; only requests for an actual price/quote route to "plans".
+ */
+function detectDepartmentIntent(userMessage: string): DepartmentIntent {
+  const text = userMessage.toLowerCase();
+  // Stage 1: coaching always wins.
+  if (COACHING_INTENT_KEYWORDS.some((k) => text.includes(k))) return "sales";
+  // Stage 2: explicit pricing/quote ask.
+  if (PLANS_INTENT_KEYWORDS.some((k) => text.includes(k))) return "plans";
+  return "sales";
+}
+
 /**
  * Conservative guardrail patterns. While the real plan/pricing table isn't
  * connected, a reply to a plan/coverage/pricing question must not state an
@@ -82,6 +150,10 @@ const ChatSchema = z.object({
   // (status "awaiting_user_input") resumes on the same thread/step.
   threadId: z.string().trim().min(1).max(200).optional(),
   currentStep: z.string().trim().min(1).max(200).optional(),
+  // Echoed back by the client to keep a guided flow in the department it
+  // started in (sticky routing). Only "sales"/"plans" are honored; anything
+  // else is ignored and routing falls back to per-message intent.
+  department: z.string().trim().min(1).max(40).optional(),
 });
 
 /**
@@ -641,14 +713,51 @@ export async function POST(req: Request) {
       includePreamble: !body.sessionId,
     });
 
-    // Routing fields into the Elevate agent. Defaults preserved, but
-    // overridable via env so the correct departmentId/customerId for
-    // plan/coverage knowledge can be dialed in WITHOUT a code change while we
-    // confirm what the upstream expects. Unset → identical to before.
+    // Routing fields into the Elevate agent. customerId is env-overridable (or
+    // "test-ae"). departmentId is chosen by intent: pricing/quote questions
+    // route to "plans" (quote-capable workflow), everything else stays "sales".
+    //
+    // Resolution order:
+    //   1. AGENTIC_AI_DEPARTMENT_ID env value PINS the department (manual mode).
+    //   2. Mid guided flow (client echoes threadId/currentStep + department) →
+    //      stick with the flow's department so a quote's option taps — which
+    //      carry no pricing keywords — don't bounce back to "sales".
+    //   3. Otherwise per-message intent.
     const customerId =
       process.env.AGENTIC_AI_CUSTOMER_ID?.trim() || "test-ae";
-    const departmentId =
-      process.env.AGENTIC_AI_DEPARTMENT_ID?.trim() || "sales";
+    const departmentOverride = process.env.AGENTIC_AI_DEPARTMENT_ID?.trim();
+    const intent = detectDepartmentIntent(body.message);
+
+    const isContinuation = Boolean(body.threadId || body.currentStep);
+    const stickyDepartment: DepartmentIntent | null =
+      isContinuation && (body.department === "sales" || body.department === "plans")
+        ? body.department
+        : null;
+
+    // What the request came in as, before intent routing: an env pin, the
+    // sticky department of an active guided flow, or the "sales" default.
+    const originalDepartment: string =
+      departmentOverride ?? stickyDepartment ?? "sales";
+
+    let routingReason: string;
+    let departmentId: string;
+    if (departmentOverride) {
+      departmentId = departmentOverride;
+      routingReason = "pinned by env";
+    } else if (stickyDepartment) {
+      departmentId = stickyDepartment;
+      routingReason = "sticky (guided flow)";
+    } else {
+      departmentId = intent;
+      routingReason = "intent";
+    }
+
+    // Safe routing diagnostic — intent + departments only, never the message.
+    console.log(
+      `[ai-chat] routing: intent=${intent} originalDepartment=${originalDepartment} ` +
+        `routedDepartment=${departmentId} (${routingReason})`,
+    );
+
     const payload: Record<string, unknown> = {
       message: outgoingMessage,
       customerId,
@@ -820,17 +929,31 @@ export async function POST(req: Request) {
         `trustedToolDetected=${trustedToolDetected}`,
     );
 
+    // TEMPORARY (validation): correlate the routed department with the tools the
+    // agent actually invoked, to verify pricing questions routed to "plans"
+    // reach the quote workflow. Names + department only — no prices, response
+    // text, tool inputs/outputs, or secrets.
+    console.log(
+      `[ai-chat] routing result: ` +
+        `department=${departmentId} ` +
+        `toolCallNames=[${toolNames.calls.join(", ")}] ` +
+        `toolResultNames=[${toolNames.results.join(", ")}]`,
+    );
+
     const sessionId = extractSessionId(raw) ?? body.sessionId ?? null;
 
     // Only safe, whitelisted fields cross to the client — never the raw tool
     // results. A guardrail-replaced reply also drops any answer options, since
-    // they belonged to the suppressed message.
+    // they belonged to the suppressed message. `department` is our own routing
+    // value (not sensitive); the client echoes it back to keep a guided flow
+    // sticky to its department.
     return Response.json({
       reply: safeReply,
       sessionId,
       answerOptions: safeReply === reply ? flow.answerOptions : [],
       threadId: flow.threadId,
       currentStep: flow.currentStep,
+      department: departmentId,
     });
   } catch (err) {
     return handleApiError(err);

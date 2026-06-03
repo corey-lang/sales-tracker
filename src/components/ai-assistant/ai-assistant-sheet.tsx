@@ -22,6 +22,9 @@ type ChatResponse = {
   answerOptions?: AnswerOption[];
   threadId?: string | null;
   currentStep?: string | null;
+  /** Routed department ("sales"/"plans"); echoed back to keep a guided flow
+   *  sticky to its department. */
+  department?: string | null;
 };
 
 type ChatMessage = {
@@ -73,6 +76,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   // same agent flow; pendingOptions are the chips shown under the latest reply.
   const [threadId, setThreadId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
+  const [department, setDepartment] = useState<string | null>(null);
   const [pendingOptions, setPendingOptions] = useState<AnswerOption[]>([]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -196,9 +200,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             // the agent keeps conversation state across turns.
             ...(sessionId ? { sessionId } : {}),
             // Echo back the guided-flow context so option taps resume the
-            // same flow.
+            // same flow — including the department, so a quote flow's option
+            // taps stay routed to "plans".
             ...(threadId ? { threadId } : {}),
             ...(currentStep ? { currentStep } : {}),
+            ...(department ? { department } : {}),
           }),
         });
         if (data.sessionId) setSessionId(data.sessionId);
@@ -207,6 +213,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         // — otherwise a stale threadId would keep resuming a finished workflow.
         setThreadId(data.threadId ?? null);
         setCurrentStep(data.currentStep ?? null);
+        setDepartment(data.department ?? null);
         setMessages((prev) => [
           ...prev,
           { id: nextId(), role: "assistant", content: data.reply },
@@ -237,7 +244,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         inFlightRef.current = false;
       }
     },
-    [sessionId, threadId, currentStep, pendingOptions, listening, stop],
+    [sessionId, threadId, currentStep, department, pendingOptions, listening, stop],
   );
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
