@@ -6,6 +6,7 @@ import {
   parseBody,
   requireTestAccount,
 } from "@/lib/server/auth";
+import { getRelevantKnowledge } from "@/lib/ai/sales-knowledge";
 
 // POST /api/ai/chat
 //
@@ -44,6 +45,36 @@ export const dynamic = "force-dynamic";
 const UNAVAILABLE_MESSAGE =
   "The AI assistant is temporarily unavailable. Please try again in a moment.";
 
+/** Safe fallback used when the response guardrail trips — same wording the
+ *  preamble already promises for missing plan/pricing specifics. */
+const PLAN_DATA_NOT_CONNECTED_MESSAGE =
+  "I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.";
+
+/**
+ * Conservative guardrail patterns. While the real plan/pricing table isn't
+ * connected, a reply to a plan/coverage/pricing question must not state an
+ * invented exact price or an absolute coverage guarantee. Kept deliberately
+ * narrow so ordinary coaching answers pass through untouched.
+ */
+const RISKY_REPLY_PATTERNS: RegExp[] = [
+  /\$\s?\d/, // "$500", "$1,000", "$ 599"
+  /\bcosts?\s+\$?\d/i, // "costs 599", "cost $599"
+  /\bpriced at\b/i, // "priced at ..."
+  /\bprice is\b/i, // "the price is ..."
+  /\b\d[\d,]*\s*dollars\b/i, // "599 dollars"
+  /covers?\s+everything/i, // "covers everything"
+  /\balways\s+covered\b/i, // "always covered"
+  /guaranteed\s+coverage/i, // "guaranteed coverage"
+  /\b100%\s*covered\b/i, // "100% covered"
+  /\bfully\s+covered\b/i, // "fully covered"
+];
+
+/** True when a reply contains an obvious unsupported exact price or absolute
+ *  coverage guarantee. Conservative by design. */
+function replyHasRiskyClaim(reply: string): boolean {
+  return RISKY_REPLY_PATTERNS.some((pattern) => pattern.test(reply));
+}
+
 const ChatSchema = z.object({
   message: z.string().trim().min(1, "Message cannot be empty.").max(4000),
   sessionId: z.string().trim().min(1).max(200).optional(),
@@ -59,9 +90,45 @@ const SALES_CONTEXT_PREAMBLE = [
   "- The user is a Test AE in the Elevate Sales Tracker app.",
   "- Act as a sales assistant for: sales coaching, territory ideas, objection handling, follow-up wording, weekly activity planning, and app guidance.",
   "- Do not request or rely on sensitive customer data.",
+  "- Keep your tone practical and sales-coaching oriented.",
   "",
-  "User message:",
+  "How to handle unclear or broad questions:",
+  "- Prefer offering a short numbered menu of likely options over asking a vague clarifying question. For example, if asked \"What plans do we offer?\" or \"Tell me about coverage,\" do NOT reply \"What type of coverage are you asking about?\" Instead offer options, e.g.:",
+  "  \"I can help with a few plan/coverage areas:",
+  "  1. Seller coverage",
+  "  2. Buyer coverage",
+  "  3. New construction",
+  "  4. Optional add-ons",
+  "  5. Pricing/upgrades",
+  "  6. What to recommend to an agent\"",
+  "- If the question is broad, give a brief helpful answer first, then offer the numbered choices.",
+  "- Do not invent or imply exact pricing or coverage details. Only state specifics that appear in this context.",
+  "- Exact plan and pricing data is NOT connected yet. When asked for specifics you don't have, say: \"I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.\"",
 ].join("\n");
+
+/**
+ * Assembles the text sent upstream for one turn:
+ *   1. the behavior preamble (first turn only — follow-ups inherit it via the
+ *      agent's session, so we don't repeat it);
+ *   2. approved Elevate plan/coverage knowledge IF the question is on-topic
+ *      (every turn — the AE might ask a coverage question mid-conversation);
+ *   3. the user's message.
+ * Never includes customer/contact data — only generic product coaching.
+ */
+function buildAgentMessage(
+  userMessage: string,
+  opts: { includePreamble: boolean },
+): string {
+  const knowledge = getRelevantKnowledge(userMessage);
+  const parts: string[] = [];
+  if (opts.includePreamble) parts.push(SALES_CONTEXT_PREAMBLE);
+  if (knowledge) parts.push(knowledge);
+  // A plain follow-up with no preamble and no matched knowledge goes through
+  // verbatim so the agent isn't handed needless scaffolding.
+  if (parts.length === 0) return userMessage;
+  parts.push(`User message:\n${userMessage}`);
+  return parts.join("\n\n");
+}
 
 /** Returns the value as a non-empty trimmed string, or null. */
 function asString(value: unknown): string | null {
@@ -300,11 +367,12 @@ export async function POST(req: Request) {
       throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
-    // Prepend the sales context only on the first turn (no sessionId yet) so
-    // follow-ups stay lean and the preamble isn't repeated.
-    const outgoingMessage = body.sessionId
-      ? body.message
-      : `${SALES_CONTEXT_PREAMBLE}\n${body.message}`;
+    // Behavior preamble on the first turn (no sessionId yet); approved
+    // plan/coverage knowledge is layered in on any turn the question is
+    // on-topic. See buildAgentMessage.
+    const outgoingMessage = buildAgentMessage(body.message, {
+      includePreamble: !body.sessionId,
+    });
 
     const payload: Record<string, unknown> = {
       message: outgoingMessage,
@@ -379,9 +447,25 @@ export async function POST(req: Request) {
       );
     }
 
+    // Response guardrail: on plan/coverage/pricing questions, if the reply
+    // states an obvious invented exact price or absolute coverage guarantee
+    // (while the live plan/pricing table isn't connected), swap it for the safe
+    // framing. getRelevantKnowledge(...) !== null is the on-topic signal — the
+    // same detector that decides whether approved knowledge was attached.
+    const isPlanPricingTopic = getRelevantKnowledge(body.message) !== null;
+    const safeReply =
+      isPlanPricingTopic && replyHasRiskyClaim(reply)
+        ? PLAN_DATA_NOT_CONNECTED_MESSAGE
+        : reply;
+    if (safeReply !== reply) {
+      console.warn(
+        "[ai-chat] response guardrail tripped: unsupported exact price/coverage claim replaced with safe framing",
+      );
+    }
+
     const sessionId = extractSessionId(raw) ?? body.sessionId ?? null;
 
-    return Response.json({ reply, sessionId });
+    return Response.json({ reply: safeReply, sessionId });
   } catch (err) {
     return handleApiError(err);
   }

@@ -21,11 +21,16 @@ type ChatMessage = {
   content: string;
 };
 
-const EXAMPLE_PROMPTS = [
-  "Help me handle a \"we're already happy with our agent\" objection.",
-  "Draft a friendly follow-up text after an office visit.",
-  "Plan my activity targets for this week.",
-  "Give me three ideas to work a new territory.",
+/** Suggested starters for the empty state. `label` is the short chip text; the
+ *  full `prompt` is what gets sent. */
+const SUGGESTED_CHIPS: { label: string; prompt: string }[] = [
+  { label: "Coverage Questions", prompt: "What coverage questions do customers commonly ask?" },
+  { label: "Plan Options", prompt: "What plan options do we offer?" },
+  { label: "Seller Coverage", prompt: "Tell me about seller coverage." },
+  { label: "Buyer Coverage", prompt: "Tell me about buyer coverage." },
+  { label: "Add-ons", prompt: "What optional add-ons can I offer?" },
+  { label: "Objection Help", prompt: "Help me handle a pricing objection." },
+  { label: "What should I recommend?", prompt: "What should I recommend to an agent?" },
 ];
 
 /** Stable-ish id without Math.random/Date in render. A monotonic counter is
@@ -46,6 +51,10 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Synchronous in-flight lock. `sending` (React state) updates on the next
+  // render, so two taps in the same tick both see it as false; this ref flips
+  // immediately and blocks the duplicate before any state settles.
+  const inFlightRef = useRef(false);
   // The typed draft captured the moment the mic started, so live transcription
   // replaces only the dictated portion rather than clobbering what was typed.
   const speechBaseRef = useRef("");
@@ -110,7 +119,10 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || sending) return; // guard duplicate / empty sends
+      // Synchronous lock first so rapid chip/Send taps can't double-fire; the
+      // `sending` state still drives the loading UI below.
+      if (!trimmed || inFlightRef.current) return;
+      inFlightRef.current = true;
 
       // Stop dictation cleanly the moment we send.
       if (listening) stop();
@@ -148,9 +160,10 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         setError(message);
       } finally {
         setSending(false);
+        inFlightRef.current = false;
       }
     },
-    [sending, sessionId, listening, stop],
+    [sessionId, listening, stop],
   );
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -221,18 +234,16 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                 planning, or how to use the app. Type or tap the mic to speak.
               </p>
             </div>
-            <div className="flex w-full flex-col gap-2">
-              {EXAMPLE_PROMPTS.map((prompt) => (
+            <div className="flex w-full flex-wrap justify-center gap-2">
+              {SUGGESTED_CHIPS.map((chip) => (
                 <button
-                  key={prompt}
+                  key={chip.label}
                   type="button"
-                  onClick={() => {
-                    setInput(prompt);
-                    textareaRef.current?.focus();
-                  }}
-                  className="rounded-lg border border-border/70 bg-card px-3 py-2 text-left text-sm text-foreground/90 transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  disabled={sending}
+                  onClick={() => void send(chip.prompt)}
+                  className="rounded-full border border-border/70 bg-card px-3 py-1.5 text-sm text-foreground/90 transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50"
                 >
-                  {prompt}
+                  {chip.label}
                 </button>
               ))}
             </div>
