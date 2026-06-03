@@ -6,7 +6,10 @@ import {
   parseBody,
   requireTestAccount,
 } from "@/lib/server/auth";
-import { getRelevantKnowledge } from "@/lib/ai/sales-knowledge";
+import {
+  getRelevantKnowledge,
+  isCoveragePricingQuestion,
+} from "@/lib/ai/sales-knowledge";
 
 // POST /api/ai/chat
 //
@@ -45,10 +48,11 @@ export const dynamic = "force-dynamic";
 const UNAVAILABLE_MESSAGE =
   "The AI assistant is temporarily unavailable. Please try again in a moment.";
 
-/** Safe fallback used when the response guardrail trips — same wording the
- *  preamble already promises for missing plan/pricing specifics. */
+/** Safe fallback used when the response guardrail trips. Expert framing (not
+ *  coaching): states what's unavailable, then offers concrete coverage/plan
+ *  alternatives. */
 const PLAN_DATA_NOT_CONNECTED_MESSAGE =
-  "I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.";
+  "I don't currently have access to the live plan/pricing table, so I can't give exact figures. I can still tell you which add-ons and plans exist, which plans include a given item, and coverage details — or compare plans. What would you like to check?";
 
 /** Department the request is routed to. Live testing shows the upstream agent
  *  exposes the quote/pricing workflow under "plans" but only general coverage
@@ -179,7 +183,18 @@ const SALES_CONTEXT_PREAMBLE = [
   "  6. What to recommend to an agent\"",
   "- If the question is broad, give a brief helpful answer first, then offer the numbered choices.",
   "- Do not invent or imply exact pricing or coverage details. Only state specifics that appear in this context.",
-  "- Exact plan and pricing data is NOT connected yet. When asked for specifics you don't have, say: \"I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.\"",
+  "- Exact plan and pricing data is NOT connected yet. When asked for specifics you don't have, say plainly that you don't currently have access to the live plan/pricing table, then offer what you can confirm: which add-ons and plans exist, which plans include a given item, coverage details, and plan comparisons.",
+].join("\n");
+
+/** Coverage/pricing answer-behavior instruction. Forces an expert (not
+ *  coaching) answer: facts first; if data is missing, say so plainly and ask a
+ *  focused follow-up or offer concrete options. Added for coverage/pricing
+ *  questions (not for explicit objection/recommend coaching requests). */
+const COVERAGE_PRICING_EXPERT_PREFIX = [
+  "Answer as an Elevate coverage & pricing expert, not a sales coach.",
+  "- Lead with the facts: what's covered, what isn't, which plan includes an item, included vs. add-on, plan comparisons, and pricing availability.",
+  "- If the exact data isn't available, say so plainly (for example: \"I don't currently have access to the live add-on pricing table.\"), state what you can and can't confirm, and ask ONE focused follow-up — or offer specific options: which add-ons exist, which plans include them, coverage details, plan comparisons.",
+  "- Do NOT use sales talk tracks, objection handling, recommendation framing, \"the best approach is...\", or coaching language unless the user explicitly asks for sales coaching.",
 ].join("\n");
 
 /** Plans-only nudge so the upstream agent reaches for its quote/pricing tool
@@ -193,20 +208,27 @@ const PLANS_QUOTE_PREFIX =
  * Assembles the text sent upstream for one turn:
  *   1. the behavior preamble (first turn only — follow-ups inherit it via the
  *      agent's session, so we don't repeat it);
- *   2. for a fresh "plans" (pricing/quote) request, a short quote-routing
+ *   2. for a coverage/pricing question, the expert answer-behavior instruction
+ *      (facts first, no coaching);
+ *   3. for a fresh "plans" (pricing/quote) request, a short quote-routing
  *      instruction prefix (never on guided-flow answerOption continuations);
- *   3. approved Elevate plan/coverage knowledge IF the question is on-topic
+ *   4. approved Elevate plan/coverage knowledge IF the question is on-topic
  *      (every turn — the AE might ask a coverage question mid-conversation);
- *   4. the user's message.
- * Never includes customer/contact data — only generic product coaching.
+ *   5. the user's message.
+ * Never includes customer/contact data — only generic product context.
  */
 function buildAgentMessage(
   userMessage: string,
-  opts: { includePreamble: boolean; plansQuotePrefix: boolean },
+  opts: {
+    includePreamble: boolean;
+    coveragePricingExpert: boolean;
+    plansQuotePrefix: boolean;
+  },
 ): string {
   const knowledge = getRelevantKnowledge(userMessage);
   const parts: string[] = [];
   if (opts.includePreamble) parts.push(SALES_CONTEXT_PREAMBLE);
+  if (opts.coveragePricingExpert) parts.push(COVERAGE_PRICING_EXPERT_PREFIX);
   if (opts.plansQuotePrefix) parts.push(PLANS_QUOTE_PREFIX);
   if (knowledge) parts.push(knowledge);
   // A plain follow-up with no preamble, no prefix, and no matched knowledge
@@ -762,13 +784,17 @@ export async function POST(req: Request) {
     );
 
     // Behavior preamble on the first turn (no sessionId yet); approved
-    // plan/coverage knowledge layered in when on-topic. For a FRESH "plans"
-    // request (not a guided-flow answerOption continuation) a short quote-
-    // routing prefix nudges the agent toward its quote tool. See
-    // buildAgentMessage.
+    // plan/coverage knowledge layered in when on-topic. Coverage/pricing
+    // questions get the expert answer-behavior instruction (facts first, no
+    // coaching). A FRESH "plans" request also gets the quote-routing prefix.
+    // None of these are applied to a guided-flow answerOption continuation.
+    const coveragePricingExpert =
+      !isContinuation &&
+      (departmentId === "plans" || isCoveragePricingQuestion(body.message));
     const plansQuotePrefix = departmentId === "plans" && !isContinuation;
     const outgoingMessage = buildAgentMessage(body.message, {
       includePreamble: !body.sessionId,
+      coveragePricingExpert,
       plansQuotePrefix,
     });
 
