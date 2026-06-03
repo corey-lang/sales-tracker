@@ -33,16 +33,20 @@ type ChatMessage = {
   content: string;
 };
 
-/** Suggested starters for the empty state. `label` is the short chip text; the
- *  full `prompt` is what gets sent. */
+/** Suggested starters for the empty state — coverage/pricing first, ordered
+ *  for the questions an AE asks while sitting with an agent. `label` is the
+ *  short chip text; the full `prompt` is what gets sent. Pricing prompts
+ *  include cost/pricing wording so department routing sends them to the
+ *  quote-capable flow. */
 const SUGGESTED_CHIPS: { label: string; prompt: string }[] = [
-  { label: "Coverage Questions", prompt: "What coverage questions do customers commonly ask?" },
-  { label: "Plan Options", prompt: "What plan options do we offer?" },
-  { label: "Seller Coverage", prompt: "Tell me about seller coverage." },
-  { label: "Buyer Coverage", prompt: "Tell me about buyer coverage." },
-  { label: "Add-ons", prompt: "What optional add-ons can I offer?" },
-  { label: "Objection Help", prompt: "Help me handle a pricing objection." },
-  { label: "What should I recommend?", prompt: "What should I recommend to an agent?" },
+  { label: "What's Covered?", prompt: "What's covered under our plans?" },
+  { label: "Plan Comparison", prompt: "Compare our plan options and what each one includes." },
+  { label: "Coverage Lookup", prompt: "Which plan includes coverage for a specific system or appliance?" },
+  { label: "Add-On Pricing", prompt: "How much do our optional add-ons cost?" },
+  { label: "Plan Pricing", prompt: "How much do our plans cost?" },
+  { label: "Seller Plans", prompt: "Tell me about our seller plans and what they cover." },
+  { label: "Buyer Plans", prompt: "Tell me about our buyer plans and what they cover." },
+  { label: "New Construction", prompt: "What coverage applies to new construction?" },
 ];
 
 /** Fallback answer options keyed by currentStep, used when the agent advances
@@ -309,10 +313,13 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
               <Sparkles aria-hidden="true" className="size-6 text-primary" />
             </div>
             <div className="space-y-1">
-              <p className="text-base font-semibold">How can I help?</p>
+              <p className="text-base font-semibold">
+                Coverage &amp; Pricing Expert
+              </p>
               <p className="text-sm text-muted-foreground">
-                Ask about coaching, objections, follow-up wording, weekly
-                planning, or how to use the app. Type or tap the mic to speak.
+                Ask what&apos;s covered, what isn&apos;t, which plan includes
+                something, how much it costs, or which plan to recommend. Type
+                or tap the mic to speak.
               </p>
             </div>
             <div className="flex w-full flex-wrap justify-center gap-2">

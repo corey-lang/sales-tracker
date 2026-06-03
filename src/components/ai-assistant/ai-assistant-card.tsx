@@ -47,8 +47,9 @@ export function AiAssistantCard({
             </span>
           </CardTitle>
           <CardDescription>
-            Your sales sidekick — coaching, objection handling, follow-up
-            wording, weekly planning, and app help. Type or speak your question.
+            Your coverage &amp; pricing expert — what&apos;s covered, plan
+            comparisons, coverage lookups, and pricing. Type or speak your
+            question.
           </CardDescription>
         </CardHeader>
         <CardContent>
