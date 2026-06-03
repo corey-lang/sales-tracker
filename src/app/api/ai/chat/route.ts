@@ -182,25 +182,35 @@ const SALES_CONTEXT_PREAMBLE = [
   "- Exact plan and pricing data is NOT connected yet. When asked for specifics you don't have, say: \"I don't have the live plan/pricing details connected yet, but I can help frame the options or explain what info we should connect.\"",
 ].join("\n");
 
+/** Plans-only nudge so the upstream agent reaches for its quote/pricing tool
+ *  instead of general company-knowledge search. Added only to a fresh pricing
+ *  request — never to a guided-flow answerOption value — and it invents no
+ *  quote details (address, property type, plan, channel). */
+const PLANS_QUOTE_PREFIX =
+  "This is a quote/pricing request. If exact pricing requires quote context, ask for the missing quote details using answerOptions when available. Prefer quote/pricing tools over general company knowledge.";
+
 /**
  * Assembles the text sent upstream for one turn:
  *   1. the behavior preamble (first turn only — follow-ups inherit it via the
  *      agent's session, so we don't repeat it);
- *   2. approved Elevate plan/coverage knowledge IF the question is on-topic
+ *   2. for a fresh "plans" (pricing/quote) request, a short quote-routing
+ *      instruction prefix (never on guided-flow answerOption continuations);
+ *   3. approved Elevate plan/coverage knowledge IF the question is on-topic
  *      (every turn — the AE might ask a coverage question mid-conversation);
- *   3. the user's message.
+ *   4. the user's message.
  * Never includes customer/contact data — only generic product coaching.
  */
 function buildAgentMessage(
   userMessage: string,
-  opts: { includePreamble: boolean },
+  opts: { includePreamble: boolean; plansQuotePrefix: boolean },
 ): string {
   const knowledge = getRelevantKnowledge(userMessage);
   const parts: string[] = [];
   if (opts.includePreamble) parts.push(SALES_CONTEXT_PREAMBLE);
+  if (opts.plansQuotePrefix) parts.push(PLANS_QUOTE_PREFIX);
   if (knowledge) parts.push(knowledge);
-  // A plain follow-up with no preamble and no matched knowledge goes through
-  // verbatim so the agent isn't handed needless scaffolding.
+  // A plain follow-up with no preamble, no prefix, and no matched knowledge
+  // goes through verbatim so the agent isn't handed needless scaffolding.
   if (parts.length === 0) return userMessage;
   parts.push(`User message:\n${userMessage}`);
   return parts.join("\n\n");
@@ -706,13 +716,6 @@ export async function POST(req: Request) {
       throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
-    // Behavior preamble on the first turn (no sessionId yet); approved
-    // plan/coverage knowledge is layered in on any turn the question is
-    // on-topic. See buildAgentMessage.
-    const outgoingMessage = buildAgentMessage(body.message, {
-      includePreamble: !body.sessionId,
-    });
-
     // Routing fields into the Elevate agent. customerId is env-overridable (or
     // "test-ae"). departmentId is chosen by intent: pricing/quote questions
     // route to "plans" (quote-capable workflow), everything else stays "sales".
@@ -757,6 +760,17 @@ export async function POST(req: Request) {
       `[ai-chat] routing: intent=${intent} originalDepartment=${originalDepartment} ` +
         `routedDepartment=${departmentId} (${routingReason})`,
     );
+
+    // Behavior preamble on the first turn (no sessionId yet); approved
+    // plan/coverage knowledge layered in when on-topic. For a FRESH "plans"
+    // request (not a guided-flow answerOption continuation) a short quote-
+    // routing prefix nudges the agent toward its quote tool. See
+    // buildAgentMessage.
+    const plansQuotePrefix = departmentId === "plans" && !isContinuation;
+    const outgoingMessage = buildAgentMessage(body.message, {
+      includePreamble: !body.sessionId,
+      plansQuotePrefix,
+    });
 
     const payload: Record<string, unknown> = {
       message: outgoingMessage,
