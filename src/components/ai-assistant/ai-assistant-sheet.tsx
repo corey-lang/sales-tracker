@@ -42,6 +42,18 @@ const SUGGESTED_CHIPS: { label: string; prompt: string }[] = [
   { label: "What should I recommend?", prompt: "What should I recommend to an agent?" },
 ];
 
+/** Fallback answer options keyed by currentStep, used when the agent advances
+ *  to a step that requires a choice but the response omitted answerOptions.
+ *  Prevents the guided flow from looping (user typing free-text the agent
+ *  can't use). */
+const FALLBACK_OPTIONS_BY_STEP: Record<string, AnswerOption[]> = {
+  coverageType: [
+    { label: "Real Estate", value: "real_estate" },
+    { label: "Homeowner", value: "homeowner" },
+    { label: "Sellers", value: "sellers" },
+  ],
+};
+
 /** Stable-ish id without Math.random/Date in render. A monotonic counter is
  *  enough to key React list items within one open session. */
 let messageSeq = 0;
@@ -133,12 +145,27 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   const send = useCallback(
     // `text` is what's sent to the agent; `displayText` (when given) is what's
     // shown in the user's bubble — used for answer-option taps, where we send
-    // the option's machine value but show its human label.
-    async (text: string, displayText?: string) => {
+    // the option's machine value but show its human label. `fromOption` marks
+    // a tap so it bypasses the guided-flow free-text lock.
+    async (
+      text: string,
+      opts?: { displayText?: string; fromOption?: boolean },
+    ) => {
       const trimmed = text.trim();
-      // Synchronous lock first so rapid chip/Send taps can't double-fire; the
-      // `sending` state still drives the loading UI below.
       if (!trimmed || inFlightRef.current) return;
+
+      // Guided-flow lock: while the agent is waiting on a required choice,
+      // don't send arbitrary typed text — it can't advance the flow and causes
+      // the agent to repeat its question. Option taps (fromOption) are exempt.
+      if (!opts?.fromOption && pendingOptions.length > 0) {
+        setError(
+          "Please choose one of the options above so I can continue this coverage flow.",
+        );
+        return;
+      }
+
+      // Synchronous lock so rapid chip/Send taps can't double-fire; the
+      // `sending` state still drives the loading UI below.
       inFlightRef.current = true;
 
       // Stop dictation cleanly the moment we send.
@@ -152,7 +179,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
       setPendingOptions([]);
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), role: "user", content: (displayText ?? trimmed).trim() },
+        {
+          id: nextId(),
+          role: "user",
+          content: (opts?.displayText ?? trimmed).trim(),
+        },
       ]);
 
       try {
@@ -180,9 +211,21 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
           ...prev,
           { id: nextId(), role: "assistant", content: data.reply },
         ]);
-        setPendingOptions(
-          Array.isArray(data.answerOptions) ? data.answerOptions : [],
-        );
+
+        // Use the agent's options; if a step that requires a choice came back
+        // without them, fall back to the known options for that step so the
+        // user always has chips to tap (no looping).
+        let options = Array.isArray(data.answerOptions)
+          ? data.answerOptions
+          : [];
+        if (
+          options.length === 0 &&
+          data.currentStep &&
+          FALLBACK_OPTIONS_BY_STEP[data.currentStep]
+        ) {
+          options = FALLBACK_OPTIONS_BY_STEP[data.currentStep];
+        }
+        setPendingOptions(options);
       } catch (err) {
         const message =
           err instanceof Error && err.message
@@ -194,7 +237,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         inFlightRef.current = false;
       }
     },
-    [sessionId, threadId, currentStep, listening, stop],
+    [sessionId, threadId, currentStep, pendingOptions, listening, stop],
   );
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -313,18 +356,28 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             {/* Guided-flow answer chips, shown under the latest assistant
                 reply. Tapping sends the option's value but shows its label. */}
             {!sending && pendingOptions.length > 0 && (
-              <div className="flex flex-wrap gap-2 pt-1">
-                {pendingOptions.map((opt, i) => (
-                  <button
-                    key={`${opt.value}-${i}`}
-                    type="button"
-                    disabled={sending}
-                    onClick={() => void send(opt.value, opt.label)}
-                    className="rounded-full border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50"
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+              <div className="flex flex-col gap-1.5 pt-1">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Choose one to continue:
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {pendingOptions.map((opt, i) => (
+                    <button
+                      key={`${opt.value}-${i}`}
+                      type="button"
+                      disabled={sending}
+                      onClick={() =>
+                        void send(opt.value, {
+                          displayText: opt.label,
+                          fromOption: true,
+                        })
+                      }
+                      className="rounded-full border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50"
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -346,6 +399,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             </span>
             Listening… speak now, then tap stop to review.
           </div>
+        )}
+        {pendingOptions.length > 0 && (
+          <p className="mb-2 text-xs text-muted-foreground">
+            Please choose an option above to continue this step.
+          </p>
         )}
         <div className="flex items-end gap-2">
           <textarea

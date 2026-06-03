@@ -78,6 +78,10 @@ function replyHasRiskyClaim(reply: string): boolean {
 const ChatSchema = z.object({
   message: z.string().trim().min(1, "Message cannot be empty.").max(4000),
   sessionId: z.string().trim().min(1).max(200).optional(),
+  // Forwarded upstream when present so an in-progress guided flow
+  // (status "awaiting_user_input") resumes on the same thread/step.
+  threadId: z.string().trim().min(1).max(200).optional(),
+  currentStep: z.string().trim().min(1).max(200).optional(),
 });
 
 /**
@@ -288,6 +292,189 @@ function extractSessionId(raw: unknown, depth = 0): string | null {
 }
 
 /**
+ * Finds the agent result object (the one carrying `steps` / `responseText` /
+ * `totalSteps`) inside an upstream response of unknown shape — top level, the
+ * `data` array/object, or a known container. Used only for the TEMPORARY tool
+ * diagnostics below; returns null when no such object is present.
+ */
+function findAgentResultObject(raw: unknown): Record<string, unknown> | null {
+  const looksLikeResult = (v: unknown): v is Record<string, unknown> =>
+    !!v &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    ("steps" in (v as object) ||
+      "totalSteps" in (v as object) ||
+      "responseText" in (v as object));
+
+  if (looksLikeResult(raw)) return raw;
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+
+  for (const container of ["data", ...CONTAINER_FIELDS]) {
+    const v = obj[container];
+    if (Array.isArray(v)) {
+      for (const el of v) if (looksLikeResult(el)) return el;
+    } else if (looksLikeResult(v)) {
+      return v;
+    }
+  }
+  return null;
+}
+
+/** Field names on a step that hold a tool/step NAME (safe to log). Deliberately
+ *  excludes input/output/content/observation fields, which can carry message
+ *  bodies or customer data. */
+const STEP_NAME_FIELDS = [
+  "toolName",
+  "tool",
+  "name",
+  "type",
+  "action",
+  "step",
+  "kind",
+  "stepType",
+];
+
+/**
+ * Extracts ONLY the tool/step names from a `steps` array — never step content.
+ * For object steps it reads a name-ish field; for bare-string steps (which
+ * could be content) it logs just a length placeholder. Bounded to 25 entries.
+ */
+function extractStepNames(steps: unknown): string[] {
+  if (!Array.isArray(steps)) return [];
+  const names: string[] = [];
+  for (const step of steps.slice(0, 25)) {
+    if (step && typeof step === "object" && !Array.isArray(step)) {
+      const s = step as Record<string, unknown>;
+      let name: string | null = null;
+      for (const field of STEP_NAME_FIELDS) {
+        name = asString(s[field]);
+        if (name) break;
+      }
+      names.push(name ?? "(unnamed)");
+    } else if (typeof step === "string") {
+      // Could be a label or could be content — log only its length, not text.
+      names.push(`string(${step.length})`);
+    } else {
+      names.push(typeof step);
+    }
+  }
+  return names;
+}
+
+/** One guided-flow answer chip, the only step-derived data we expose. */
+type AnswerOption = { label: string; value: string };
+
+/** The safe slice of a tool result we surface to the client. */
+type ToolFlow = {
+  answerOptions: AnswerOption[];
+  threadId: string | null;
+  currentStep: string | null;
+  /** Used server-side only as a reply fallback; not returned as its own field. */
+  messageToUser: string | null;
+};
+
+/** Normalizes an `answerOptions` value into a clean {label,value}[] — strings
+ *  only, capped, with sensible label/value fallbacks. Anything malformed is
+ *  dropped so no raw tool-result object reaches the client. */
+function sanitizeAnswerOptions(value: unknown): AnswerOption[] {
+  if (!Array.isArray(value)) return [];
+  const out: AnswerOption[] = [];
+  for (const item of value.slice(0, 20)) {
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const o = item as Record<string, unknown>;
+      const label = asString(o.label) ?? asString(o.value);
+      const val = asString(o.value) ?? asString(o.label);
+      if (label && val) out.push({ label, value: val });
+    } else if (typeof item === "string" && item.trim().length > 0) {
+      out.push({ label: item, value: item });
+    }
+  }
+  return out;
+}
+
+/** Reads a flow field by either camelCase or snake_case key. */
+function readField(obj: Record<string, unknown>, camel: string, snake: string): unknown {
+  return camel in obj ? obj[camel] : obj[snake];
+}
+
+/** Reads an answerOptions array under either casing. */
+function readAnswerOptions(obj: Record<string, unknown>): unknown {
+  return readField(obj, "answerOptions", "answer_options");
+}
+
+/** True when an object carries any guided-flow signal (options or metadata). */
+function isFlowCandidate(obj: Record<string, unknown>): boolean {
+  if (Array.isArray(readAnswerOptions(obj))) return true;
+  return Boolean(
+    readField(obj, "threadId", "thread_id") ||
+      readField(obj, "currentStep", "current_step") ||
+      readField(obj, "messageToUser", "message_to_user"),
+  );
+}
+
+/**
+ * Shape-agnostic deep walk that collects every object carrying a guided-flow
+ * signal, in document order. Independent of the exact nesting (steps /
+ * toolResults / tool_results / result / data) so a small change in the upstream
+ * envelope can't hide the answer options. Depth/breadth bounded.
+ */
+function collectFlowCandidates(
+  raw: unknown,
+  depth: number,
+  out: Record<string, unknown>[],
+): void {
+  if (depth > 8 || out.length >= 200 || !raw || typeof raw !== "object") return;
+  if (Array.isArray(raw)) {
+    for (const el of raw) collectFlowCandidates(el, depth + 1, out);
+    return;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (isFlowCandidate(obj)) out.push(obj);
+  for (const value of Object.values(obj)) {
+    collectFlowCandidates(value, depth + 1, out);
+  }
+}
+
+/**
+ * Extracts the guided-flow data from the LATEST relevant result object:
+ * answerOptions (preferred when present), threadId, currentStep, and the
+ * messageToUser fallback. Returns empty/null fields when there's no flow.
+ */
+function extractToolFlow(raw: unknown): ToolFlow {
+  const candidates: Record<string, unknown>[] = [];
+  collectFlowCandidates(raw, 0, candidates);
+
+  // Prefer the latest candidate that actually carries answer options; else the
+  // latest with any flow metadata.
+  let chosen: Record<string, unknown> | null = null;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    if (sanitizeAnswerOptions(readAnswerOptions(candidates[i])).length > 0) {
+      chosen = candidates[i];
+      break;
+    }
+  }
+  if (!chosen) {
+    chosen = candidates.length > 0 ? candidates[candidates.length - 1] : null;
+  }
+
+  if (!chosen) {
+    return {
+      answerOptions: [],
+      threadId: null,
+      currentStep: null,
+      messageToUser: null,
+    };
+  }
+  return {
+    answerOptions: sanitizeAnswerOptions(readAnswerOptions(chosen)),
+    threadId: asString(readField(chosen, "threadId", "thread_id")),
+    currentStep: asString(readField(chosen, "currentStep", "current_step")),
+    messageToUser: asString(readField(chosen, "messageToUser", "message_to_user")),
+  };
+}
+
+/**
  * Collects the dotted paths of every STRING-valued field in the payload, with
  * each value's length (never its content). Used only when extraction fails, so
  * the logs reveal which field actually holds the reply without leaking text.
@@ -374,12 +561,25 @@ export async function POST(req: Request) {
       includePreamble: !body.sessionId,
     });
 
+    // Routing fields into the Elevate agent. Defaults preserved, but
+    // overridable via env so the correct departmentId/customerId for
+    // plan/coverage knowledge can be dialed in WITHOUT a code change while we
+    // confirm what the upstream expects. Unset → identical to before.
+    const customerId =
+      process.env.AGENTIC_AI_CUSTOMER_ID?.trim() || "test-ae";
+    const departmentId =
+      process.env.AGENTIC_AI_DEPARTMENT_ID?.trim() || "sales";
     const payload: Record<string, unknown> = {
       message: outgoingMessage,
-      customerId: "test-ae",
-      departmentId: "sales",
+      customerId,
+      departmentId,
     };
     if (body.sessionId) payload.sessionId = body.sessionId;
+    // Keep an in-progress guided flow on the same thread/step when the client
+    // echoes back the threadId/currentStep from a prior "awaiting_user_input"
+    // response.
+    if (body.threadId) payload.threadId = body.threadId;
+    if (body.currentStep) payload.currentStep = body.currentStep;
 
     let res: Response;
     try {
@@ -423,7 +623,28 @@ export async function POST(req: Request) {
       throw new ApiError(502, UNAVAILABLE_MESSAGE);
     }
 
-    const reply = extractReply(raw);
+    // Guided-flow data (answer options / threadId / currentStep) from the
+    // latest tool result, plus a messageToUser fallback when the agent asks a
+    // question with no top-level responseText.
+    const flow = extractToolFlow(raw);
+
+    // Safe guided-flow diagnostics: count + labels only (labels are UI text,
+    // not customer data), plus currentStep and whether a threadId is present.
+    // Never logs message bodies, raw tool results, inputs/outputs, or secrets.
+    if (
+      flow.answerOptions.length > 0 ||
+      flow.currentStep ||
+      flow.threadId
+    ) {
+      console.log(
+        `[ai-chat] answerOptions: count=${flow.answerOptions.length} ` +
+          `labels=[${flow.answerOptions.map((o) => o.label).join(", ")}] ` +
+          `currentStep=${flow.currentStep ?? "(none)"} ` +
+          `threadId=${flow.threadId ? "present" : "absent"}`,
+      );
+    }
+
+    const reply = extractReply(raw) ?? flow.messageToUser;
     if (!reply) {
       // Failure diagnostics only (fires only when extraction fails): top-level
       // keys, the dotted paths of every string field (lengths only), and a
@@ -447,6 +668,37 @@ export async function POST(req: Request) {
       );
     }
 
+    // TEMPORARY (diagnostic): log the agent's tool/step NAMES only — never step
+    // content — so we can see whether the agent is invoking a knowledge/plan
+    // tool for plan/coverage questions, and whether routing (departmentId /
+    // customerId) is reaching that knowledge. No message bodies, secrets, or
+    // customer data are logged. Remove once routing is confirmed.
+    const resultObj = findAgentResultObject(raw);
+    if (resultObj) {
+      const stepNames = extractStepNames(resultObj.steps);
+      const totalSteps =
+        typeof resultObj.totalSteps === "number"
+          ? resultObj.totalSteps
+          : stepNames.length;
+      const budgetExhausted =
+        typeof resultObj.budgetExhausted === "boolean"
+          ? resultObj.budgetExhausted
+          : "(unknown)";
+      const firstStepKeys =
+        Array.isArray(resultObj.steps) &&
+        resultObj.steps[0] &&
+        typeof resultObj.steps[0] === "object" &&
+        !Array.isArray(resultObj.steps[0])
+          ? Object.keys(resultObj.steps[0] as object).join(",")
+          : "(n/a)";
+      console.log(
+        `[ai-chat] agent tools: onTopic=${getRelevantKnowledge(body.message) !== null} ` +
+          `dept=${departmentId} customer=${customerId} ` +
+          `totalSteps=${totalSteps} budgetExhausted=${budgetExhausted} ` +
+          `stepNames=[${stepNames.join(", ")}] stepKeys=[${firstStepKeys}]`,
+      );
+    }
+
     // Response guardrail: on plan/coverage/pricing questions, if the reply
     // states an obvious invented exact price or absolute coverage guarantee
     // (while the live plan/pricing table isn't connected), swap it for the safe
@@ -465,7 +717,16 @@ export async function POST(req: Request) {
 
     const sessionId = extractSessionId(raw) ?? body.sessionId ?? null;
 
-    return Response.json({ reply: safeReply, sessionId });
+    // Only safe, whitelisted fields cross to the client — never the raw tool
+    // results. A guardrail-replaced reply also drops any answer options, since
+    // they belonged to the suppressed message.
+    return Response.json({
+      reply: safeReply,
+      sessionId,
+      answerOptions: safeReply === reply ? flow.answerOptions : [],
+      threadId: flow.threadId,
+      currentStep: flow.currentStep,
+    });
   } catch (err) {
     return handleApiError(err);
   }
