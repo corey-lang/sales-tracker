@@ -5,11 +5,31 @@
  * COGENT_API_KEY and the service-role Supabase client, neither of which may
  * reach the browser.
  *
+ * ENDPOINT SEMANTICS (SalesReport6 / `/orders-report`) — read this first.
+ *   This is an AGGREGATE REPORTING endpoint, not an order-event feed:
+ *     • It returns GROUPED rows (by territory / plan), each carrying a
+ *       `policyCount` total — NOT individual order or policy records.
+ *     • It exposes NO order identifiers and NO per-order timestamps. There is
+ *       therefore no way to reason about when, in clock time, an individual
+ *       order landed, nor to dedupe at the order level.
+ *
+ *   TRUSTED: month-to-date aggregate totals. The MTD `policyCount` sums match
+ *   the production monthly numbers we trust, so this module powers "Orders this
+ *   month", Goal %, Pace %, and the admin totals directly from them.
+ *
+ *   NOT TRUSTED: the same-day slice. A same-day request is unreliable — a
+ *   2026-06-04 [today, today] query was observed returning rows bucketed under
+ *   2026-06-02. Because the report groups into period buckets (not order
+ *   events), its same-day window cannot power operational "Today Orders". This
+ *   module therefore NO LONGER computes Today here; `todayOrders` is left null
+ *   and filled by a daily BASELINE DELTA in src/lib/server/orders.ts
+ *   (current MTD total − start-of-day MTD baseline). A future true order-event /
+ *   order-detail feed can replace that baseline approach later.
+ *
  * WHAT THIS DOES
  *   1. POSTs to Cogent's /orders-report with the AE *production* coverage
  *      filter (see COGENT_PRODUCTION_FILTER below).
- *   2. Parses the returned rows defensively (the upstream shape is still
- *      being characterized via /api/cogent/test).
+ *   2. Parses the returned aggregate rows defensively (camel/Pascal casing).
  *   3. Aggregates rows by `salesTerritoryName`, then rolls territories up to
  *      an AE using the cogent_territory_mappings table.
  *
@@ -26,19 +46,48 @@ import { addDays, format, parseISO } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 
+// Production Elevate integration endpoint. The earlier `test-app.elevateh.com`
+// host served delayed/test data (today's orders showed as 0); production
+// surfaces real same-day orders. Overridable via env so the host can change
+// without a code edit, defaulting to production.
 export const COGENT_ORDERS_REPORT_URL =
-  "https://test-app.elevateh.com/api/integration/orders-report";
+  process.env.COGENT_ORDERS_REPORT_URL?.trim() ||
+  "https://app.elevateh.com/api/integration/orders-report";
+
+/** Application-level timeout for each Cogent orders-report request. */
+const COGENT_FETCH_TIMEOUT_MS = 25_000;
 
 /**
- * The AE production-order coverage filter. Cogent applies these server-side,
- * so the response only contains coverage types that count toward AE orders
- * and targets. Kept as the single source of truth shared by the diagnostic
- * /api/cogent/test route and this library.
+ * The SalesReport6 coverage filter that defines the Orders dashboard's
+ * operational notion of "new orders". Cogent applies these flags server-side,
+ * so the aggregate `policyCount` rows we get back only contain the coverage
+ * types below — every row already counts toward the operational metric.
+ *
+ * This dashboard INTENTIONALLY represents operational production activity:
+ *   INCLUDE  • Buyers Coverage          (showBuyersCoverage)
+ *            • Real Estate Runoff        (showRealEstateRunOff)
+ *            • Property Management        (showPropertyManagementCoverage)
+ * and INTENTIONALLY EXCLUDES coverage the sales team does not treat as a new
+ * order:
+ *   EXCLUDE  • Renewals                  (showRenewalCoverage: false)
+ *            • Homeowners                 (showHomeownerCoverage: false)
+ *            • Sellers                    (showSellersCoverage: false)
+ *
+ * Renewals in particular were the source of an earlier over-count — they are a
+ * book-of-business event, not new production, so they must stay excluded.
+ * showPaidOnly stays false so we count orders as written, not just paid.
+ *
+ * SINGLE SOURCE OF TRUTH: this object is the only place the filter is defined.
+ * It is spread into every SalesReport6 request body (fetchOrdersReport, used by
+ * BOTH the monthly window and the today window) and the /api/cogent/test probe,
+ * so the operational definition can never drift between Monthly and Today.
  */
 export const COGENT_PRODUCTION_FILTER = {
   showBuyersCoverage: true,
   showSellersCoverage: false,
   showHomeownerCoverage: false,
+  // Renewals are NOT new orders — excluding them is the operational definition,
+  // not an oversight. Flipping this to true double-counts book-of-business.
   showRenewalCoverage: false,
   showPaidOnly: false,
   showRealEstateRunOff: true,
@@ -60,8 +109,9 @@ export type CogentOrderRow = {
 };
 
 /** Reads `obj[key]` case-insensitively, trying the documented camelCase key
- *  first then a few casing variants. The exact Cogent casing is still being
- *  confirmed via /api/cogent/test, so we tolerate camelCase / PascalCase. */
+ *  first then a few casing variants. SalesReport6 returns camelCase, but we
+ *  tolerate PascalCase too so a casing change upstream can't silently zero a
+ *  field. */
 function pick(obj: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
     if (key in obj) return obj[key];
@@ -172,7 +222,10 @@ export type AeOrdersSummary = {
   /** orderCount / orderTarget * 100, rounded to 1 decimal; null when no
    *  target is set (avoids divide-by-zero / a misleading 0%). */
   percentToGoal: number | null;
-  /** Today's order count for this AE, or null when not computed. */
+  /** Today's order count for this AE. ALWAYS null out of getOrdersSummary —
+   *  the SalesReport6 same-day slice is unreliable (see module header), so this
+   *  is populated downstream in orders.ts via the daily baseline delta
+   *  (current MTD − start-of-day MTD baseline, clamped ≥ 0). */
   todayOrders: number | null;
 };
 
@@ -203,12 +256,21 @@ type Mapping = {
   first_name: string;
 };
 
-/** Loads active territory→AE mappings, joined to the AE's first_name. */
+/**
+ * Loads active territory→AE mappings, joined to the AE, restricted to PRODUCTION
+ * AEs only. Mirrors the positive allow-list in leaderboard-standings.ts:
+ * `role = 'ae'` AND `is_test = false`. A mapping that points to an admin,
+ * assistant, juice_box_only guest, or the seeded test account is dropped — its
+ * territory then surfaces as UNMAPPED (flagged, never silently attributed),
+ * so non-AE/test users can't leak into production order reporting.
+ */
 async function loadActiveMappings(): Promise<Mapping[]> {
   const supabase = getServerSupabase();
   const res = await supabase
     .from("cogent_territory_mappings")
-    .select("sales_territory_name, salesperson_id, salespeople(first_name)")
+    .select(
+      "sales_territory_name, salesperson_id, salespeople(first_name, role, is_test)",
+    )
     .eq("active", true);
 
   if (res.error) {
@@ -218,21 +280,30 @@ async function loadActiveMappings(): Promise<Mapping[]> {
     throw new Error("Could not load Cogent territory mappings.");
   }
 
-  return (res.data ?? []).map((row) => {
+  const mappings: Mapping[] = [];
+  for (const row of res.data ?? []) {
     const r = row as {
       sales_territory_name: string;
       salesperson_id: string;
       // supabase-js types the embedded relation as an array; it's 1:1 here.
-      salespeople?: { first_name?: unknown } | { first_name?: unknown }[] | null;
+      salespeople?:
+        | { first_name?: unknown; role?: unknown; is_test?: unknown }
+        | { first_name?: unknown; role?: unknown; is_test?: unknown }[]
+        | null;
     };
-    const rel = r.salespeople;
-    const first = Array.isArray(rel) ? rel[0]?.first_name : rel?.first_name;
-    return {
+    const rel = Array.isArray(r.salespeople) ? r.salespeople[0] : r.salespeople;
+    const role = rel?.role;
+    const isTest = rel?.is_test;
+    // Positive allow-list: production AEs only.
+    if (role !== "ae" || isTest === true) continue;
+    const first = rel?.first_name;
+    mappings.push({
       sales_territory_name: r.sales_territory_name,
       salesperson_id: r.salesperson_id,
       first_name: typeof first === "string" ? first : "(unknown)",
-    };
-  });
+    });
+  }
+  return mappings;
 }
 
 /** Rounds to 1 decimal place. */
@@ -297,6 +368,13 @@ async function fetchOrdersReport(
   };
 
   const startedAt = Date.now();
+  // Application-level timeout so a hung upstream can't stall the sync (and, with
+  // it, a serverless function) indefinitely. On timeout the fetch rejects with
+  // an AbortError; we translate it to a clear, logged error and the SYNC fails
+  // without touching the prior cached snapshot (the cache is only written on a
+  // fully successful run).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COGENT_FETCH_TIMEOUT_MS);
   let res: Response;
   try {
     res = await fetch(COGENT_ORDERS_REPORT_URL, {
@@ -308,10 +386,20 @@ async function fetchOrdersReport(
       },
       body: JSON.stringify(body),
       cache: "no-store",
+      signal: controller.signal,
     });
   } catch (err) {
+    const timedOut = err instanceof Error && err.name === "AbortError";
+    if (timedOut) {
+      console.warn(
+        `[cogent] upstream timed out after ${COGENT_FETCH_TIMEOUT_MS}ms`,
+      );
+      throw new Error("The Cogent Orders API timed out.");
+    }
     console.warn(`[cogent] upstream fetch failed err=${String(err)}`);
     throw new Error("Failed to reach the Cogent Orders API.");
+  } finally {
+    clearTimeout(timer);
   }
 
   const durationMs = Date.now() - startedAt;
@@ -346,22 +434,21 @@ async function fetchOrdersReport(
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches the Cogent orders report for [startDate, endDate], aggregates by
- * territory, maps territories to AEs, and returns per-AE production totals
- * plus any unmapped territories.
+ * Fetches the Cogent month-to-date orders report for [startDate, endDate],
+ * aggregates by territory, maps territories to AEs, and returns per-AE
+ * production MTD totals plus any unmapped territories.
  *
- * @param includeToday When true and `endDate` is today, today's orders are
- *   reused from the main window (no extra call); otherwise a second report
- *   for [today, today] is fetched. If the today call fails, todayOrders is
- *   left null rather than failing the whole request.
+ * TODAY ORDERS ARE NOT COMPUTED HERE. The SalesReport6 same-day slice is
+ * unreliable (see module header — same-day requests returned earlier-dated
+ * buckets), so every returned `todayOrders` is null. Today is derived as a
+ * daily baseline delta in orders.ts (applyTodayBaselineDeltas) from these MTD
+ * totals, which ARE trusted.
  */
 export async function getOrdersSummary(opts: {
   startDate: string;
   endDate: string;
-  today: string;
-  includeToday?: boolean;
 }): Promise<OrdersSummary> {
-  const { startDate, endDate, today, includeToday = true } = opts;
+  const { startDate, endDate } = opts;
 
   const main = await fetchOrdersReport(startDate, endDate);
   const mappings = await loadActiveMappings();
@@ -377,33 +464,6 @@ export async function getOrdersSummary(opts: {
 
   const territoryTotals = aggregateByTerritory(main.rows);
 
-  // Optionally compute today's per-territory counts.
-  let todayByTerritory: Map<string, number> | null = null;
-  if (includeToday) {
-    try {
-      // If the window already ends today, reuse it; we don't have per-day
-      // granularity in the aggregate, so a same-day window is the only way
-      // to isolate today's count. Reuse only when the whole window IS today.
-      if (startDate === today && endDate === today) {
-        todayByTerritory = new Map(
-          territoryTotals.map((t) => [t.salesTerritoryName, t.orderCount]),
-        );
-      } else {
-        const todayRes = await fetchOrdersReport(today, today);
-        todayByTerritory = new Map(
-          aggregateByTerritory(todayRes.rows).map((t) => [
-            t.salesTerritoryName,
-            t.orderCount,
-          ]),
-        );
-      }
-    } catch (err) {
-      // Today is best-effort: never fail the summary over it.
-      console.warn(`[cogent] today's window failed; todayOrders=null err=${String(err)}`);
-      todayByTerritory = null;
-    }
-  }
-
   // Roll territories up to AEs; collect unmapped territories separately.
   const byAe = new Map<
     string,
@@ -412,7 +472,6 @@ export async function getOrdersSummary(opts: {
       territories: string[];
       orderCount: number;
       orderTarget: number;
-      todayOrders: number | null;
     }
   >();
   const unmapped: UnmappedTerritory[] = [];
@@ -432,15 +491,10 @@ export async function getOrdersSummary(opts: {
       territories: [],
       orderCount: 0,
       orderTarget: 0,
-      todayOrders: todayByTerritory ? 0 : null,
     };
     acc.territories.push(t.salesTerritoryName);
     acc.orderCount += t.orderCount;
     acc.orderTarget += t.orderTarget; // sum of per-territory (max) targets
-    if (todayByTerritory) {
-      acc.todayOrders =
-        (acc.todayOrders ?? 0) + (todayByTerritory.get(t.salesTerritoryName) ?? 0);
-    }
     byAe.set(ae.id, acc);
   }
 
@@ -453,7 +507,8 @@ export async function getOrdersSummary(opts: {
       orderTarget: acc.orderTarget,
       percentToGoal:
         acc.orderTarget > 0 ? round1((acc.orderCount / acc.orderTarget) * 100) : null,
-      todayOrders: acc.todayOrders,
+      // Filled downstream by the daily baseline delta (orders.ts).
+      todayOrders: null,
     }))
     .sort((a, b) => a.salespersonName.localeCompare(b.salespersonName));
 

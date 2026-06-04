@@ -29,6 +29,7 @@ import { MessagesCard } from "@/components/messages-card";
 import { RecentActivityCard } from "@/components/recent-activity-card";
 import { VerificationCenter } from "@/components/verification-center";
 import { AiAssistantCard } from "@/components/ai-assistant/ai-assistant-card";
+import { OrdersCard } from "@/components/orders-card";
 
 // Home dashboard. Slimmer than the pre-nav-rollout version — the To-Do
 // section and the biz-card / log-activity quick actions have moved into
@@ -169,6 +170,11 @@ export default function DashboardPage() {
         </header>
 
         <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
+
+        {/* Production orders (Cogent) — month-to-date vs goal, pace by business
+            days (weekdays minus company holidays only), and today's count.
+            Reads the AE's own numbers; fails gracefully if Cogent is down. */}
+        <OrdersCard />
 
         {/* Test-AE-only AI Assistant beta. Renders null for every other
             account, so it sits inline without an explicit role check here —

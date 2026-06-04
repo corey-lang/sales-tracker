@@ -374,10 +374,10 @@ export default function AdminCoveragePage() {
                       </Button>
                     )}
                     <Link
-                      href={`/admin/coverage/${b.id}/review`}
+                      href={`/admin/coverage/${b.id}`}
                       className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-[0.8rem] font-medium text-foreground transition-colors hover:bg-muted"
                     >
-                      Review pending
+                      Open
                     </Link>
                   </div>
 

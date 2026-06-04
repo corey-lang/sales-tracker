@@ -230,3 +230,63 @@ export async function applyReview(
   }
   throw new ApiError(409, "Only pending rows can be reviewed.");
 }
+
+export type BulkReviewItem = { kind: ReviewKind; rowId: string };
+export type BulkReviewResult = {
+  requested: number;
+  updated: number;
+  skipped: number;
+};
+
+/**
+ * Bulk approve/reject. Uses the SAME pending-only safety as applyReview: each
+ * per-kind UPDATE is constrained by `review_status='pending'`, so already
+ * approved/rejected/needs_changes rows are never touched (they count toward
+ * `skipped`). Edits are NOT applied in bulk — only the status, reviewer stamps,
+ * and an optional shared note. One UPDATE per kind.
+ */
+export async function bulkReview(
+  items: BulkReviewItem[],
+  reviewerId: string,
+  action: ReviewAction,
+  note: string | null,
+): Promise<BulkReviewResult> {
+  const supabase = getServerSupabase();
+  const byKind: Record<ReviewKind, string[]> = {
+    coverage: [],
+    pricing: [],
+    addons: [],
+  };
+  for (const it of items) byKind[it.kind].push(it.rowId);
+
+  const reviewedAt = new Date().toISOString();
+  const status = action === "approve" ? "approved" : "rejected";
+  let updated = 0;
+
+  for (const kind of REVIEW_KINDS) {
+    const ids = byKind[kind];
+    if (ids.length === 0) continue;
+    const update: Record<string, unknown> = {
+      review_status: status,
+      reviewed_by: reviewerId,
+      reviewed_at: reviewedAt,
+    };
+    if (note) update.notes = note;
+
+    const res = await supabase
+      .from(TABLE[kind])
+      .update(update)
+      .in("id", ids)
+      .eq("review_status", "pending") // pending-only guard
+      .select("id");
+    if (res.error) {
+      console.warn(
+        `[coverage] bulk review failed kind=${kind} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+      );
+      throw new ApiError(500, "Could not apply the bulk review.");
+    }
+    updated += res.data?.length ?? 0;
+  }
+
+  return { requested: items.length, updated, skipped: items.length - updated };
+}

@@ -1,88 +1,48 @@
-import { format, startOfMonth } from "date-fns";
-import { z } from "zod";
-
-import { ApiError, badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
-import { getOrdersSummary } from "@/lib/server/cogent";
-import { todayInAppTimezone } from "@/lib/dates";
+import { handleApiError, requireAdmin } from "@/lib/server/auth";
+import { readOrdersSnapshot } from "@/lib/server/orders";
 
 // GET /api/cogent/orders-summary
 //
-// Admin-only. Returns AE production-order totals aggregated from Cogent's
-// Orders API for a date window, plus any territories that map to no AE.
+// Admin-only. CACHE-ONLY read of the month-to-date orders rollup from the
+// singleton `order_snapshot` (populated by the cron + admin manual refresh).
+// This route NEVER calls Cogent live — page loads must not trigger an upstream
+// fetch. For a raw upstream/diagnostic probe use the separate, admin-gated
+// /api/cogent/test route.
 //
-// Query params (both optional):
-//   startDate  yyyy-MM-dd  default: first day of the current month
-//   endDate    yyyy-MM-dd  default: today
-//
-// This route performs NO database writes — it only reads the
-// cogent_territory_mappings table (via the library) to attribute Cogent
-// territories to AEs. The Cogent API key never appears in the response or
-// logs; only safe metadata (status, count, duration, unmapped count) is
-// logged. See src/lib/server/cogent.ts for the aggregation rules.
+// Until the first successful sync, returns a clean `synced:false` empty state
+// (200) so the admin page renders and the Refresh button can populate it.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** yyyy-MM-dd. Calendar-day strings, matching Cogent's date params and the
- *  DATE-typed columns elsewhere in the app (no timezone math). */
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-const QuerySchema = z.object({
-  startDate: z.string().regex(DATE_RE).optional(),
-  endDate: z.string().regex(DATE_RE).optional(),
-});
 
 export async function GET(req: Request) {
   try {
     await requireAdmin(req);
 
-    const url = new URL(req.url);
-    const parsed = QuerySchema.safeParse({
-      startDate: url.searchParams.get("startDate") ?? undefined,
-      endDate: url.searchParams.get("endDate") ?? undefined,
-    });
-    if (!parsed.success) {
-      throw badRequest("startDate and endDate must be yyyy-MM-dd.");
+    const snap = await readOrdersSnapshot();
+    if (!snap) {
+      return Response.json({
+        startDate: "",
+        endDate: "",
+        pace: null,
+        company: null,
+        items: [],
+        unmappedTerritories: [],
+        refreshedAt: null,
+        synced: false,
+      });
     }
 
-    // Anchor "today" and the month start to the app's business timezone
-    // (Denver), NOT server-local time. On Vercel the function runs in UTC, so
-    // `new Date()` after ~6pm Denver is already "tomorrow" in UTC — which
-    // would shift the today/MTD window a day forward and miss the day's
-    // orders. todayInAppTimezone() gives a Date whose calendar fields are the
-    // current Denver day. (endDate is inclusive here; the Cogent library adds
-    // the day needed for Cogent's exclusive end internally.)
-    const todayAnchor = todayInAppTimezone();
-    const today = format(todayAnchor, "yyyy-MM-dd");
-    const startDate =
-      parsed.data.startDate ?? format(startOfMonth(todayAnchor), "yyyy-MM-dd");
-    const endDate = parsed.data.endDate ?? today;
-
-    if (startDate > endDate) {
-      throw badRequest("startDate must not be after endDate.");
-    }
-
-    let summary;
-    try {
-      summary = await getOrdersSummary({ startDate, endDate, today });
-    } catch (err) {
-      // Upstream/config failures from the library are operational, not 4xx.
-      console.warn(`[cogent-orders-summary] failed err=${String(err)}`);
-      throw new ApiError(502, "Could not retrieve the Cogent orders summary.");
-    }
-
-    // Log safe metadata ONLY — never the payload, never the key.
-    console.log(
-      `[cogent-orders-summary] OK status=${summary.meta.upstreamStatus} ` +
-        `rows=${summary.meta.rowCount} aes=${summary.items.length} ` +
-        `unmapped=${summary.meta.unmappedCount} durationMs=${summary.meta.durationMs}`,
-    );
-
+    const monthly = snap.data;
     return Response.json({
-      startDate: summary.startDate,
-      endDate: summary.endDate,
-      items: summary.items,
-      unmappedTerritories: summary.unmappedTerritories,
+      startDate: monthly.startDate,
+      endDate: monthly.endDate,
+      pace: monthly.pace,
+      company: monthly.company,
+      items: monthly.items,
+      unmappedTerritories: monthly.unmappedTerritories,
+      refreshedAt: snap.refreshedAt,
+      synced: true,
     });
   } catch (err) {
     return handleApiError(err);
