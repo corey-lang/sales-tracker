@@ -444,11 +444,18 @@ async function applyTodayBaselineDeltas(
   }));
 
   // Per-territory Today — identical formula against the territory baseline.
+  // Existing baseline rows may not have territory_totals (the column was added
+  // after they were written). For territory-level display, a MISSING territory
+  // baseline means "unknown", so we neutralize it to the current MTD (→ Today 0)
+  // rather than treating it as 0 (which would surface the full monthly total as
+  // Today). `??` only fires on a missing key — a legitimately stored 0 is kept,
+  // and future rows with territory_totals calculate normally.
   const territoryItems = monthly.territoryItems.map((t) => ({
     ...t,
     todayOrders: Math.max(
       0,
-      t.orderCount - (baseline.territoryTotals[t.salesTerritoryName] ?? 0),
+      t.orderCount -
+        (baseline.territoryTotals[t.salesTerritoryName] ?? t.orderCount),
     ),
   }));
 
