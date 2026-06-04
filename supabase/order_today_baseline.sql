@@ -24,6 +24,9 @@
 --                   clamped per-AE deltas (see orders.ts applyTodayBaselineDeltas).
 --   ae_totals       JSONB { salespersonId: mtdOrderTotal } at the baseline. An
 --                   AE absent here is treated as baseline 0 by the reader.
+--   territory_totals JSONB { salesTerritoryName: mtdOrderTotal } at the baseline.
+--                   Additive — feeds ONLY the admin By-Territory view's Today
+--                   (same delta formula); the AE/company Today never use it.
 --   created_at / updated_at  audit. Rows are WRITE-ONCE — the app creates the
 --                   baseline with INSERT … ON CONFLICT DO NOTHING and never
 --                   updates it — so updated_at == created_at in practice.
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS order_today_baseline (
   baseline_date DATE PRIMARY KEY,
   company_total INTEGER NOT NULL,
   ae_totals JSONB NOT NULL DEFAULT '{}'::jsonb,
+  territory_totals JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -49,6 +53,7 @@ CREATE TABLE IF NOT EXISTS order_today_baseline (
 -- Re-runnable column adds for tables that predate any column above.
 ALTER TABLE order_today_baseline ADD COLUMN IF NOT EXISTS company_total INTEGER;
 ALTER TABLE order_today_baseline ADD COLUMN IF NOT EXISTS ae_totals JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE order_today_baseline ADD COLUMN IF NOT EXISTS territory_totals JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE order_today_baseline ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE order_today_baseline ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 

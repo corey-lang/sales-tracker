@@ -27,6 +27,7 @@ export async function GET(req: Request) {
         pace: null,
         company: null,
         items: [],
+        territoryItems: [],
         unmappedTerritories: [],
         refreshedAt: null,
         synced: false,
@@ -40,6 +41,9 @@ export async function GET(req: Request) {
       pace: monthly.pace,
       company: monthly.company,
       items: monthly.items,
+      // Per-territory rollups for the admin By-Territory view. [] on snapshots
+      // written before this field existed (until the next sync repopulates it).
+      territoryItems: monthly.territoryItems ?? [],
       unmappedTerritories: monthly.unmappedTerritories,
       refreshedAt: snap.refreshedAt,
       synced: true,

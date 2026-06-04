@@ -22,6 +22,7 @@ export async function POST(req: Request) {
       pace: data.pace,
       company: data.company,
       items: data.items,
+      territoryItems: data.territoryItems,
       unmappedTerritories: data.unmappedTerritories,
       refreshedAt,
     });

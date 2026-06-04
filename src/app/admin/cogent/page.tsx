@@ -31,6 +31,17 @@ type AeItem = {
   pacePercent?: number | null;
 };
 
+type TerritoryItem = {
+  salesTerritoryName: string;
+  salespersonId: string;
+  salespersonName: string;
+  orderCount: number;
+  orderTarget: number;
+  percentToGoal: number | null;
+  todayOrders: number | null;
+  pacePercent?: number | null;
+};
+
 type UnmappedTerritory = {
   salesTerritoryName: string;
   orderCount: number;
@@ -57,6 +68,7 @@ type Summary = {
   pace: OrderPace | null;
   company: CompanyOrders | null;
   items: AeItem[];
+  territoryItems: TerritoryItem[];
   unmappedTerritories: UnmappedTerritory[];
 };
 
@@ -73,6 +85,147 @@ const SORT_LABELS: Record<SortKey, string> = {
   goal: "Goal % (high → low)",
   name: "AE name (A → Z)",
 };
+
+// Market grouping — lets leadership view AEs by area. Mapping rules:
+//   Utah    = territories beginning with "UT"
+//   Phoenix = territories beginning with "PHX"
+//   Texas   = Austin, San Antonio, DFW East, DFW West
+//   Nevada  = NV Las Vegas, NV Mesquite
+// Selecting a market SCOPES the displayed metrics to that market: By-AE rows are
+// rebuilt from only the matching territories (a cross-market AE shows just that
+// market's subset), and By-Territory lists the matching territories. Display-only
+// — it never changes the underlying orders, pace, or production-AE filtering.
+type MarketKey = "all" | "utah" | "phoenix" | "texas" | "nevada";
+
+const MARKETS: { key: MarketKey; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "utah", label: "Utah" },
+  { key: "phoenix", label: "Phoenix" },
+  { key: "texas", label: "Texas" },
+  { key: "nevada", label: "Nevada" },
+];
+
+const MARKET_LABEL: Record<MarketKey, string> = Object.fromEntries(
+  MARKETS.map((m) => [m.key, m.label]),
+) as Record<MarketKey, string>;
+
+const TEXAS_TERRITORIES = new Set([
+  "austin",
+  "san antonio",
+  "dfw east",
+  "dfw west",
+]);
+const NEVADA_TERRITORIES = new Set(["nv las vegas", "nv mesquite"]);
+
+function territoryInMarket(territory: string, market: MarketKey): boolean {
+  const t = territory.trim();
+  switch (market) {
+    case "all":
+      return true;
+    case "utah":
+      return t.toUpperCase().startsWith("UT");
+    case "phoenix":
+      return t.toUpperCase().startsWith("PHX");
+    case "texas":
+      return TEXAS_TERRITORIES.has(t.toLowerCase());
+    case "nevada":
+      return NEVADA_TERRITORIES.has(t.toLowerCase());
+  }
+}
+
+/** Per-AE Today: never "—" in the table — 0 when null (req: "Display 0 if none"). */
+function todayCount(value: number | null | undefined): number {
+  return value ?? 0;
+}
+
+// View toggle — same data, two granularities.
+type ViewKey = "ae" | "territory";
+
+/** A row sortable by the shared keys (works for both AE and territory rows). */
+type SortableRow = {
+  orderCount: number;
+  percentToGoal: number | null;
+  pacePercent?: number | null;
+};
+
+/** Applies a SortKey to rows; `nameOf` supplies the label for name-sort. Default
+ *  (pace) and all options mirror the existing By-AE behavior. */
+function sortRows<T extends SortableRow>(
+  rows: T[],
+  sort: SortKey,
+  nameOf: (r: T) => string,
+): T[] {
+  const num = (v: number | null | undefined) =>
+    v === null || v === undefined ? -Infinity : v;
+  const copy = [...rows];
+  switch (sort) {
+    case "pace":
+      copy.sort((a, b) => num(b.pacePercent) - num(a.pacePercent));
+      break;
+    case "orders":
+      copy.sort((a, b) => b.orderCount - a.orderCount);
+      break;
+    case "goal":
+      copy.sort((a, b) => num(b.percentToGoal) - num(a.percentToGoal));
+      break;
+    case "name":
+      copy.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+      break;
+  }
+  return copy;
+}
+
+type FilterSummary = {
+  orders: number;
+  today: number;
+  goal: number;
+  goalPercent: number | null;
+  pacePercent: number | null;
+};
+
+/** orders / goal × 100, 1 decimal; null when no goal. Matches the server's
+ *  round1 goal-% so rebuilt rows agree with AE/territory rows. */
+function goalPercentOf(orders: number, goal: number): number | null {
+  return goal > 0 ? Math.round((orders / goal) * 1000) / 10 : null;
+}
+
+/** Whole-number pace % — same shape as the server's pacePercentValue:
+ *  goalFraction / expectedFraction × 100. null when not computable. */
+function pacePercentOf(
+  orders: number,
+  goal: number,
+  pace: OrderPace | null,
+): number | null {
+  if (
+    goal <= 0 ||
+    !pace ||
+    pace.businessDaysElapsed <= 0 ||
+    pace.businessDaysTotal <= 0
+  ) {
+    return null;
+  }
+  return Math.round(
+    (orders / goal / (pace.businessDaysElapsed / pace.businessDaysTotal)) * 100,
+  );
+}
+
+/** Totals for the visible rows — same orders/goal/pace formulas used per-row,
+ *  so the summary matches the table's columns exactly. */
+function summarize(
+  rows: { orderCount: number; orderTarget: number; todayOrders: number | null }[],
+  pace: OrderPace | null,
+): FilterSummary {
+  const orders = rows.reduce((s, r) => s + r.orderCount, 0);
+  const goal = rows.reduce((s, r) => s + r.orderTarget, 0);
+  const today = rows.reduce((s, r) => s + todayCount(r.todayOrders), 0);
+  return {
+    orders,
+    today,
+    goal,
+    goalPercent: goalPercentOf(orders, goal),
+    pacePercent: pacePercentOf(orders, goal, pace),
+  };
+}
 
 /** "—" when null, else "53.5%". */
 function formatPercent(percent: number | null | undefined): string {
@@ -95,6 +248,8 @@ export default function AdminCogentPage() {
 
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [sort, setSort] = useState<SortKey>("pace");
+  const [market, setMarket] = useState<MarketKey>("all");
+  const [view, setView] = useState<ViewKey>("ae");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -110,6 +265,7 @@ export default function AdminCogentPage() {
           pace: body.pace ?? null,
           company: body.company ?? null,
           items: body.items ?? [],
+          territoryItems: body.territoryItems ?? [],
           unmappedTerritories: body.unmappedTerritories ?? [],
         },
       });
@@ -171,27 +327,73 @@ export default function AdminCogentPage() {
     return () => clearInterval(id);
   }, [loadCached]);
 
-  const sortedItems = useMemo(() => {
+  // By-AE rows:
+  //   • All    → full AE totals (load.data.items).
+  //   • Market → REBUILT from the matching-market territoryItems, grouped by AE,
+  //     so each AE row shows ONLY that market's subset (e.g. Heather under Utah
+  //     shows UT South only, not her NV Mesquite). Orders/Today/Goal are summed
+  //     from the matching territories; Goal % / Pace % are recomputed from that
+  //     subset with the same formulas the server uses. Then sorted (default
+  //     Pace % desc). Falls back to empty if territoryItems aren't in the
+  //     snapshot yet (legacy cache) — the next sync repopulates them.
+  const aeRows = useMemo(() => {
     if (load.status !== "ready") return [];
-    const items = [...load.data.items];
-    const num = (v: number | null | undefined) =>
-      v === null || v === undefined ? -Infinity : v;
-    switch (sort) {
-      case "pace":
-        items.sort((a, b) => num(b.pacePercent) - num(a.pacePercent));
-        break;
-      case "orders":
-        items.sort((a, b) => b.orderCount - a.orderCount);
-        break;
-      case "goal":
-        items.sort((a, b) => num(b.percentToGoal) - num(a.percentToGoal));
-        break;
-      case "name":
-        items.sort((a, b) => a.salespersonName.localeCompare(b.salespersonName));
-        break;
+    if (market === "all") {
+      return sortRows([...load.data.items], sort, (r) => r.salespersonName);
     }
-    return items;
-  }, [load, sort]);
+    const matching = load.data.territoryItems.filter((t) =>
+      territoryInMarket(t.salesTerritoryName, market),
+    );
+    const byAe = new Map<string, AeItem>();
+    for (const t of matching) {
+      const cur = byAe.get(t.salespersonId);
+      if (cur) {
+        cur.orderCount += t.orderCount;
+        cur.orderTarget += t.orderTarget;
+        cur.todayOrders = todayCount(cur.todayOrders) + todayCount(t.todayOrders);
+        cur.territories.push(t.salesTerritoryName);
+      } else {
+        byAe.set(t.salespersonId, {
+          salespersonId: t.salespersonId,
+          salespersonName: t.salespersonName,
+          territories: [t.salesTerritoryName],
+          orderCount: t.orderCount,
+          orderTarget: t.orderTarget,
+          todayOrders: todayCount(t.todayOrders),
+          percentToGoal: null, // recomputed from the subset below
+          pacePercent: null,
+        });
+      }
+    }
+    const rebuilt = Array.from(byAe.values()).map((r) => ({
+      ...r,
+      territories: [...r.territories].sort(),
+      percentToGoal: goalPercentOf(r.orderCount, r.orderTarget),
+      pacePercent: pacePercentOf(r.orderCount, r.orderTarget, load.data.pace),
+    }));
+    return sortRows(rebuilt, sort, (r) => r.salespersonName);
+  }, [load, sort, market]);
+
+  const territoryRows = useMemo(() => {
+    if (load.status !== "ready") return [];
+    const filtered = load.data.territoryItems.filter((t) =>
+      territoryInMarket(t.salesTerritoryName, market),
+    );
+    return sortRows(filtered, sort, (r) => r.salesTerritoryName);
+  }, [load, sort, market]);
+
+  const pace = load.status === "ready" ? load.data.pace : null;
+  // Summary = the SAME visible rows of the current view. By-AE market rows are
+  // now market-scoped (rebuilt from matching territories), so the summary equals
+  // the table's column sums exactly — and a cross-market AE is never
+  // double-counted across markets. At "All" this is the company total.
+  const visibleRows = view === "ae" ? aeRows : territoryRows;
+  const summary = useMemo(
+    () => summarize(visibleRows, pace),
+    [visibleRows, pace],
+  );
+  const summaryLabel =
+    market === "all" ? "Company Total" : `${MARKET_LABEL[market]} Total`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -226,7 +428,29 @@ export default function AdminCogentPage() {
           <Card>
             <CardHeader>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <CardTitle>By AE</CardTitle>
+                {/* View toggle — By AE / By Territory (default By AE). */}
+                <div className="inline-flex rounded-md border border-border p-0.5 text-sm">
+                  {(
+                    [
+                      { key: "ae", label: "By AE" },
+                      { key: "territory", label: "By Territory" },
+                    ] as { key: ViewKey; label: string }[]
+                  ).map((v) => (
+                    <button
+                      key={v.key}
+                      type="button"
+                      aria-pressed={view === v.key}
+                      onClick={() => setView(v.key)}
+                      className={`h-7 rounded px-3 font-medium transition-colors ${
+                        view === v.key
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
                 <label className="flex items-center gap-2 text-sm text-muted-foreground">
                   Sort
                   <select
@@ -242,16 +466,50 @@ export default function AdminCogentPage() {
                   </select>
                 </label>
               </div>
+              {/* Market filter chips — filters both views by area. */}
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {MARKETS.map((m) => {
+                  const active = market === m.key;
+                  return (
+                    <button
+                      key={m.key}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setMarket(m.key)}
+                      className={`h-7 rounded-full border px-3 text-xs font-medium transition-colors ${
+                        active
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
             </CardHeader>
             <CardContent>
-              {sortedItems.length === 0 ? (
+              {visibleRows.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  {lastUpdated
-                    ? "No mapped AE orders this month."
-                    : "Not synced yet — click Refresh to load orders."}
+                  {market !== "all"
+                    ? `No ${view === "territory" ? "territories" : "AEs"} in ${MARKET_LABEL[market]}.`
+                    : lastUpdated
+                      ? `No mapped ${view === "territory" ? "territory" : "AE"} orders this month.`
+                      : "Not synced yet — click Refresh to load orders."}
                 </p>
               ) : (
-                <AeTable items={sortedItems} />
+                <>
+                  <FilterSummaryRow
+                    label={summaryLabel}
+                    summary={summary}
+                    paceAvailable={pace !== null}
+                  />
+                  {view === "ae" ? (
+                    <AeTable items={aeRows} />
+                  ) : (
+                    <TerritoryTable items={territoryRows} />
+                  )}
+                </>
               )}
             </CardContent>
           </Card>
@@ -356,6 +614,105 @@ function CompanyCard({
   );
 }
 
+/** Compact totals strip above the table for the current filter/view. */
+function FilterSummaryRow({
+  label,
+  summary,
+  paceAvailable,
+}: {
+  label: string;
+  summary: FilterSummary;
+  paceAvailable: boolean;
+}) {
+  return (
+    <div className="mb-3 rounded-lg border bg-muted/40 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <span className="text-sm font-semibold">{label}</span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm tabular-nums">
+          <span className="text-muted-foreground">
+            Orders{" "}
+            <span className="font-semibold text-foreground">
+              {summary.orders}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            Today{" "}
+            <span className="font-semibold text-foreground">
+              {summary.today}
+            </span>
+            {summary.today > 0 ? " 🎉" : ""}
+          </span>
+          <span className="text-muted-foreground">
+            Goal{" "}
+            <span className="font-semibold text-foreground">{summary.goal}</span>
+          </span>
+          <span className="text-muted-foreground">
+            Goal %{" "}
+            <span className="font-semibold text-foreground">
+              {formatPercent(summary.goalPercent)}
+            </span>
+          </span>
+          {paceAvailable ? (
+            <span className={`font-semibold ${paceClass(summary.pacePercent)}`}>
+              {formatPace(summary.pacePercent)} Pace
+            </span>
+          ) : (
+            <span className="text-muted-foreground">Pace —</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TerritoryTable({ items }: { items: TerritoryItem[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+            <th className="py-2 pr-3 font-medium">Territory</th>
+            <th className="py-2 px-3 font-medium">AE</th>
+            <th className="py-2 px-3 text-right font-medium">Orders</th>
+            <th className="py-2 px-3 text-right font-medium">Today</th>
+            <th className="py-2 px-3 text-right font-medium">Goal</th>
+            <th className="py-2 px-3 text-right font-medium">Goal %</th>
+            <th className="py-2 pl-3 text-right font-medium">Pace %</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it) => (
+            <tr key={it.salesTerritoryName} className="border-b last:border-0">
+              <td className="py-2 pr-3 font-medium">{it.salesTerritoryName}</td>
+              <td className="py-2 px-3 text-muted-foreground">
+                {it.salespersonName}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums">
+                {it.orderCount}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums">
+                {todayCount(it.todayOrders)}
+                {todayCount(it.todayOrders) > 0 ? " 🎉" : ""}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums">
+                {it.orderTarget}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums">
+                {formatPercent(it.percentToGoal)}
+              </td>
+              <td
+                className={`py-2 pl-3 text-right font-semibold tabular-nums ${paceClass(it.pacePercent)}`}
+              >
+                {formatPace(it.pacePercent)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function AeTable({ items }: { items: AeItem[] }) {
   return (
     <div className="overflow-x-auto">
@@ -364,6 +721,7 @@ function AeTable({ items }: { items: AeItem[] }) {
           <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
             <th className="py-2 pr-3 font-medium">AE</th>
             <th className="py-2 px-3 text-right font-medium">Orders</th>
+            <th className="py-2 px-3 text-right font-medium">Today</th>
             <th className="py-2 px-3 text-right font-medium">Goal</th>
             <th className="py-2 px-3 text-right font-medium">Goal %</th>
             <th className="py-2 pl-3 text-right font-medium">Pace %</th>
@@ -382,6 +740,10 @@ function AeTable({ items }: { items: AeItem[] }) {
               </td>
               <td className="py-2 px-3 text-right tabular-nums">
                 {it.orderCount}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums">
+                {todayCount(it.todayOrders)}
+                {todayCount(it.todayOrders) > 0 ? " 🎉" : ""}
               </td>
               <td className="py-2 px-3 text-right tabular-nums">
                 {it.orderTarget}

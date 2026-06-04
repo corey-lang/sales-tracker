@@ -28,6 +28,7 @@ import { todayInAppTimezone } from "@/lib/dates";
 import {
   getOrdersSummary,
   type AeOrdersSummary,
+  type MappedTerritory,
   type UnmappedTerritory,
 } from "@/lib/server/cogent";
 import { fetchRangeAdjustments } from "@/lib/server/working-days";
@@ -66,6 +67,16 @@ export type CompanyOrders = {
   pacePercent: number | null;
 };
 
+/** One mapped territory's MTD rollup + the same pace/goal/today treatment the
+ *  AE rows get, so the admin "By Territory" view stays consistent with "By AE".
+ *  orderCount/orderTarget sum into the matching AE; todayOrders is the
+ *  territory's own baseline delta (see applyTodayBaselineDeltas). */
+export type TerritoryMonthlyOrders = MappedTerritory & {
+  percentToGoal: number | null;
+  pacePercent: number | null;
+  todayOrders: number | null;
+};
+
 export type MonthlyOrders = {
   startDate: string;
   endDate: string;
@@ -75,6 +86,9 @@ export type MonthlyOrders = {
   pace: OrderPace | null;
   company: CompanyOrders;
   items: AeMonthlyOrders[];
+  /** Per-territory rollups (mapped/production-AE territories only) for the admin
+   *  By-Territory view. Empty on snapshots written before this field existed. */
+  territoryItems: TerritoryMonthlyOrders[];
   unmappedTerritories: UnmappedTerritory[];
 };
 
@@ -241,6 +255,29 @@ export async function getMonthlyOrders(now?: Date): Promise<MonthlyOrders> {
       : null,
   };
 
+  // Per-territory rollup — same goal %/pace % treatment as the AE rows so the
+  // By-Territory view is consistent with By-AE. todayOrders is filled by
+  // applyTodayBaselineDeltas (territory baseline delta). MTD orderCount/target
+  // are the SAME aggregate values that sum into the AE totals.
+  const territoryItems: TerritoryMonthlyOrders[] = summary.mappedTerritories.map(
+    (t) => ({
+      ...t,
+      percentToGoal:
+        t.orderTarget > 0
+          ? Math.round((t.orderCount / t.orderTarget) * 1000) / 10
+          : null,
+      pacePercent: pace
+        ? pacePercentValue(
+            t.orderCount,
+            t.orderTarget,
+            pace.businessDaysElapsed,
+            pace.businessDaysTotal,
+          )
+        : null,
+      todayOrders: null,
+    }),
+  );
+
   return {
     startDate,
     endDate,
@@ -248,6 +285,7 @@ export async function getMonthlyOrders(now?: Date): Promise<MonthlyOrders> {
     pace,
     company,
     items,
+    territoryItems,
     unmappedTerritories: summary.unmappedTerritories,
   };
 }
@@ -274,6 +312,12 @@ export async function getMonthlyOrders(now?: Date): Promise<MonthlyOrders> {
 // so orders booked before the first sync of the day are absorbed into the
 // baseline rather than counted as "today". This is acceptable for V1; a future
 // true order-event / order-detail feed can replace it with exact Today counts.
+//
+// TERRITORY DIMENSION (additive): the SAME baseline row also captures per-
+// territory start-of-day MTD totals, so the admin By-Territory view can show a
+// territory's Today via the IDENTICAL formula (current − baseline, clamp ≥ 0).
+// This does NOT change the AE/company delta computation — those are untouched;
+// it only adds a parallel territory delta for the admin display.
 
 const BASELINE_TABLE = "order_today_baseline";
 
@@ -282,6 +326,9 @@ type TodayBaseline = {
   companyTotal: number;
   /** salespersonId -> MTD order total captured at the baseline. */
   aeTotals: Record<string, number>;
+  /** salesTerritoryName -> MTD order total captured at the baseline (additive;
+   *  only feeds the admin By-Territory Today, never AE/company). */
+  territoryTotals: Record<string, number>;
 };
 
 /**
@@ -296,6 +343,7 @@ async function loadOrCreateTodayBaseline(
   baselineDate: string,
   companyTotal: number,
   aeTotals: Record<string, number>,
+  territoryTotals: Record<string, number>,
 ): Promise<TodayBaseline | null> {
   const supabase = getServerSupabase();
 
@@ -304,6 +352,7 @@ async function loadOrCreateTodayBaseline(
       baseline_date: baselineDate,
       company_total: companyTotal,
       ae_totals: aeTotals,
+      territory_totals: territoryTotals,
     },
     { onConflict: "baseline_date", ignoreDuplicates: true },
   );
@@ -317,7 +366,7 @@ async function loadOrCreateTodayBaseline(
 
   const read = await supabase
     .from(BASELINE_TABLE)
-    .select("baseline_date, company_total, ae_totals")
+    .select("baseline_date, company_total, ae_totals, territory_totals")
     .eq("baseline_date", baselineDate)
     .maybeSingle();
   if (read.error || !read.data) {
@@ -331,21 +380,27 @@ async function loadOrCreateTodayBaseline(
     baseline_date: string;
     company_total: number | string | null;
     ae_totals: unknown;
+    territory_totals: unknown;
   };
-  const aeTotalsRaw =
-    row.ae_totals && typeof row.ae_totals === "object"
-      ? (row.ae_totals as Record<string, unknown>)
-      : {};
-  const parsedAeTotals: Record<string, number> = {};
-  for (const [id, v] of Object.entries(aeTotalsRaw)) {
-    const n = typeof v === "string" ? Number(v) : v;
-    parsedAeTotals[id] = typeof n === "number" && Number.isFinite(n) ? n : 0;
-  }
   return {
     baselineDate: row.baseline_date,
     companyTotal: Number(row.company_total) || 0,
-    aeTotals: parsedAeTotals,
+    aeTotals: parseTotalsMap(row.ae_totals),
+    territoryTotals: parseTotalsMap(row.territory_totals),
   };
+}
+
+/** Coerces a JSONB `{ key: number }` map read back from Postgres into a clean
+ *  numeric map (string/garbage values → 0). */
+function parseTotalsMap(raw: unknown): Record<string, number> {
+  const src =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(src)) {
+    const n = typeof v === "string" ? Number(v) : v;
+    out[k] = typeof n === "number" && Number.isFinite(n) ? n : 0;
+  }
+  return out;
 }
 
 /**
@@ -364,11 +419,18 @@ async function applyTodayBaselineDeltas(
   const companyTotal = monthly.company.orderCount;
   const aeTotals: Record<string, number> = {};
   for (const it of monthly.items) aeTotals[it.salespersonId] = it.orderCount;
+  // Additive territory dimension — captured/read alongside the AE totals so the
+  // By-Territory view's Today uses the same delta. Keyed by territory name.
+  const territoryTotals: Record<string, number> = {};
+  for (const t of monthly.territoryItems) {
+    territoryTotals[t.salesTerritoryName] = t.orderCount;
+  }
 
   const baseline = await loadOrCreateTodayBaseline(
     baselineDate,
     companyTotal,
     aeTotals,
+    territoryTotals,
   );
   if (!baseline) return monthly; // todayOrders stays null → UI shows "—"
 
@@ -379,6 +441,15 @@ async function applyTodayBaselineDeltas(
   const items = monthly.items.map((it) => ({
     ...it,
     todayOrders: Math.max(0, it.orderCount - (baseline.aeTotals[it.salespersonId] ?? 0)),
+  }));
+
+  // Per-territory Today — identical formula against the territory baseline.
+  const territoryItems = monthly.territoryItems.map((t) => ({
+    ...t,
+    todayOrders: Math.max(
+      0,
+      t.orderCount - (baseline.territoryTotals[t.salesTerritoryName] ?? 0),
+    ),
   }));
 
   // Company Today = SUM of the clamped per-AE deltas, so the company number is
@@ -397,6 +468,7 @@ async function applyTodayBaselineDeltas(
   return {
     ...monthly,
     items,
+    territoryItems,
     company: { ...monthly.company, todayOrders: companyTodayOrders },
   };
 }

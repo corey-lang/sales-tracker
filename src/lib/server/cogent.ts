@@ -236,10 +236,25 @@ export type UnmappedTerritory = {
   orderTarget: number;
 };
 
+/** One MAPPED territory's MTD totals + the production AE it rolls up to. The
+ *  per-territory rollup that backs the admin "By Territory" view. orderCount /
+ *  orderTarget are the SAME aggregate values that sum into the AE totals, so
+ *  the two views stay consistent. */
+export type MappedTerritory = {
+  salesTerritoryName: string;
+  salespersonId: string;
+  salespersonName: string;
+  orderCount: number;
+  orderTarget: number;
+};
+
 export type OrdersSummary = {
   startDate: string;
   endDate: string;
   items: AeOrdersSummary[];
+  /** Per-territory MTD rollups for the mapped (production-AE) territories only.
+   *  Unmapped territories stay in unmappedTerritories. */
+  mappedTerritories: MappedTerritory[];
   unmappedTerritories: UnmappedTerritory[];
   /** Safe metadata for logging — never the payload itself. */
   meta: {
@@ -475,6 +490,7 @@ export async function getOrdersSummary(opts: {
     }
   >();
   const unmapped: UnmappedTerritory[] = [];
+  const mappedTerritories: MappedTerritory[] = [];
 
   for (const t of territoryTotals) {
     const ae = territoryToAe.get(t.salesTerritoryName);
@@ -486,6 +502,14 @@ export async function getOrdersSummary(opts: {
       });
       continue;
     }
+    // Per-territory rollup (same orderCount/orderTarget that sum into the AE).
+    mappedTerritories.push({
+      salesTerritoryName: t.salesTerritoryName,
+      salespersonId: ae.id,
+      salespersonName: ae.name,
+      orderCount: t.orderCount,
+      orderTarget: t.orderTarget,
+    });
     const acc = byAe.get(ae.id) ?? {
       name: ae.name,
       territories: [],
@@ -513,11 +537,15 @@ export async function getOrdersSummary(opts: {
     .sort((a, b) => a.salespersonName.localeCompare(b.salespersonName));
 
   unmapped.sort((a, b) => a.salesTerritoryName.localeCompare(b.salesTerritoryName));
+  mappedTerritories.sort((a, b) =>
+    a.salesTerritoryName.localeCompare(b.salesTerritoryName),
+  );
 
   return {
     startDate,
     endDate,
     items,
+    mappedTerritories,
     unmappedTerritories: unmapped,
     meta: {
       rowCount: main.rows.length,
