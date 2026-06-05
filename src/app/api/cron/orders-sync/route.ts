@@ -5,21 +5,42 @@ import { syncOrders } from "@/lib/server/orders";
 //
 // Vercel Cron target. Pulls the latest orders from the Cogent integration
 // endpoint and refreshes the singleton `order_snapshot` cache that the AE Home
-// and Admin orders screens read. Scheduled every 15 minutes (see vercel.json);
-// the schedule is in UTC and broadly covers the active window, and this route
-// then ENFORCES the exact window 7:00–23:00 Mountain Time (DST-correct) and
-// skips outside it. Logging (start/success/failure/duration) lives in
-// syncOrders so cron + manual refresh log identically.
+// and Admin orders screens read.
+//
+// SCHEDULE (see vercel.json): every 15 minutes across a broad UTC range. Vercel
+// Cron runs only in UTC and has no per-cron timezone, and the UTC↔Mountain
+// offset shifts with DST — so the cron range is intentionally wide and THIS
+// ROUTE enforces the exact Mountain-Time windows (DST-correct via Intl),
+// skipping ticks that fall outside them. Two windows:
+//
+//   • DAYTIME FRESHNESS — 5:00 AM … 11:00 PM MT, every 15 min. Keeps Today
+//     Orders current via the MTD baseline delta during business hours.
+//
+//   • MIDNIGHT ROLLOVER — ~12:00–12:15 AM MT. The first sync of the new MT day
+//     creates that day's baseline row from current MTD totals, so Today Orders
+//     reset to 0 right after midnight — before any AE opens the app — instead
+//     of waiting for the first daytime sync. This is purely a TIMING change:
+//     the baseline-delta math in syncOrders is unchanged.
+//
+// Between 12:15 AM and 5:00 AM MT no sync runs. Logging (start/success/failure/
+// duration) lives in syncOrders so cron + manual refresh log identically.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Active window 7:00 AM … 11:00 PM Mountain Time, INCLUSIVE of both ends
-// (minutes-of-day: 420 … 1380). Inclusive end means the 11:00 PM tick runs but
-// 11:15 PM does not.
-const WINDOW_START_MIN = 7 * 60; // 7:00 AM MT
-const WINDOW_END_MIN = 23 * 60; // 11:00 PM MT
+// Daytime freshness window 5:00 AM … 11:00 PM Mountain Time, INCLUSIVE of both
+// ends (minutes-of-day: 300 … 1380). Inclusive end means the 11:00 PM tick runs
+// but 11:15 PM does not.
+const DAY_START_MIN = 5 * 60; // 5:00 AM MT
+const DAY_END_MIN = 23 * 60; // 11:00 PM MT
+
+// Midnight rollover window 12:00 … 12:15 AM Mountain Time (minutes-of-day:
+// 0 … 15). The first sync of the new MT day lands here and creates the new
+// daily baseline (Today → 0). The 12:15 tick is a redundant guard in case the
+// 12:00 tick is missed or fires with a little clock skew.
+const ROLLOVER_START_MIN = 0; // 12:00 AM MT
+const ROLLOVER_END_MIN = 15; // 12:15 AM MT
 
 /** Current minutes-of-day (0–1439) in the app (Mountain) timezone, DST-correct. */
 function currentAppMinutes(): number {
@@ -55,9 +76,19 @@ export async function GET(req: Request) {
   }
 
   const mins = currentAppMinutes();
-  if (mins < WINDOW_START_MIN || mins > WINDOW_END_MIN) {
-    console.log(`[orders-sync] skipped — outside window (MT min-of-day=${mins})`);
+  const inDaytime = mins >= DAY_START_MIN && mins <= DAY_END_MIN;
+  const inRollover = mins >= ROLLOVER_START_MIN && mins <= ROLLOVER_END_MIN;
+  if (!inDaytime && !inRollover) {
+    console.log(
+      `[orders-sync] skipped — outside daytime/rollover windows (MT min-of-day=${mins})`,
+    );
     return Response.json({ skipped: true, mtMinutes: mins });
+  }
+  if (inRollover) {
+    // Fires at most ~twice/day; not noisy. Marks the baseline rollover/reset.
+    console.log(
+      `[orders-sync] midnight rollover tick (MT min-of-day=${mins}) — first sync of the new MT day; new baseline → Today=0`,
+    );
   }
 
   try {

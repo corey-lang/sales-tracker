@@ -307,11 +307,14 @@ export async function getMonthlyOrders(now?: Date): Promise<MonthlyOrders> {
 //   Today = 0; it grows as orders land. A new MT calendar date creates a fresh
 //   baseline row, so Today resets to 0 at the first sync of the new day.
 //
-// LIMITATION (documented intentionally): the baseline is captured at the first
-// sync inside the cron's active window (~7:00 AM MT), not at literal midnight,
-// so orders booked before the first sync of the day are absorbed into the
-// baseline rather than counted as "today". This is acceptable for V1; a future
-// true order-event / order-detail feed can replace it with exact Today counts.
+// TIMING: the baseline is captured at the FIRST sync of each MT day. The cron
+// runs a dedicated rollover tick shortly after midnight MT (~12:00 AM, see
+// src/app/api/cron/orders-sync/route.ts), so that first sync — and therefore the
+// Today→0 reset — happens right after midnight, before any AE opens the app,
+// rather than waiting for the first daytime sync. Any orders booked in the brief
+// window before the rollover tick are absorbed into the baseline rather than
+// counted as "today"; this is acceptable for V1, and a future true order-event /
+// order-detail feed can replace the delta with exact Today counts.
 //
 // TERRITORY DIMENSION (additive): the SAME baseline row also captures per-
 // territory start-of-day MTD totals, so the admin By-Territory view can show a
