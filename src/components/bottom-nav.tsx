@@ -6,6 +6,7 @@ import {
   Citrus,
   Home,
   ListChecks,
+  Map as MapIcon,
   ScanLine,
   Trophy,
   type LucideIcon,
@@ -22,6 +23,8 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 // Role-awareness:
 //   * Juice Box       — open to the whole team; tab renders for any
 //                       signed-in salesperson.
+//   * Map             — Territory Map; deep-links to /offices?view=map.
+//                       AE workflow, hidden from assistants.
 //   * To-Dos          — AE workflow, hidden from assistants.
 //   * Scan Biz Card   — AE workflow, hidden from assistants.
 //   Settings / logout / notifications no longer live in the nav; they're
@@ -62,6 +65,13 @@ const SCAN_BIZ_CARD: NavItem = {
   label: "Scan",
   icon: ScanLine,
 };
+// Territory Map — deep-links to the existing Offices surface with the
+// Map tab active (`?view=map`). Same AE-tool audience as To-Dos / Scan
+// (hidden from assistants + juice_box_only), so it never exposes the
+// map to a role that had no Offices entry point before. The short
+// "Map" label keeps the tab bar readable; "Territory Map" wouldn't fit
+// a 6-up bottom nav.
+const MAP: NavItem = { href: "/offices?view=map", label: "Map", icon: MapIcon };
 
 /**
  * Bottom padding any page using BottomNav should apply to its main wrapper.
@@ -106,7 +116,7 @@ function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   // don't use those workflows.
   const items: NavItem[] = [home, JUICE_BOX, LEADERBOARD];
   if (salesperson.role !== "assistant") {
-    items.push(TODOS, SCAN_BIZ_CARD);
+    items.push(MAP, TODOS, SCAN_BIZ_CARD);
   }
   return items;
 }
@@ -128,15 +138,17 @@ export function BottomNav({
   // (juice_box_only users) gets `grid-cols-1` so the lone Juice Box tab
   // centers across the full bar instead of squatting in one half.
   const gridClass =
-    items.length === 5
-      ? "grid-cols-5"
-      : items.length === 4
-        ? "grid-cols-4"
-        : items.length === 3
-          ? "grid-cols-3"
-          : items.length === 2
-            ? "grid-cols-2"
-            : "grid-cols-1";
+    items.length === 6
+      ? "grid-cols-6"
+      : items.length === 5
+        ? "grid-cols-5"
+        : items.length === 4
+          ? "grid-cols-4"
+          : items.length === 3
+            ? "grid-cols-3"
+            : items.length === 2
+              ? "grid-cols-2"
+              : "grid-cols-1";
 
   return (
     <nav
@@ -148,9 +160,15 @@ export function BottomNav({
     >
       <ul className={cn("mx-auto grid w-full max-w-2xl", gridClass)}>
         {items.map((item) => {
+          // Compare against the path portion only — the Map item carries a
+          // `?view=map` query, and query strings never appear in pathname.
+          // This lights up "Map" anywhere under /offices (including an
+          // office detail page), which is correct since Map is the sole
+          // nav entry into the Offices surface.
+          const itemPath = item.href.split("?")[0];
           const active =
-            pathname === item.href ||
-            (item.href !== "/" && pathname?.startsWith(`${item.href}/`));
+            pathname === itemPath ||
+            (itemPath !== "/" && pathname?.startsWith(`${itemPath}/`));
           const Icon = item.icon;
           const showBadge =
             item.href === "/juice-box" && unreadCount > 0;

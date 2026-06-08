@@ -2,6 +2,7 @@
 
 import {
   Fragment,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -10,7 +11,7 @@ import {
 } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -258,8 +259,44 @@ function formatDueDate(value: string | null): string | null {
 // Page
 // ---------------------------------------------------------------------------
 
+/**
+ * Coerces a raw `?view=` value into a valid Offices tab. Unknown/missing
+ * values fall back to "map" — the page's long-standing default. Used both
+ * for the initial tab and to validate live `?view=` changes (the
+ * bottom-nav "Map" tab points at /offices?view=map; ?view=list /
+ * ?view=checkins are shareable deep links too).
+ */
+function coerceView(value: string | null): ViewMode {
+  return value === "list" || value === "checkins" ? value : "map";
+}
+
+/**
+ * Default export wraps the content in a Suspense boundary because
+ * `OfficesPageContent` calls `useSearchParams()`, which Next requires to
+ * sit under Suspense on a statically prerendered route. The fallback
+ * mirrors the page's own loading state.
+ */
 export default function OfficesPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center p-4">
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        </main>
+      }
+    >
+      <OfficesPageContent />
+    </Suspense>
+  );
+}
+
+function OfficesPageContent() {
   const router = useRouter();
+  // Reactive view of the URL's `?view=`. Drives the active tab so deep
+  // links + the bottom-nav Map item update the visible tab even when the
+  // page is already mounted (the previous mount-only read couldn't).
+  const searchParams = useSearchParams();
+  const viewParam = searchParams.get("view");
   const { salesperson, loaded: sessionLoaded } = useSalesperson();
   const { loaded: permsLoaded } = useLivePermissions();
   useScrollToTop();
@@ -284,8 +321,44 @@ export default function OfficesPage() {
     }
   }, [accessReady, salesperson, canView, router]);
 
-  // ---- View mode (Map default, per product direction) ----------------------
-  const [viewMode, setViewMode] = useState<ViewMode>("map");
+  // ---- View mode (Map default; initial tab honors ?view= deep links) -------
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    coerceView(viewParam),
+  );
+
+  // Sync the visible tab when the URL's ?view= changes to a valid value —
+  // e.g. tapping the bottom-nav Map item (→ /offices?view=map) while the
+  // Offices page is already mounted, or browser back/forward between tab
+  // states. Only valid values override state, so an absent param never
+  // clobbers the current tab. In-page toggles route through selectView
+  // (below), which sets this same param, so this effect just re-affirms
+  // the value already in state — no loop.
+  useEffect(() => {
+    if (
+      viewParam === "map" ||
+      viewParam === "list" ||
+      viewParam === "checkins"
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setViewMode(viewParam);
+    }
+  }, [viewParam]);
+
+  // Switch tabs in-page AND reflect it in the URL. `replace` (not push)
+  // keeps tab toggles out of the history stack, so Back leaves Offices
+  // rather than cycling through tabs. Keeping ?view= in sync means the
+  // URL and the visible tab can never drift apart — so re-tapping the
+  // bottom-nav Map item from inside Offices always lands on Map, and the
+  // current tab is always a shareable deep link.
+  const selectView = useCallback(
+    (next: ViewMode) => {
+      setViewMode(next);
+      const params = new URLSearchParams(window.location.search);
+      params.set("view", next);
+      router.replace(`/offices?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
 
   // ---- Add Office modal state ---------------------------------------------
   // Opens the shared OfficeFormModal (mode="add") from the header
@@ -348,10 +421,12 @@ export default function OfficesPage() {
           };
         }
         // Bump the refresh key so the next List paint includes the
-        // new row. Pre-select List for the eventual Back-tap from
-        // the detail page — Map would hide a coords-less office.
+        // new row. Pre-select List (and write ?view=list) for the
+        // eventual Back-tap from the detail page — Map would hide a
+        // coords-less office. selectView keeps the URL in sync so the
+        // List tab survives the remount that a Back navigation triggers.
         setListRefreshKey((n) => n + 1);
-        setViewMode("list");
+        selectView("list");
         // Product decision: navigate straight to the new office's
         // detail page so the AE can immediately log a visit or set
         // a next action. The modal copy primes the user for this.
@@ -364,7 +439,7 @@ export default function OfficesPage() {
         };
       }
     },
-    [router],
+    [router, selectView],
   );
 
   // ===========================================================================
@@ -789,7 +864,7 @@ export default function OfficesPage() {
                 type="button"
                 role="radio"
                 aria-checked={active}
-                onClick={() => setViewMode(value)}
+                onClick={() => selectView(value)}
                 className={cn(
                   "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                   active

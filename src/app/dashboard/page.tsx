@@ -182,32 +182,10 @@ export default function DashboardPage() {
             on /api/ai/chat). Not yet in global nav. */}
         <AiAssistantCard salesperson={salesperson} />
 
-        {/* Offices entry point — sits directly under the weekly
-            momentum hero so it's the first action the AE sees once
-            they've scanned their numbers for the day. The Offices
-            surface consolidates Map + List under a single `/offices`
-            URL; the destination defaults to the Map view with auto-
-            locate so the AE lands ready to see what's around them.
-            Available to every AE — juice_box_only users were already
-            redirected away above so this card is gated by location
-            in the layout, not an explicit role check here. */}
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>📍 Offices</CardTitle>
-            <CardDescription>
-              See what&apos;s around you on the map, search your full
-              office list, get directions, and log visits.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Link
-              href="/offices"
-              className={buttonVariants({ size: "sm" })}
-            >
-              Open Offices
-            </Link>
-          </CardContent>
-        </Card>
+        {/* Offices/Map now lives in the bottom nav (the "Map" tab →
+            /offices?view=map) so it's one tap away without taking up a
+            home-screen card. The dashboard Offices tile was removed when
+            the map grew into a full territory-execution surface. */}
 
         <MessagesCard salespersonId={salesperson.id} />
 
