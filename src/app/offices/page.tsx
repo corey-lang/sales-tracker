@@ -139,6 +139,111 @@ type ViewMode = "map" | "list" | "checkins";
  *  closed preset set the chip list + count helper iterate over. */
 type MapVisitFilter = OfficeVisitFilter | "custom";
 
+// ---------------------------------------------------------------------------
+// Persisted Map visit-age filter (per-device, localStorage)
+// ---------------------------------------------------------------------------
+//
+// AEs asked the Map to remember where they left off: which visit-age
+// filter (All / 30 / 60 / 90 / Never / Custom) was active, and the
+// number they typed for Custom. We persist ONLY that filter pair — not
+// radius, location, lasso selection, or any other map state — to keep
+// this focused. It's a pure UI convenience: no server write, no
+// cross-device sync (localStorage is per browser/device), and it never
+// touches the AE-scoped data the API already returns.
+//
+// The key is SCOPED PER SALESPERSON (`…:${salesperson.id}`) so two AEs
+// who share a device/browser don't inherit each other's filter. When no
+// id is available we use the in-memory default only — never a shared,
+// unscoped fallback key.
+
+const MAP_FILTER_STORAGE_KEY_PREFIX = "sales-tracker:map-visit-filter:";
+
+/** Per-salesperson storage key, or null when there's no id to scope by
+ *  (in which case callers must fall back to the default and skip I/O). */
+function mapFilterStorageKey(
+  salespersonId: string | null | undefined,
+): string | null {
+  return salespersonId
+    ? `${MAP_FILTER_STORAGE_KEY_PREFIX}${salespersonId}`
+    : null;
+}
+
+const MAP_VISIT_FILTER_VALUES: readonly MapVisitFilter[] = [
+  "all",
+  "30",
+  "60",
+  "90",
+  "never",
+  "custom",
+];
+
+function isMapVisitFilter(value: unknown): value is MapVisitFilter {
+  return (
+    typeof value === "string" &&
+    (MAP_VISIT_FILTER_VALUES as readonly string[]).includes(value)
+  );
+}
+
+type PersistedMapFilter = { filter: MapVisitFilter; customDays: string };
+
+/** Defaults match the in-code initial state: "All" + a 45-day Custom
+ *  starting point. Used whenever nothing valid is stored. */
+const DEFAULT_MAP_FILTER: PersistedMapFilter = { filter: "all", customDays: "45" };
+
+/**
+ * SSR-safe read of the saved Map visit-age filter for one salesperson.
+ * Returns the default ("All" + 45 days) when there's no window, no id to
+ * scope by, nothing stored, or the stored value is missing/corrupt/
+ * invalid — so a bad value can never wedge the filter or the input. The
+ * `customDays` string is accepted only when blank (mid-typing) or a
+ * non-negative integer; anything else falls back to the default.
+ */
+function readPersistedMapFilter(
+  salespersonId: string | null | undefined,
+): PersistedMapFilter {
+  if (typeof window === "undefined") return DEFAULT_MAP_FILTER;
+  const key = mapFilterStorageKey(salespersonId);
+  if (!key) return DEFAULT_MAP_FILTER;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return DEFAULT_MAP_FILTER;
+    const parsed = JSON.parse(raw) as {
+      filter?: unknown;
+      customDays?: unknown;
+    };
+    const filter: MapVisitFilter = isMapVisitFilter(parsed.filter)
+      ? parsed.filter
+      : DEFAULT_MAP_FILTER.filter;
+    let customDays = DEFAULT_MAP_FILTER.customDays;
+    if (typeof parsed.customDays === "string") {
+      const trimmed = parsed.customDays.trim();
+      if (trimmed === "" || /^\d+$/.test(trimmed)) {
+        customDays = parsed.customDays;
+      }
+    }
+    return { filter, customDays };
+  } catch {
+    return DEFAULT_MAP_FILTER;
+  }
+}
+
+/** Best-effort write to the per-salesperson key. No-ops when there's no
+ *  window or no id (never writes a shared fallback). Swallows quota /
+ *  private-mode errors — persistence is a convenience, never load-bearing. */
+function writePersistedMapFilter(
+  salespersonId: string | null | undefined,
+  value: PersistedMapFilter,
+): void {
+  if (typeof window === "undefined") return;
+  const key = mapFilterStorageKey(salespersonId);
+  if (!key) return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore — localStorage may be full or blocked (Safari private mode)
+  }
+}
+
 // ---- Map data --------------------------------------------------------------
 
 type NearbyResponse = {
@@ -881,6 +986,11 @@ function OfficesPageContent() {
 
         {viewMode === "map" ? (
           <MapViewSection
+            // Remount on account change so the persisted (account-scoped)
+            // filter is re-read for the new salesperson instead of the
+            // mounted state carrying over.
+            key={salesperson.id}
+            salespersonId={salesperson.id}
             radius={radius}
             setRadius={setRadius}
             location={location}
@@ -931,6 +1041,7 @@ function OfficesPageContent() {
 // MapViewSection — radius + location + map
 // ---------------------------------------------------------------------------
 function MapViewSection({
+  salespersonId,
   radius,
   setRadius,
   location,
@@ -942,6 +1053,8 @@ function MapViewSection({
   onLogVisit,
   onLogVisitWithNote,
 }: {
+  /** Scopes the persisted visit-age filter to this AE's localStorage key. */
+  salespersonId: string;
   radius: NearbyRadius;
   setRadius: (r: NearbyRadius) => void;
   location: LocationState;
@@ -954,21 +1067,54 @@ function MapViewSection({
   onLogVisitWithNote: (office: { id: string; name: string }) => void;
 }) {
   // ---- Filter + route-selection state (Lasso Route V1) -------------------
-  const [visitFilter, setVisitFilter] = useState<MapVisitFilter>("all");
+  // Initial filter + custom-days come from this AE's localStorage key so
+  // the Map remembers where they left off on this device (falls back to
+  // the "All" / 45-day default when nothing valid is stored, or when no
+  // id is available to scope by). Read ONCE here and used to seed both
+  // states below — the held value never updates, so no second read.
+  // SSR-safe: readPersistedMapFilter returns the default with no window,
+  // and MapViewSection only renders client-side anyway.
+  const [restoredFilter] = useState<PersistedMapFilter>(() =>
+    readPersistedMapFilter(salespersonId),
+  );
+  const [visitFilter, setVisitFilter] = useState<MapVisitFilter>(
+    restoredFilter.filter,
+  );
   // Custom "days since last check-in" threshold. Stored as the raw input
   // string so the field can be briefly empty while typing; parsed to a
   // non-negative integer (or null when blank/invalid) for filtering.
-  const [customDaysInput, setCustomDaysInput] = useState("45");
-  // Activating the Custom chip focuses (and selects) the day input so the
-  // user can type a threshold immediately — making it feel like a primary
-  // action rather than a hidden one. On iOS the keyboard may not open
-  // without a direct gesture, but the field still reads as activated.
-  const customInputRef = useRef<HTMLInputElement>(null);
+  const [customDaysInput, setCustomDaysInput] = useState(
+    restoredFilter.customDays,
+  );
+  // Persist the filter pair whenever either changes (including a switch
+  // back to "All"). Per-AE, per-device; no server write.
   useEffect(() => {
-    if (visitFilter !== "custom") return;
+    writePersistedMapFilter(salespersonId, {
+      filter: visitFilter,
+      customDays: customDaysInput,
+    });
+  }, [salespersonId, visitFilter, customDaysInput]);
+  // Activating the Custom chip focuses (and selects) the day input so the
+  // user can type a threshold immediately. Focus is GATED to explicit
+  // taps only — restoring a saved "custom" filter must NOT steal focus /
+  // pop the iOS keyboard.
+  const customInputRef = useRef<HTMLInputElement>(null);
+  const shouldFocusCustomRef = useRef(false);
+  const focusCustomInput = useCallback(() => {
     customInputRef.current?.focus();
     customInputRef.current?.select();
-  }, [visitFilter]);
+  }, []);
+  // Tap-INTO-custom path: the input mounts one render after
+  // setVisitFilter("custom"), so changeFilter sets the flag and this
+  // effect focuses once it's in the DOM. (The already-active tap path is
+  // handled synchronously in handleCustomChipClick below.) A restored
+  // "custom" never sets the flag, so mount never auto-focuses.
+  useEffect(() => {
+    if (visitFilter !== "custom") return;
+    if (!shouldFocusCustomRef.current) return;
+    shouldFocusCustomRef.current = false;
+    focusCustomInput();
+  }, [visitFilter, focusCustomInput]);
   const [lassoActive, setLassoActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(),
@@ -1019,7 +1165,24 @@ function MapViewSection({
     setVisitFilter(next);
     setSelectedIds(new Set());
     setRouteError(null);
+    // Only an explicit Custom tap should grab the input — the focus
+    // effect reads this flag (a restored "custom" never sets it).
+    if (next === "custom") shouldFocusCustomRef.current = true;
   }, []);
+  // Custom chip click handler. Always focuses the input on an explicit
+  // tap — including when Custom is ALREADY active, where
+  // setVisitFilter("custom") is a no-op so the focus effect wouldn't
+  // re-run. In that case the input is already mounted, so focus it
+  // synchronously (also keeps it inside the user gesture, which iOS
+  // needs to open the keyboard). Otherwise switch in and let the effect
+  // focus once the input mounts.
+  const handleCustomChipClick = useCallback(() => {
+    if (visitFilter === "custom") {
+      focusCustomInput();
+    } else {
+      changeFilter("custom");
+    }
+  }, [visitFilter, changeFilter, focusCustomInput]);
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -1137,7 +1300,7 @@ function MapViewSection({
                         type="button"
                         role="radio"
                         aria-checked={customActive}
-                        onClick={() => changeFilter("custom")}
+                        onClick={handleCustomChipClick}
                         className={cn(
                           "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                           customActive
