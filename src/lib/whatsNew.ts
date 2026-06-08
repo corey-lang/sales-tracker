@@ -58,7 +58,7 @@ export const WHATS_NEW: WhatsNewItem[] = [
     releasedAt: "2026-06-08",
     isNew: true,
     whatItDoes:
-      "Log a visit straight from the map — no extra screens. Tap an office pin, choose Log + Note, and capture what happened plus your next step right where you're standing.",
+      "Log a visit straight from the map — no extra screens. Tap an office pin, choose Log + Note, and capture what happened plus your next step right where you're standing. Plus, the Map now lives in your bottom navigation — one tap away in the field.",
     whyItMatters:
       "Faster in-field execution. Record the stop in seconds and keep moving, instead of stopping to dig through menus between visits.",
     howToUseIt: [
