@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -877,6 +884,16 @@ function MapViewSection({
   // string so the field can be briefly empty while typing; parsed to a
   // non-negative integer (or null when blank/invalid) for filtering.
   const [customDaysInput, setCustomDaysInput] = useState("45");
+  // Activating the Custom chip focuses (and selects) the day input so the
+  // user can type a threshold immediately — making it feel like a primary
+  // action rather than a hidden one. On iOS the keyboard may not open
+  // without a direct gesture, but the field still reads as activated.
+  const customInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (visitFilter !== "custom") return;
+    customInputRef.current?.focus();
+    customInputRef.current?.select();
+  }, [visitFilter]);
   const [lassoActive, setLassoActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(),
@@ -1006,72 +1023,91 @@ function MapViewSection({
         </div>
       </div>
 
-      {/* Visit-recency filter chips — operate on the AE's own mapped offices. */}
+      {/* Visit-recency filter chips — operate on the AE's own mapped
+          offices. Custom is promoted to the second slot (right after All)
+          and reveals a connected inline day input when active, so
+          stale-office filtering reads as a primary workflow rather than a
+          hidden advanced option. */}
       {hasResults && (
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <div
             role="radiogroup"
             aria-label="Visit filter"
-            className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5"
+            className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-0.5"
           >
-            {OFFICE_VISIT_FILTERS.map((f) => {
+            {OFFICE_VISIT_FILTERS.map((f, i) => {
               const active = visitFilter === f.key;
+              const customActive = visitFilter === "custom";
               return (
-                <button
-                  key={f.key}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => changeFilter(f.key)}
-                  className={cn(
-                    "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
-                    active
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground hover:text-foreground",
+                <Fragment key={f.key}>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => changeFilter(f.key)}
+                    className={cn(
+                      "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {f.label}
+                  </button>
+                  {/* Inject Custom (and its inline input) right after "All"
+                      so it sits near the start of the row on mobile. */}
+                  {i === 0 && (
+                    <>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={customActive}
+                        onClick={() => changeFilter("custom")}
+                        className={cn(
+                          "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                          customActive
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-muted text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        Custom
+                      </button>
+                      {customActive && (
+                        // Connected day input — primary-tinted pill ties it
+                        // to the active Custom chip. shrink-0 keeps it on the
+                        // same scrollable row, adjacent to Custom.
+                        <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 py-1 pl-2 pr-2.5 text-xs font-medium text-foreground dark:bg-primary/15">
+                          <input
+                            ref={customInputRef}
+                            id="custom-days"
+                            type="number"
+                            inputMode="numeric"
+                            min={0}
+                            value={customDaysInput}
+                            onChange={(e) => setCustomDaysInput(e.target.value)}
+                            aria-label="Days since last check-in"
+                            // text-base on mobile (≥16px) prevents iOS Safari
+                            // tap-to-zoom; md:text-sm keeps the desktop sizing.
+                            className="h-8 w-12 rounded-md border border-input bg-background px-1.5 text-center text-base tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50 md:text-sm"
+                          />
+                          <span className="text-muted-foreground">days</span>
+                        </div>
+                      )}
+                    </>
                   )}
-                >
-                  {f.label}
-                </button>
+                </Fragment>
               );
             })}
-            {/* Custom "days since last check-in" — reveals a number input
-                below when active. Lets an AE filter to, e.g., offices not
-                visited in 14 or 120 days without a fixed preset. */}
-            <button
-              type="button"
-              role="radio"
-              aria-checked={visitFilter === "custom"}
-              onClick={() => changeFilter("custom")}
-              className={cn(
-                "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
-                visitFilter === "custom"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:text-foreground",
-              )}
-            >
-              Custom
-            </button>
           </div>
 
+          {/* Compact hint under the row — guides input when blank and spells
+              out the "includes never-visited" nuance the chips can't. */}
           {visitFilter === "custom" && (
-            <div className="flex flex-wrap items-center gap-2 px-1 text-xs text-muted-foreground">
-              <label htmlFor="custom-days" className="font-medium">
-                Not visited in at least
-              </label>
-              <input
-                id="custom-days"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                value={customDaysInput}
-                onChange={(e) => setCustomDaysInput(e.target.value)}
-                aria-label="Days since last check-in"
-                // text-base on mobile (≥16px) prevents iOS Safari
-                // tap-to-zoom; md:text-sm keeps the desktop sizing.
-                className="h-8 w-20 rounded-md border border-input bg-background px-2 text-base tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
-              />
-              <span>days (counts never-visited too)</span>
-            </div>
+            <p className="px-1 text-[11px] text-muted-foreground">
+              {customDays === null
+                ? "Enter a number of days to find stale offices."
+                : `Not visited in ${customDays}+ days · includes never-visited.`}
+            </p>
           )}
         </div>
       )}
