@@ -239,7 +239,9 @@ export function LogVisitModal({
                   maxLength={VISIT_NOTE_MAX}
                   disabled={submitting}
                   placeholder="What happened on this visit?"
-                  className="w-full min-h-[80px] rounded-md border border-input bg-background p-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60"
+                  // text-base on mobile (≥16px) prevents iOS Safari
+                  // tap-to-zoom; md:text-sm preserves the desktop sizing.
+                  className="w-full min-h-[80px] rounded-md border border-input bg-background p-3 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60 md:text-sm"
                 />
               </div>
 
@@ -258,7 +260,9 @@ export function LogVisitModal({
                   maxLength={NEXT_ACTION_MAX}
                   disabled={submitting}
                   placeholder="e.g. Drop off donuts next week"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60"
+                  // text-base on mobile (≥16px) prevents iOS Safari
+                  // tap-to-zoom; md:text-sm preserves the desktop sizing.
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60 md:text-sm"
                 />
                 <p className="text-[11px] text-muted-foreground">
                   Updates this office&apos;s next action.

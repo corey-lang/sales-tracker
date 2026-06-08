@@ -1066,7 +1066,9 @@ function MapViewSection({
                 value={customDaysInput}
                 onChange={(e) => setCustomDaysInput(e.target.value)}
                 aria-label="Days since last check-in"
-                className="h-8 w-20 rounded-md border border-input bg-background px-2 text-sm tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                // text-base on mobile (≥16px) prevents iOS Safari
+                // tap-to-zoom; md:text-sm keeps the desktop sizing.
+                className="h-8 w-20 rounded-md border border-input bg-background px-2 text-base tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
               />
               <span>days (counts never-visited too)</span>
             </div>
@@ -1759,7 +1761,9 @@ function CheckinsViewSection({ isAdmin }: { isAdmin: boolean }) {
               value={from}
               max={to || undefined}
               onChange={(e) => setFrom(e.target.value)}
-              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              // text-base on mobile (≥16px) prevents iOS Safari
+              // tap-to-zoom; md:text-sm preserves the desktop sizing.
+              className="rounded-md border border-input bg-background px-3 py-2 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
             />
           </div>
           <div className="grid gap-1">
@@ -1775,7 +1779,9 @@ function CheckinsViewSection({ isAdmin }: { isAdmin: boolean }) {
               value={to}
               min={from || undefined}
               onChange={(e) => setTo(e.target.value)}
-              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              // text-base on mobile (≥16px) prevents iOS Safari
+              // tap-to-zoom; md:text-sm preserves the desktop sizing.
+              className="rounded-md border border-input bg-background px-3 py-2 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
             />
           </div>
         </div>
