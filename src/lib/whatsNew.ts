@@ -33,6 +33,44 @@ export type WhatsNewItem = {
 /** Newest first — the page renders them in this order. */
 export const WHATS_NEW: WhatsNewItem[] = [
   {
+    id: "check-ins-review",
+    icon: "📍",
+    title: "Daily Check-Ins Review",
+    releasedAt: "2026-06-08",
+    isNew: true,
+    whatItDoes:
+      "A new Check-ins tab in Offices lays out the visits being logged across your territory — by day, with notes — so you can see where your time is going and who's due for a follow-up. Pair it with the Map's visit-age filters to spot offices going cold.",
+    whyItMatters:
+      "Better visibility into your territory means fewer relationships slipping through the cracks. Know at a glance who you've seen lately, who you haven't, and where to point tomorrow.",
+    howToUseIt: [
+      "In Offices, tap the Check-ins tab to review activity for Today, Yesterday, the Last 7 days, or a custom date range — each with a note preview and a quick tap to open the office.",
+      "Managers can switch to the Team view to see the whole team's check-ins in one place.",
+      "On the Map tab, filter by visit age — 30, 60, or 90 days, Never visited, or your own Custom number of days — to surface stale offices.",
+      "Watch for “No visit yet” tags so brand-new offices stay on your radar.",
+    ],
+    proTip:
+      "Start your week in Check-ins to see where you left off, then run a 30-day filter on the Map to rebuild a list of relationships worth rekindling.",
+  },
+  {
+    id: "log-visit-note",
+    icon: "🗺️",
+    title: "Log Visit + Note from the Map",
+    releasedAt: "2026-06-08",
+    isNew: true,
+    whatItDoes:
+      "Log a visit straight from the map — no extra screens. Tap an office pin, choose Log + Note, and capture what happened plus your next step right where you're standing.",
+    whyItMatters:
+      "Faster in-field execution. Record the stop in seconds and keep moving, instead of stopping to dig through menus between visits.",
+    howToUseIt: [
+      "On the Offices Map tab, tap the pin for the office you just visited.",
+      "Choose “Log + Note” to record the visit on the spot.",
+      "Add an optional note and an optional next action while it's all fresh.",
+      "Save, and you're on to the next stop — it's built to stay quick on your phone.",
+    ],
+    proTip:
+      "Jot the note before you pull out of the parking lot — those in-the-moment details are the ones you'll wish you had next time.",
+  },
+  {
     id: "orders",
     icon: "🏠",
     title: "Orders",
