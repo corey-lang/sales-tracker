@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   AlertTriangle,
   CheckCircle2,
+  Eye,
   History,
   MapPin,
   Navigation,
@@ -838,6 +839,13 @@ export default function OfficeDetailPage({
   }
 
   const { office } = detail;
+  // Read-only when an admin opened an office they don't own (via the
+  // team Check-ins feed). The server already rejects writes from
+  // non-owners; this flag drives the UI so we hide the owner-only
+  // actions (Log Visit / Edit / Archive) instead of surfacing buttons
+  // that would 404. Owners always see the full surface.
+  const readOnly = detail.read_only === true;
+  const ownerName = detail.owner_first_name;
   const address = formatAddress(office);
   const notesDirty = notesDraft !== (office.office_notes ?? "");
   const nextActionDirty =
@@ -875,6 +883,21 @@ export default function OfficeDetailPage({
           <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
           <p className="leading-snug">
             Sandbox office detail — visible only to the test account.
+          </p>
+        </div>
+      )}
+
+      {/* Read-only banner — admin viewing another AE's office. */}
+      {readOnly && (
+        <div
+          role="note"
+          className="flex items-start gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+        >
+          <Eye aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+          <p className="leading-snug">
+            Viewing {ownerName ? `${ownerName}'s` : "another AE's"} office —
+            read only. You can review check-ins, notes, and the next action,
+            but logging visits and edits are disabled here.
           </p>
         </div>
       )}
@@ -956,25 +979,29 @@ export default function OfficeDetailPage({
               keeps the same inline editor it's always had. */}
           {!visitOpen && (
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleQuickLogVisit}
-                // Both flags disable both buttons so a rapid double-
-                // tap or a tap-while-form-open can't double-submit.
-                disabled={loggingQuickVisit || loggingVisit}
-              >
-                {loggingQuickVisit ? "Logging…" : "Log visit"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={openLogVisit}
-                disabled={loggingQuickVisit || loggingVisit}
-              >
-                Log visit + note
-              </Button>
+              {!readOnly && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleQuickLogVisit}
+                    // Both flags disable both buttons so a rapid double-
+                    // tap or a tap-while-form-open can't double-submit.
+                    disabled={loggingQuickVisit || loggingVisit}
+                  >
+                    {loggingQuickVisit ? "Logging…" : "Log visit"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={openLogVisit}
+                    disabled={loggingQuickVisit || loggingVisit}
+                  >
+                    Log visit + note
+                  </Button>
+                </>
+              )}
               {mapsHref && (
                 <a
                   href={mapsHref}
@@ -1123,19 +1150,21 @@ export default function OfficeDetailPage({
                   who to ask for at the front desk.
                 </p>
               )}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNotesDraft(office.office_notes ?? "");
-                  setNotesError(null);
-                  setNotesOpen(true);
-                }}
-              >
-                <Pencil aria-hidden="true" className="size-3.5" />
-                Edit notes
-              </Button>
+              {!readOnly && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setNotesDraft(office.office_notes ?? "");
+                    setNotesError(null);
+                    setNotesOpen(true);
+                  }}
+                >
+                  <Pencil aria-hidden="true" className="size-3.5" />
+                  Edit notes
+                </Button>
+              )}
             </>
           ) : (
             <form
@@ -1215,21 +1244,23 @@ export default function OfficeDetailPage({
                   donuts, schedule a meeting, follow up.
                 </p>
               )}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNextActionDraft(office.next_action ?? "");
-                  setNextActionDueDraft(office.next_action_due_date ?? "");
-                  setNextActionError(null);
-                  setNextActionNotice(null);
-                  setNextActionOpen(true);
-                }}
-              >
-                <Pencil aria-hidden="true" className="size-3.5" />
-                {office.next_action ? "Edit next action" : "Set next action"}
-              </Button>
+              {!readOnly && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setNextActionDraft(office.next_action ?? "");
+                    setNextActionDueDraft(office.next_action_due_date ?? "");
+                    setNextActionError(null);
+                    setNextActionNotice(null);
+                    setNextActionOpen(true);
+                  }}
+                >
+                  <Pencil aria-hidden="true" className="size-3.5" />
+                  {office.next_action ? "Edit next action" : "Set next action"}
+                </Button>
+              )}
               {/* Preserve a soft notice (e.g. "saved and added to
                   To-Dos") across the auto-collapse so the user still
                   sees the confirmation after Save returns. */}
@@ -1369,6 +1400,7 @@ export default function OfficeDetailPage({
                   key={v.id}
                   visit={v}
                   onSave={handleEditVisit}
+                  readOnly={readOnly}
                 />
               ))}
             </ul>
@@ -1389,40 +1421,42 @@ export default function OfficeDetailPage({
           are preserved across both actions (PATCH never touches
           memory columns; archive sets `archived_at` instead of
           hard-deleting). */}
-      <div className="mt-2 flex flex-col items-start gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setEditOpen(true)}
-            disabled={archiving}
-          >
-            <Pencil aria-hidden="true" className="size-3.5" />
-            Edit office
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleArchiveOffice}
-            disabled={archiving}
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-          >
-            <Trash2 aria-hidden="true" className="size-3.5" />
-            {archiving ? "Removing…" : "Remove this office"}
-          </Button>
-        </div>
-        {archiveError && (
-          <p role="alert" className="text-xs text-destructive">
-            {archiveError}
+      {!readOnly && (
+        <div className="mt-2 flex flex-col items-start gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setEditOpen(true)}
+              disabled={archiving}
+            >
+              <Pencil aria-hidden="true" className="size-3.5" />
+              Edit office
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleArchiveOffice}
+              disabled={archiving}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 aria-hidden="true" className="size-3.5" />
+              {archiving ? "Removing…" : "Remove this office"}
+            </Button>
+          </div>
+          {archiveError && (
+            <p role="alert" className="text-xs text-destructive">
+              {archiveError}
+            </p>
+          )}
+          <p className="text-[11px] text-muted-foreground/80">
+            Edit updates name, address, phone, or email. Remove takes
+            this office off your list while preserving visit history.
           </p>
-        )}
-        <p className="text-[11px] text-muted-foreground/80">
-          Edit updates name, address, phone, or email. Remove takes
-          this office off your list while preserving visit history.
-        </p>
-      </div>
+        </div>
+      )}
 
       </main>
       <BottomNav salesperson={salesperson} />
@@ -1464,6 +1498,7 @@ export default function OfficeDetailPage({
 function VisitHistoryRow({
   visit,
   onSave,
+  readOnly = false,
 }: {
   visit: OfficeVisitRow;
   onSave: (
@@ -1472,6 +1507,8 @@ function VisitHistoryRow({
   ) => Promise<
     { ok: true; visit: OfficeVisitRow } | { ok: false; error: string }
   >;
+  /** Admin viewing another AE's office — hide the inline edit control. */
+  readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [whenDraft, setWhenDraft] = useState("");
@@ -1514,14 +1551,16 @@ function VisitHistoryRow({
               </p>
             )}
           </div>
-          <button
-            type="button"
-            onClick={openEdit}
-            aria-label="Edit visit"
-            className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Pencil aria-hidden="true" className="size-3.5" />
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={openEdit}
+              aria-label="Edit visit"
+              className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Pencil aria-hidden="true" className="size-3.5" />
+            </button>
+          )}
         </div>
       </li>
     );

@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
+  CalendarCheck,
   ChevronRight,
   List as ListIcon,
   Locate,
@@ -16,6 +17,7 @@ import {
   Route as RouteIcon,
   Search,
   Spline,
+  Users,
   X,
 } from "lucide-react";
 
@@ -31,7 +33,12 @@ import {
   NEARBY_RADIUS_OPTIONS,
   OFFICE_VISIT_FILTERS,
   buildOfficeRouteUrl,
+  officeMatchesDaysSince,
   officeMatchesVisitFilter,
+  type CheckinItem,
+  type CheckinRange,
+  type CheckinScope,
+  type CheckinsResponse,
   type NearbyOfficeItem,
   type NearbyRadius,
   type OfficeListItem,
@@ -48,6 +55,10 @@ import {
   type OfficeFormPayload,
   type OfficeFormSubmitResult,
 } from "@/components/office-form-modal";
+import {
+  LogVisitModal,
+  type LogVisitModalResult,
+} from "@/components/log-visit-modal";
 
 // ---------------------------------------------------------------------------
 // /offices — consolidated Map + List office surface.
@@ -112,7 +123,13 @@ const NearbyOfficesMap = dynamic(
   },
 );
 
-type ViewMode = "map" | "list";
+type ViewMode = "map" | "list" | "checkins";
+
+/** Map visit-recency filter union: the closed presets plus the custom
+ *  "days since last check-in" mode that reveals a number input. Kept
+ *  local to the page so the shared `OfficeVisitFilter` type stays the
+ *  closed preset set the chip list + count helper iterate over. */
+type MapVisitFilter = OfficeVisitFilter | "custom";
 
 // ---- Map data --------------------------------------------------------------
 
@@ -464,6 +481,62 @@ export default function OfficesPage() {
     };
   }, []);
 
+  // ---- "Log Visit + Note" modal (Map flow) ------------------------------
+  // The map pin's "Log + note" action opens this modal at page level
+  // (rendered as a sibling of the map so it isn't trapped inside a
+  // Leaflet popup). On success the modal hands back the new visited_at
+  // (+ optional next action) and we patch the in-memory map result so
+  // the pin reflects the fresh "last visit" / next action immediately.
+  const [noteModalOffice, setNoteModalOffice] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+
+  /** Sets the auto-clearing "Visit logged." pill on a pin and schedules
+   *  its removal. Shared by the quick-log and note-modal paths. */
+  const flashLogNotice = useCallback((officeId: string) => {
+    setLogNoticeById((m) => {
+      const next = new Map(m);
+      next.set(officeId, "Visit logged.");
+      return next;
+    });
+    const prevTimer = noticeTimersRef.current.get(officeId);
+    if (prevTimer) clearTimeout(prevTimer);
+    const t = setTimeout(() => {
+      setLogNoticeById((m) => {
+        const next = new Map(m);
+        next.delete(officeId);
+        return next;
+      });
+      noticeTimersRef.current.delete(officeId);
+    }, 2500);
+    noticeTimersRef.current.set(officeId, t);
+  }, []);
+
+  const handleNoteModalLogged = useCallback(
+    (officeId: string, result: LogVisitModalResult) => {
+      setMapFetchState((current) => {
+        if (current.kind !== "ready") return current;
+        return {
+          ...current,
+          results: current.results.map((r) =>
+            r.id === officeId
+              ? {
+                  ...r,
+                  last_visit_at: result.visitedAt,
+                  ...(result.nextAction !== undefined
+                    ? { next_action: result.nextAction }
+                    : {}),
+                }
+              : r,
+          ),
+        };
+      });
+      flashLogNotice(officeId);
+    },
+    [flashLogNotice],
+  );
+
   const handleLogVisit = useCallback(
     async (officeId: string) => {
       if (loggingId) return;
@@ -699,6 +772,7 @@ export default function OfficesPage() {
             [
               { value: "map", label: "Map", Icon: MapIcon },
               { value: "list", label: "List", Icon: ListIcon },
+              { value: "checkins", label: "Check-ins", Icon: CalendarCheck },
             ] as const
           ).map(({ value, label, Icon }) => {
             const active = viewMode === value;
@@ -734,8 +808,9 @@ export default function OfficesPage() {
             logErrorById={logErrorById}
             logNoticeById={logNoticeById}
             onLogVisit={handleLogVisit}
+            onLogVisitWithNote={setNoteModalOffice}
           />
-        ) : (
+        ) : viewMode === "list" ? (
           <ListViewSection
             query={query}
             setQuery={setQuery}
@@ -743,6 +818,8 @@ export default function OfficesPage() {
             listState={listState}
             countLabel={listCountLabel}
           />
+        ) : (
+          <CheckinsViewSection isAdmin={salesperson.role === "admin"} />
         )}
       </main>
       <BottomNav salesperson={salesperson} />
@@ -752,6 +829,16 @@ export default function OfficesPage() {
           initialValues={EMPTY_OFFICE_FORM_VALUES}
           onSubmit={handleAddSubmit}
           onClose={() => setAddOfficeOpen(false)}
+        />
+      )}
+      {noteModalOffice && (
+        <LogVisitModal
+          officeId={noteModalOffice.id}
+          officeName={noteModalOffice.name}
+          onClose={() => setNoteModalOffice(null)}
+          onLogged={(result) =>
+            handleNoteModalLogged(noteModalOffice.id, result)
+          }
         />
       )}
     </>
@@ -771,6 +858,7 @@ function MapViewSection({
   logErrorById,
   logNoticeById,
   onLogVisit,
+  onLogVisitWithNote,
 }: {
   radius: NearbyRadius;
   setRadius: (r: NearbyRadius) => void;
@@ -781,9 +869,14 @@ function MapViewSection({
   logErrorById: Map<string, string>;
   logNoticeById: Map<string, string>;
   onLogVisit: (officeId: string) => void;
+  onLogVisitWithNote: (office: { id: string; name: string }) => void;
 }) {
   // ---- Filter + route-selection state (Lasso Route V1) -------------------
-  const [visitFilter, setVisitFilter] = useState<OfficeVisitFilter>("all");
+  const [visitFilter, setVisitFilter] = useState<MapVisitFilter>("all");
+  // Custom "days since last check-in" threshold. Stored as the raw input
+  // string so the field can be briefly empty while typing; parsed to a
+  // non-negative integer (or null when blank/invalid) for filtering.
+  const [customDaysInput, setCustomDaysInput] = useState("45");
   const [lassoActive, setLassoActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(),
@@ -801,12 +894,25 @@ function MapViewSection({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setNowMs(Date.now());
   }, [results]);
+  // Parsed custom threshold: a non-negative integer, or null when the
+  // input is blank/invalid (in which case the custom filter shows all
+  // rather than hiding everything).
+  const customDays = useMemo(() => {
+    const trimmed = customDaysInput.trim();
+    if (trimmed === "") return null;
+    const n = Number(trimmed);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }, [customDaysInput]);
   const filtered = useMemo(
     () =>
-      results.filter((o) =>
-        officeMatchesVisitFilter(o.last_visit_at, visitFilter, nowMs),
-      ),
-    [results, visitFilter, nowMs],
+      results.filter((o) => {
+        if (visitFilter === "custom") {
+          if (customDays === null) return true;
+          return officeMatchesDaysSince(o.last_visit_at, customDays, nowMs);
+        }
+        return officeMatchesVisitFilter(o.last_visit_at, visitFilter, nowMs);
+      }),
+    [results, visitFilter, customDays, nowMs],
   );
   // The selection only ever counts/uses offices that are currently visible,
   // so a hidden (filtered-out) pin can never end up in a route.
@@ -815,7 +921,7 @@ function MapViewSection({
     [filtered, selectedIds],
   );
 
-  const changeFilter = useCallback((next: OfficeVisitFilter) => {
+  const changeFilter = useCallback((next: MapVisitFilter) => {
     // Switching filters clears the selection so the lassoed set always
     // matches the active filter's visible pins.
     setVisitFilter(next);
@@ -902,31 +1008,69 @@ function MapViewSection({
 
       {/* Visit-recency filter chips — operate on the AE's own mapped offices. */}
       {hasResults && (
-        <div
-          role="radiogroup"
-          aria-label="Visit filter"
-          className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5"
-        >
-          {OFFICE_VISIT_FILTERS.map((f) => {
-            const active = visitFilter === f.key;
-            return (
-              <button
-                key={f.key}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                onClick={() => changeFilter(f.key)}
-                className={cn(
-                  "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
-                  active
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {f.label}
-              </button>
-            );
-          })}
+        <div className="space-y-2">
+          <div
+            role="radiogroup"
+            aria-label="Visit filter"
+            className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5"
+          >
+            {OFFICE_VISIT_FILTERS.map((f) => {
+              const active = visitFilter === f.key;
+              return (
+                <button
+                  key={f.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => changeFilter(f.key)}
+                  className={cn(
+                    "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                    active
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+            {/* Custom "days since last check-in" — reveals a number input
+                below when active. Lets an AE filter to, e.g., offices not
+                visited in 14 or 120 days without a fixed preset. */}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={visitFilter === "custom"}
+              onClick={() => changeFilter("custom")}
+              className={cn(
+                "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                visitFilter === "custom"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:text-foreground",
+              )}
+            >
+              Custom
+            </button>
+          </div>
+
+          {visitFilter === "custom" && (
+            <div className="flex flex-wrap items-center gap-2 px-1 text-xs text-muted-foreground">
+              <label htmlFor="custom-days" className="font-medium">
+                Not visited in at least
+              </label>
+              <input
+                id="custom-days"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={customDaysInput}
+                onChange={(e) => setCustomDaysInput(e.target.value)}
+                aria-label="Days since last check-in"
+                className="h-8 w-20 rounded-md border border-input bg-background px-2 text-sm tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              />
+              <span>days (counts never-visited too)</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -972,7 +1116,7 @@ function MapViewSection({
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
             <p className="text-xs text-muted-foreground">
-              {filterCountLabel(filtered.length, visitFilter)}
+              {filterCountLabel(filtered.length, visitFilter, customDays)}
               {mapFetchState.kind === "ready" && mapFetchState.truncated && (
                 <span className="text-amber-700 dark:text-amber-400">
                   {" "}
@@ -1023,6 +1167,7 @@ function MapViewSection({
                 loggingId !== null && loggingId !== officeId
               }
               onLogVisit={onLogVisit}
+              onLogVisitWithNote={onLogVisitWithNote}
               lassoActive={lassoActive}
               selectedIds={selectedIds}
               onLassoSelect={lassoSelect}
@@ -1160,8 +1305,13 @@ const EMPTY_RESULTS: NearbyOfficeItem[] = [];
  *  we show the "scroll to review" hint + bottom fade. */
 const SCROLL_HINT_THRESHOLD = 5;
 
-/** "42 offices" / "18 not visited in 60 days" / "6 never visited". */
-function filterCountLabel(count: number, filter: OfficeVisitFilter): string {
+/** "42 offices" / "18 not visited in 60 days" / "6 never visited" /
+ *  "9 not visited in 14 days" (custom). */
+function filterCountLabel(
+  count: number,
+  filter: MapVisitFilter,
+  customDays: number | null,
+): string {
   const noun = count === 1 ? "office" : "offices";
   switch (filter) {
     case "never":
@@ -1170,6 +1320,10 @@ function filterCountLabel(count: number, filter: OfficeVisitFilter): string {
     case "60":
     case "90":
       return `${count} not visited in ${filter} days`;
+    case "custom":
+      return customDays !== null
+        ? `${count} not visited in ${customDays} days`
+        : `${count} ${noun}`;
     default:
       return `${count} ${noun}`;
   }
@@ -1459,6 +1613,319 @@ function ListViewSection({
         </ul>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CheckinsViewSection — "Today's Check-ins" feed
+// ---------------------------------------------------------------------------
+//
+// A date-windowed list of office check-ins (the office_visits log),
+// defaulting to Today. Range chips: Today / Yesterday / Last 7 days /
+// Custom (from–to date pickers). Admins additionally get a Mine | Team
+// toggle; the Team scope returns every AE's check-ins (the server
+// enforces admin-only for team independently, so a non-admin never
+// reaches it even if the toggle were forced).
+//
+// Each row shows the office name, the timestamp, the AE who logged it
+// (Team scope), a note preview, and taps through to the office detail
+// page. Non-admins only ever see their own check-ins — matching the
+// rest of the per-AE office surface.
+// ---------------------------------------------------------------------------
+
+type CheckinsFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "error"; error: string }
+  | {
+      kind: "ready";
+      items: CheckinItem[];
+      truncated: boolean;
+      scope: CheckinScope;
+    };
+
+const CHECKIN_RANGES: { key: CheckinRange; label: string }[] = [
+  { key: "today", label: "Today" },
+  { key: "yesterday", label: "Yesterday" },
+  { key: "7d", label: "Last 7 days" },
+  { key: "custom", label: "Custom" },
+];
+
+function CheckinsViewSection({ isAdmin }: { isAdmin: boolean }) {
+  const [range, setRange] = useState<CheckinRange>("today");
+  const [scope, setScope] = useState<CheckinScope>("mine");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [state, setState] = useState<CheckinsFetchState>({ kind: "idle" });
+
+  // Custom range only fetches once both dates are set and ordered. For
+  // the relative ranges this is always true.
+  const customReady =
+    range !== "custom" || (from !== "" && to !== "" && from <= to);
+
+  useEffect(() => {
+    if (!customReady) {
+      // Custom selected but incomplete — hold off and let the UI prompt
+      // for both dates instead of firing an invalid request.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setState({ kind: "idle" });
+      return;
+    }
+    let cancelled = false;
+    setState({ kind: "loading" });
+    const params = new URLSearchParams({ range, scope });
+    if (range === "custom") {
+      params.set("from", from);
+      params.set("to", to);
+    }
+    void apiFetch(`/api/offices/checkins?${params.toString()}`)
+      .then(async (res) => {
+        if (cancelled) return;
+        const data = (await res.json().catch(() => null)) as
+          | (CheckinsResponse & ApiErrorShape)
+          | null;
+        if (!res.ok || !data?.checkins) {
+          setState({
+            kind: "error",
+            error: data?.error ?? `Could not load check-ins (${res.status}).`,
+          });
+          return;
+        }
+        setState({
+          kind: "ready",
+          items: data.checkins,
+          truncated: data.truncated === true,
+          scope: data.scope,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setState({
+          kind: "error",
+          error: "Network error while loading check-ins.",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [range, scope, from, to, customReady]);
+
+  const datesInverted =
+    range === "custom" && from !== "" && to !== "" && from > to;
+
+  return (
+    <div className="space-y-3">
+      {/* Range chips. */}
+      <div
+        role="radiogroup"
+        aria-label="Check-in date range"
+        className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5"
+      >
+        {CHECKIN_RANGES.map((r) => {
+          const active = range === r.key;
+          return (
+            <button
+              key={r.key}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => setRange(r.key)}
+              className={cn(
+                "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                active
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {r.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Custom date pickers. */}
+      {range === "custom" && (
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="grid gap-1">
+            <label
+              htmlFor="checkin-from"
+              className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+            >
+              From
+            </label>
+            <input
+              id="checkin-from"
+              type="date"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => setFrom(e.target.value)}
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+          </div>
+          <div className="grid gap-1">
+            <label
+              htmlFor="checkin-to"
+              className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+            >
+              To
+            </label>
+            <input
+              id="checkin-to"
+              type="date"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => setTo(e.target.value)}
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+          </div>
+        </div>
+      )}
+
+      {datesInverted && (
+        <p role="alert" className="px-1 text-xs text-destructive">
+          The From date must be on or before the To date.
+        </p>
+      )}
+
+      {/* Admin-only Mine | Team toggle. */}
+      {isAdmin && (
+        <div
+          role="radiogroup"
+          aria-label="Whose check-ins"
+          className="inline-flex w-fit rounded-full border border-border bg-muted/30 p-0.5"
+        >
+          {(
+            [
+              { value: "mine", label: "Mine" },
+              { value: "team", label: "Team" },
+            ] as const
+          ).map(({ value, label }) => {
+            const active = scope === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => setScope(value)}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold transition-colors",
+                  active
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {value === "team" && (
+                  <Users aria-hidden="true" className="size-3.5" />
+                )}
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Body. */}
+      {state.kind === "idle" && range === "custom" && !customReady && (
+        <Card>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Pick a From and To date to see check-ins.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {state.kind === "loading" && (
+        <p className="px-1 text-sm text-muted-foreground">
+          Loading check-ins…
+        </p>
+      )}
+
+      {state.kind === "error" && (
+        <Card>
+          <CardContent>
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              {state.error}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {state.kind === "ready" && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              {state.items.length}{" "}
+              {state.items.length === 1 ? "check-in" : "check-ins"}
+              {state.scope === "team" ? " · all AEs" : ""}
+            </span>
+            {state.truncated && (
+              <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400">
+                <AlertTriangle aria-hidden="true" className="size-3" />
+                Showing the most recent — narrow the range to see all
+              </span>
+            )}
+          </div>
+
+          {state.items.length === 0 ? (
+            <Card>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  No check-ins in this window
+                  {state.scope === "mine" ? " for you" : ""}. Log a visit
+                  from the Map or an office page and it&apos;ll show up here.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {state.items.map((c) => (
+                <li key={c.id}>
+                  <Link
+                    href={`/offices/${c.office_id}`}
+                    className="group block rounded-xl bg-card text-card-foreground ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
+                  >
+                    <div className="flex items-start gap-3 p-3">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <p className="truncate text-base font-semibold leading-snug">
+                            {c.office_name}
+                          </p>
+                          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                            {formatActivityStamp(c.visited_at)}
+                          </span>
+                        </div>
+                        {state.scope === "team" && (
+                          <p className="text-xs text-muted-foreground">
+                            by{" "}
+                            <span className="font-medium text-foreground/80">
+                              {c.salesperson_name}
+                            </span>
+                          </p>
+                        )}
+                        {c.note && (
+                          <p className="line-clamp-2 text-sm text-foreground/80">
+                            {c.note}
+                          </p>
+                        )}
+                      </div>
+                      <ChevronRight
+                        aria-hidden="true"
+                        className="mt-1 size-4 shrink-0 text-muted-foreground/60 transition-colors group-hover:text-foreground"
+                      />
+                    </div>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

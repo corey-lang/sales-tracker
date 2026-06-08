@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
-import { Check, CheckCircle2, Navigation, Plus } from "lucide-react";
+import { Check, CheckCircle2, Navigation, NotebookPen, Plus } from "lucide-react";
 import L from "leaflet";
 import {
   CircleMarker,
@@ -332,10 +332,13 @@ export type NearbyOfficesMapProps = {
   logErrorById: Map<string, string>;
   /** Disable the Log Visit button when another card's log is in flight. */
   isLogDisabled: (officeId: string) => boolean;
-  /** Triggers the shared Log Visit POST. Updates flow through the
-   *  parent state map so a log from the map AND a log from the list
-   *  apply to the same per-id slot. */
+  /** Triggers the shared one-tap Log Visit POST (no note). Updates flow
+   *  through the parent state map so a log from the map AND a log from
+   *  the list apply to the same per-id slot. */
   onLogVisit: (officeId: string) => void;
+  /** Opens the "Log Visit + Note" modal for this office. The parent
+   *  renders the modal (above the map) and applies the result. */
+  onLogVisitWithNote: (office: { id: string; name: string }) => void;
   // ---- Lasso / route selection (V1) ----
   /** When true, the lasso overlay captures pointer strokes (map pan is
    *  suppressed) and a release selects the offices inside the drawn shape. */
@@ -358,6 +361,7 @@ export default function NearbyOfficesMap({
   logErrorById,
   isLogDisabled,
   onLogVisit,
+  onLogVisitWithNote,
   lassoActive = false,
   selectedIds,
   onLassoSelect,
@@ -489,12 +493,16 @@ export default function NearbyOfficesMap({
                       {formatDistance(item.distance_miles)}
                     </span>
                   </div>
-                  {item.last_visit_at && (
+                  {item.last_visit_at ? (
                     <p className="text-[11px] text-muted-foreground">
                       Last visit{" "}
                       <span className="font-medium text-foreground/80">
                         {formatActivityStamp(item.last_visit_at)}
                       </span>
+                    </p>
+                  ) : (
+                    <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                      No visit yet
                     </p>
                   )}
                   {item.next_action && (
@@ -540,6 +548,18 @@ export default function NearbyOfficesMap({
                       disabled={logging || disabled}
                     >
                       {logging ? "Logging…" : "Log visit"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        onLogVisitWithNote({ id: item.id, name: item.name })
+                      }
+                      disabled={logging || disabled}
+                    >
+                      <NotebookPen aria-hidden="true" className="size-4" />
+                      Log + note
                     </Button>
                     {mapsHref && (
                       <a

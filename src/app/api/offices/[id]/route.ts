@@ -117,11 +117,58 @@ export async function GET(
       );
       throw new ApiError(500, "Could not load office detail.");
     }
-    if (!officeRes.data) {
+
+    // ADMIN READ-ONLY FALLBACK
+    //   When the owner read misses AND the caller is an admin, retry
+    //   WITHOUT the ownership predicate so an admin can open any AE's
+    //   office from the team Check-ins feed. Still pinned to the
+    //   caller's environment + `archived_at IS NULL`, so admins never
+    //   see test-slice or archived rows this way. This GET stays
+    //   read-only: the write routes (visits POST, PATCH, DELETE) keep
+    //   their strict `salesperson_id = me.id` predicate, so an admin
+    //   viewing another AE's office can look but not mutate — the
+    //   detail UI hides the owner-only actions when `read_only` is set.
+    let office: OfficeRow | null = officeRes.data
+      ? (officeRes.data as unknown as OfficeRow)
+      : null;
+    if (!office && me.role === "admin") {
+      const adminRes = await supabase
+        .from(OFFICES_TABLE)
+        .select(OFFICE_COLUMNS)
+        .eq("id", id)
+        .eq("environment", environment)
+        .is("archived_at", null)
+        .maybeSingle();
+      if (adminRes.error) {
+        console.warn(
+          `[office-detail] admin office lookup failed office_id=${id} admin=${me.id} code=${adminRes.error.code ?? "?"} msg=${adminRes.error.message}`,
+        );
+        throw new ApiError(500, "Could not load office detail.");
+      }
+      office = adminRes.data ? (adminRes.data as unknown as OfficeRow) : null;
+    }
+
+    if (!office) {
       throw notFound("Office not found.");
     }
 
-    const office = officeRes.data as unknown as OfficeRow;
+    // Read-only when the loaded office belongs to someone else (only
+    // reachable via the admin fallback above). Resolve the owner's
+    // first name so the UI can label whose office it is. A name-lookup
+    // failure is non-fatal — the page still renders read-only without
+    // the label.
+    const isOwner = office.salesperson_id === me.id;
+    let ownerFirstName: string | undefined;
+    if (!isOwner) {
+      const ownerRes = await supabase
+        .from("salespeople")
+        .select("first_name")
+        .eq("id", office.salesperson_id)
+        .maybeSingle();
+      if (!ownerRes.error && ownerRes.data) {
+        ownerFirstName = (ownerRes.data as { first_name: string }).first_name;
+      }
+    }
 
     // Visits read is INDEPENDENT of the office read. A failure here
     // (transient DB blip, planner-chosen bad index path, statement
@@ -159,12 +206,16 @@ export async function GET(
     //      trying to avoid.
     const visitsStartedAt = Date.now();
     try {
+      // Scoped to the office's OWNER (not the caller) so the admin
+      // read-only view shows the owning AE's visit history. For the
+      // common owner path `office.salesperson_id === me.id`, so this is
+      // identical to the prior behavior.
       const visitsRes = await supabase
         .from(OFFICE_VISITS_TABLE)
         .select(VISIT_COLUMNS)
         .eq("office_id", id)
         .eq("environment", environment)
-        .eq("salesperson_id", me.id)
+        .eq("salesperson_id", office.salesperson_id)
         .order("visited_at", { ascending: false })
         .limit(OFFICE_VISITS_DETAIL_LIMIT);
 
@@ -195,6 +246,9 @@ export async function GET(
       last_visit_at: visits[0]?.visited_at ?? null,
       visit_count: visits.length,
       ...(visitsLoadWarning ? { visits_load_warning: visitsLoadWarning } : {}),
+      ...(isOwner
+        ? {}
+        : { read_only: true, ...(ownerFirstName ? { owner_first_name: ownerFirstName } : {}) }),
     };
 
     return Response.json(

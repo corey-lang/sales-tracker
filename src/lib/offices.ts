@@ -161,6 +161,13 @@ export type OfficeImportBatchRow = {
  *     UI surfaces the warning inline so the AE knows their existing
  *     visit history (if any) didn't render. Logging a new visit
  *     still works.
+ *   * `read_only` — true when the caller is viewing an office they do
+ *     NOT own (admin cross-AE view). The detail UI hides the owner-only
+ *     actions (Log Visit / Edit / Archive) in this mode; the write
+ *     routes reject non-owners independently, so this is a UX signal,
+ *     not the security boundary.
+ *   * `owner_first_name` — present only in the read_only admin view so
+ *     the UI can label whose office it is ("Viewing Sarah's office").
  */
 export type OfficeDetail = {
   office: OfficeRow;
@@ -168,6 +175,8 @@ export type OfficeDetail = {
   last_visit_at: string | null;
   visit_count: number;
   visits_load_warning?: string;
+  read_only?: boolean;
+  owner_first_name?: string;
 };
 
 /**
@@ -341,11 +350,41 @@ export const OFFICE_VISIT_FILTERS: {
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
+ * Core "is this office stale by N days?" predicate, shared by the
+ * preset 30/60/90 chips and the custom days-since-last-check-in input.
+ *
+ * Matches when the office has NEVER been visited (null last-visit) OR
+ * its last visit is strictly older than `days` days before `nowMs`.
+ * "Never visited" deliberately counts as stale so the same filter
+ * surfaces both kinds of neglected offices — mirroring the long-
+ * standing behavior of the preset chips.
+ *
+ * `days` is clamped to a sane floor of 0 so a stray negative input can
+ * never invert the comparison; `nowMs` is injected so callers stay
+ * testable / timezone-explicit.
+ */
+export function officeMatchesDaysSince(
+  lastVisitAt: string | null,
+  days: number,
+  nowMs: number,
+): boolean {
+  if (lastVisitAt === null) return true; // never visited → counts as stale
+  const visitedMs = Date.parse(lastVisitAt);
+  if (Number.isNaN(visitedMs)) return true; // unparseable → treat as stale, not hidden
+  const threshold = Math.max(0, days);
+  return visitedMs < nowMs - threshold * MS_PER_DAY;
+}
+
+/**
  * Does an office match a visit filter, given its last-visit timestamp?
  *   * all   → always true.
  *   * never → last_visit_at is null.
  *   * N     → last_visit_at is null OR strictly older than (now - N days).
  * `nowMs` is injected so callers stay testable / timezone-explicit.
+ *
+ * The numeric "custom days since" filter is NOT handled here — callers
+ * branch to `officeMatchesDaysSince` for that since it takes an
+ * arbitrary day count rather than one of the closed preset keys.
  */
 export function officeMatchesVisitFilter(
   lastVisitAt: string | null,
@@ -354,12 +393,75 @@ export function officeMatchesVisitFilter(
 ): boolean {
   if (filter === "all") return true;
   if (filter === "never") return lastVisitAt === null;
-  if (lastVisitAt === null) return true; // never visited counts as "not visited in X"
   const days = filter === "30" ? 30 : filter === "60" ? 60 : 90;
-  const visitedMs = Date.parse(lastVisitAt);
-  if (Number.isNaN(visitedMs)) return true; // unparseable → treat as stale, not hidden
-  return visitedMs < nowMs - days * MS_PER_DAY;
+  return officeMatchesDaysSince(lastVisitAt, days, nowMs);
 }
+
+// ---------------------------------------------------------------------------
+// Today's Check-ins (visit-log feed) — shared types + date-range resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Closed set of quick ranges for the Check-ins feed. `custom` reveals a
+ * from/to date picker; the rest are computed relative to "today" in the
+ * app's business timezone (America/Denver) so a late-night check-in
+ * reads on the right calendar day regardless of the viewer's device TZ.
+ */
+export type CheckinRange = "today" | "yesterday" | "7d" | "custom";
+
+export function isCheckinRange(value: unknown): value is CheckinRange {
+  return (
+    value === "today" ||
+    value === "yesterday" ||
+    value === "7d" ||
+    value === "custom"
+  );
+}
+
+/**
+ * Whose check-ins the feed shows.
+ *   * `mine` — the calling AE's own visits (the everyday rule; the only
+ *     scope a non-admin is ever allowed).
+ *   * `team` — every AE's visits in the caller's environment. Admin-only,
+ *     enforced server-side; the UI hides the Team toggle for non-admins.
+ */
+export type CheckinScope = "mine" | "team";
+
+export function isCheckinScope(value: unknown): value is CheckinScope {
+  return value === "mine" || value === "team";
+}
+
+/** Hard cap on rows returned by the Check-ins feed. Keeps the mobile
+ *  payload small; for an 11-person team a day/week window is far under
+ *  this. `truncated` flags the rare overflow so the UI can hint. */
+export const CHECKINS_LIMIT = 200;
+
+/**
+ * One row in the Check-ins feed. A flattened `office_visits` row joined
+ * to its office name + (for the team view) the AE who logged it.
+ */
+export type CheckinItem = {
+  /** office_visits.id */
+  id: string;
+  office_id: string;
+  office_name: string;
+  salesperson_id: string;
+  /** first_name of the AE who logged the visit. */
+  salesperson_name: string;
+  note: string | null;
+  visited_at: string;
+};
+
+export type CheckinsResponse = {
+  checkins: CheckinItem[];
+  scope: CheckinScope;
+  range: CheckinRange;
+  /** Resolved inclusive calendar-day bounds (YYYY-MM-DD, Denver) — echoed
+   *  back so the UI can label the window it actually queried. */
+  from: string;
+  to: string;
+  truncated: boolean;
+};
 
 /**
  * Google Maps supports a limited number of stops in a single directions URL
