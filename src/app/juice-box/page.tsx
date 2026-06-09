@@ -106,14 +106,155 @@ type ReactionsState = Map<string, ReactionsByEmoji>;
 const DIVIDER_GRACE_MS = 6000;
 const DIVIDER_FADE_DURATION_MS = 1000;
 
-// Generous comfort offset above the composer's TOP edge after auto-
-// scroll. Lands the targeted message in the lower-middle of visible feed
-// rather than just above the composer. ~6rem feels right on phone
-// viewports; main's pb-[18rem+safe] is sized to make this reachable
-// without browser-side scrollTop clamping. Module-scoped so both the
-// FeedList auto-scroll effects and the JuiceBoxFeed Jump-to-latest
-// handler share a single source of truth.
-const AUTO_SCROLL_COMFORT_PX = 96;
+/**
+ * True when ISO timestamp `iso` is strictly NEWER than `thanIso`, compared
+ * NUMERICALLY (Date.parse) rather than lexicographically. This is robust to
+ * format differences between the server-issued read marker (always `…Z`, ms
+ * precision) and Postgres `timestamptz` serialization (which can use a `+00:00`
+ * offset and/or microseconds) — a raw string `>` could otherwise mis-order
+ * equal instants across those formats.
+ *
+ * Fails SAFE: any unparseable value returns false. A malformed MESSAGE
+ * timestamp is therefore never treated as "after the read marker" (never
+ * falsely shown as unread), and a malformed MARKER treats nothing as after it
+ * (→ no bogus unread block, the feed reads as caught-up).
+ */
+function isNewerThan(iso: string, thanIso: string): boolean {
+  const a = Date.parse(iso);
+  const b = Date.parse(thanIso);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a > b;
+}
+
+// ───────────────────────── Feed scroll model ─────────────────────────────
+//
+// The feed scrolls the DOCUMENT (window), with the header sticky at the top
+// and the composer + bottom nav as FIXED overlays at the bottom. Rather than
+// hard-coding their heights, every scroll decision is driven by LIVE measured
+// geometry (getBoundingClientRect) of two stable DOM ids — `#juice-header`
+// (sticky header) and `#juice-composer-bar` (fixed composer) — plus a real
+// in-feed bottom sentinel whose height is measured from the same chrome. This
+// is the single source of truth for: the bottom sentinel's reserve, the
+// initial landing, the generic ongoing auto-scroll, the Jump-to-latest
+// button, and near-bottom detection.
+
+// Comfort gap (px) the latest message keeps above the fixed composer when it
+// lands at the bottom. Baked into the bottom sentinel's measured height so the
+// browser can actually scroll the latest message clear of the composer
+// instead of clamping it flush against it.
+const FEED_BOTTOM_COMFORT_PX = 96;
+
+// Where a landed target's vertical center sits within the *usable* feed
+// viewport (the band between the sticky header's bottom and the composer's
+// top). 0 = header edge, 1 = composer edge. ~0.62 reads as "lower-middle": a
+// first-unread target shows read context above and unread below, while the
+// latest target naturally clamps to "just above the composer" because the
+// sentinel reserves exactly enough room below it — so both land clearly above
+// the composer/nav, never behind.
+const FEED_LANDING_FRACTION = 0.62;
+
+// "Near bottom" band, measured as the distance from the last message's bottom
+// (= the bottom sentinel's top) up to the composer's top. Using two
+// getBoundingClientRect reads instead of scrollHeight/scrollY/innerHeight
+// keeps this stable across mobile dynamic-toolbar / keyboard viewport changes.
+const FEED_NEAR_BOTTOM_PX = 220;
+
+// Pre-measurement fallback for the sentinel height, so a reserve always
+// exists even before the first measurement (or if ResizeObserver is absent).
+// Refined to the real measured value on mount + on every chrome resize.
+const FEED_SENTINEL_FALLBACK_PX = 232;
+
+// Upper bound on the initial-landing settle. Re-landing is observer-driven
+// (ResizeObserver on the feed + composer re-lands as lazy media / link
+// previews reflow); this is only a fallback cap so the pending flag is always
+// eventually released to the generic ongoing-scroll effect.
+const FEED_SETTLE_FALLBACK_MS = 1600;
+
+/**
+ * Measures the usable feed viewport — the band between the sticky header's
+ * bottom and the fixed composer's top. Returns null until the composer is in
+ * the DOM. All reads are live getBoundingClientRect, so the result tracks the
+ * real measured chrome (composer height, safe-area, nav) rather than rems.
+ */
+function measureFeedBounds(): {
+  usableTop: number;
+  usableBottom: number;
+  usableHeight: number;
+} | null {
+  if (typeof document === "undefined") return null;
+  const composer = document.getElementById("juice-composer-bar");
+  if (!composer) return null;
+  const usableBottom = composer.getBoundingClientRect().top;
+  const header = document.getElementById("juice-header");
+  const usableTop = header ? header.getBoundingClientRect().bottom : 0;
+  return {
+    usableTop,
+    usableBottom,
+    usableHeight: Math.max(0, usableBottom - usableTop),
+  };
+}
+
+/**
+ * Height (px) the in-feed bottom sentinel reserves below the last message:
+ * everything from the composer's top down to the viewport bottom (composer +
+ * the gap the nav occupies + safe-area) PLUS the comfort gap. This lets the
+ * browser scroll the latest message to `composerTop − comfort` instead of
+ * clamping it flush against the composer. Returns 0 when the composer can't be
+ * measured yet, so callers keep the fallback.
+ */
+function measureSentinelHeight(): number {
+  if (typeof window === "undefined") return 0;
+  const composer = document.getElementById("juice-composer-bar");
+  if (!composer) return 0;
+  const composerTop = composer.getBoundingClientRect().top;
+  const bottomChrome = Math.max(0, window.innerHeight - composerTop);
+  return Math.round(bottomChrome + FEED_BOTTOM_COMFORT_PX);
+}
+
+/**
+ * Shared scroll helper — the single place that decides where a target lands.
+ * Places `target`'s center at FEED_LANDING_FRACTION of the usable feed
+ * viewport, then CLAMPS to the document's scroll range so it can never land
+ * behind the composer/nav. Used by the initial landing, the generic ongoing
+ * auto-scroll, AND the Jump-to-latest button so every path lands identically.
+ * Returns false when geometry isn't measurable yet (caller may retry).
+ */
+function scrollToFeedTarget(
+  target: Element,
+  opts: { behavior?: ScrollBehavior; fraction?: number } = {},
+): boolean {
+  const bounds = measureFeedBounds();
+  if (!bounds) return false;
+  const rect = target.getBoundingClientRect();
+  const targetCenter = rect.top + rect.height / 2;
+  const fraction = opts.fraction ?? FEED_LANDING_FRACTION;
+  const desiredCenter = bounds.usableTop + bounds.usableHeight * fraction;
+  const delta = targetCenter - desiredCenter;
+  const maxScroll = Math.max(
+    0,
+    document.documentElement.scrollHeight - window.innerHeight,
+  );
+  const top = Math.min(maxScroll, Math.max(0, window.scrollY + delta));
+  window.scrollTo({ top, behavior: opts.behavior ?? "auto" });
+  return true;
+}
+
+/**
+ * Scrolls to the true bottom of the feed (document max scroll), which is the
+ * NEWEST rendered message followed by the measured bottom sentinel. Bulletproof
+ * "go to latest": it doesn't depend on resolving a `latestMessageId` or on the
+ * center-math clamp, so it can never land on an older message. Because the
+ * sentinel reserves `bottomChrome + comfort`, the newest message lands a
+ * comfort gap ABOVE the composer, not behind it.
+ */
+function scrollFeedToBottom(behavior: ScrollBehavior = "smooth"): void {
+  if (typeof window === "undefined") return;
+  const maxScroll = Math.max(
+    0,
+    document.documentElement.scrollHeight - window.innerHeight,
+  );
+  window.scrollTo({ top: maxScroll, behavior });
+}
 
 // Trailing-edge debounce. Returned trigger schedules `fn` to fire `delay`
 // ms after the most recent call; rapid re-invocations only fire once at
@@ -536,22 +677,17 @@ export default function JuiceBoxPage() {
   return (
     <>
       <main
-        // This page has TWO pieces of fixed bottom chrome — the BottomNav
-        // (~5rem + safe area) and the fixed Composer above it (~7rem) —
-        // so the shared BOTTOM_NAV_SPACER isn't enough. We also reserve
-        // an extra 6rem of room below the last message so the manual
-        // window.scrollTo computation in FeedList can actually scroll the
-        // latest message to a "lower-middle" landing position above the
-        // composer. Without this headroom, scrollTop is clamped at
-        // scrollTop_max and the latest message lands flush against the
-        // composer regardless of how aggressive the target is.
-        //   nav 5rem + composer 7rem + lower-middle comfort 6rem
-        //   = 18rem + env(safe-area-inset-bottom)
-        // pwa-safe-top is intentionally NOT applied here — the sticky
-        // header below owns top-safe-area padding itself (via the inline
-        // paddingTop on its container) so the translucent backdrop
-        // covers the notch area both at scroll=0 and while stuck.
-        className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(18rem+var(--app-safe-bottom,0px))]"
+        // The bottom reserve that lets the latest message scroll clear of the
+        // fixed Composer + BottomNav now lives in a MEASURED in-feed bottom
+        // sentinel (see FeedList), not a hard-coded page padding. Main keeps
+        // only a small floor here for the non-feed states (loading / empty /
+        // error) which have no sentinel; those are short, so the fixed
+        // composer never overlaps them.
+        // pwa-safe-top is intentionally NOT applied here — the sticky header
+        // below owns top-safe-area padding itself (via the inline paddingTop
+        // on its container) so the translucent backdrop covers the notch area
+        // both at scroll=0 and while stuck.
+        className="mx-auto flex min-h-screen w-full max-w-2xl flex-col gap-3 p-4 pb-[calc(2rem+var(--app-safe-bottom,0px))]"
       >
         {/*
           Sticky header. -mx-4 px-4 lets the translucent backdrop bleed
@@ -564,6 +700,7 @@ export default function JuiceBoxPage() {
           area while the visible title text sits below the notch.
         */}
         <header
+          id="juice-header"
           className="sticky top-0 z-20 -mx-4 border-b border-border/60 bg-background/85 px-4 pb-2 text-center backdrop-blur supports-[backdrop-filter]:bg-background/70"
           style={{ paddingTop: "calc(0.5rem + env(safe-area-inset-top))" }}
         >
@@ -1344,17 +1481,10 @@ function JuiceBoxFeed({
    */
   const handleJumpToLatest = useCallback(() => {
     if (state.kind !== "ready" || state.messages.length === 0) return;
-    const latestId = state.messages[state.messages.length - 1].id;
-    const messageEl = document.getElementById(`juice-message-${latestId}`);
-    const composer = document.getElementById("juice-composer-bar");
-    if (!messageEl || !composer) return;
-    const messageBottom = messageEl.getBoundingClientRect().bottom;
-    const composerTop = composer.getBoundingClientRect().top;
-    const target = Math.max(
-      0,
-      window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
-    );
-    window.scrollTo({ top: target, behavior: "smooth" });
+    // Go to the TRUE bottom of the feed (newest rendered message + the
+    // measured sentinel). This can never land on an older message — it does
+    // not depend on resolving latestMessageId or on the center-math clamp.
+    scrollFeedToBottom("smooth");
     markAllReadDebounced();
   }, [state, markAllReadDebounced]);
 
@@ -1535,8 +1665,13 @@ function JuiceBoxSearchSheet({
   const [viewportOffsetTop, setViewportOffsetTop] = useState(0);
   const requestIdRef = useRef(0);
 
+  // Reset all sheet state when it closes (or unmounts) so each open starts
+  // fresh. The reset runs in CLEANUP — fired on the same open: true → false
+  // transition the old `if (!open) setX(...)` body handled — which avoids the
+  // set-state-in-effect cascading-render warning without changing behavior.
   useEffect(() => {
-    if (!open) {
+    if (!open) return;
+    return () => {
       setQuery("");
       setDebouncedQuery("");
       setPeopleOnly(false);
@@ -1550,7 +1685,7 @@ function JuiceBoxSearchSheet({
       setHasMore(false);
       setViewportHeight(null);
       setViewportOffsetTop(0);
-    }
+    };
   }, [open]);
 
   useEffect(() => {
@@ -1658,7 +1793,18 @@ function JuiceBoxSearchSheet({
 
   useEffect(() => {
     if (!open) return;
-    void runSearch({ append: false });
+    // Defer one microtask so the synchronous setState inside runSearch
+    // (setLoading/setError) isn't called in the effect body — avoids the
+    // set-state-in-effect warning. Cancellable so a fast re-open / filter
+    // change doesn't fire a stale search (runSearch's requestId guard is the
+    // second line of defence).
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) void runSearch({ append: false });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [open, runSearch]);
 
   const handleLoadMore = useCallback(() => {
@@ -3155,12 +3301,17 @@ function FeedList({
       : null;
 
   // First-unread scroll target id. Used for the INITIAL auto-scroll only
-  // — when the user opens Juice Box with new messages waiting, we land
-  // them at the top of the unread block rather than at the latest.
+  // — when the user RETURNS to Juice Box with new messages since they last
+  // read, we land them at the start of that unread block rather than at the
+  // latest.
   //
   // Returns null (= "use the latest target instead") when:
   //   - feed isn't ready yet,
   //   - unread bootstrap hasn't resolved (we don't know lastReadAt yet),
+  //   - the user has NO read receipt yet (lastReadAt === null). A first-time
+  //     / no-receipt user must land at the LATEST like opening any chat —
+  //     NOT get thrown to the top of week-old history. (This was the bug:
+  //     null meant "everything is unread → land at messages[0] = oldest".)
   //   - everything is already read,
   //   - or the first unread IS the latest (the two targets collapse, so
   //     landing at "first unread" gives no UX benefit and skips the
@@ -3173,10 +3324,10 @@ function FeedList({
     if (state.kind !== "ready") return null;
     if (state.messages.length === 0) return null;
     if (!unreadLoaded) return null;
-    const idx =
-      lastReadAt === null
-        ? 0
-        : state.messages.findIndex((m) => m.created_at > lastReadAt);
+    if (lastReadAt === null) return null;
+    const idx = state.messages.findIndex((m) =>
+      isNewerThan(m.created_at, lastReadAt),
+    );
     if (idx < 0 || idx >= state.messages.length - 1) return null;
     return state.messages[idx].id;
   }, [state, lastReadAt, unreadLoaded]);
@@ -3231,13 +3382,19 @@ function FeedList({
 
   // Position the divider against the lagging anchor — not the live
   // lastReadAt — so a successful markAllRead doesn't snap it away.
-  // -1 = no divider (anchor not yet synced, or every message is read).
+  // -1 = no divider (anchor not yet synced, OR the user has no read receipt,
+  // OR every message is read). We intentionally do NOT render the divider at
+  // index 0 for a no-receipt user: a "NEW MESSAGES" banner sitting above the
+  // entire feed (including week-old posts) is the reported bug, not a useful
+  // boundary. The divider only earns its place BETWEEN read and unread, which
+  // requires a real (non-null) anchor.
   const dividerIndex = useMemo(() => {
     if (state.kind !== "ready") return -1;
     if (state.messages.length === 0) return -1;
-    if (dividerAnchor === undefined) return -1;
-    if (dividerAnchor === null) return 0;
-    return state.messages.findIndex((m) => m.created_at > dividerAnchor);
+    if (dividerAnchor === undefined || dividerAnchor === null) return -1;
+    return state.messages.findIndex((m) =>
+      isNewerThan(m.created_at, dividerAnchor),
+    );
   }, [state, dividerAnchor]);
 
   // Keep `onNearBottom` reachable from the scroll listener (which is set up
@@ -3259,8 +3416,12 @@ function FeedList({
   //       (b) they are currently within NEAR_BOTTOM_PX of the bottom.
   //     Otherwise — they have scrolled up to read older posts — leave them
   //     alone. No yanking the viewport while they're reading.
-  const NEAR_BOTTOM_PX = 200;
   const nearBottomRef = useRef(true);
+  // The in-feed bottom sentinel (rendered after the last message). Its TOP
+  // edge equals the last message's bottom, so the distance from it up to the
+  // composer top is our measured "how far from the bottom am I" — robust
+  // against mobile dynamic-toolbar/keyboard viewport math.
+  const bottomSentinelRef = useRef<HTMLDivElement>(null);
 
   // Stable callback ref for onNearBottomChange — the listener is bound
   // once on mount and reads through the ref so a parent-level prop
@@ -3270,12 +3431,29 @@ function FeedList({
     onNearBottomChangeRef.current = onNearBottomChange;
   }, [onNearBottomChange]);
 
+  // Measured "near bottom": distance from the last message's bottom (sentinel
+  // top) up to the composer top. Falls back to the document metric only when
+  // the refs aren't ready (e.g. empty feed). No scrollHeight/scrollY math in
+  // the common path.
+  const computeIsNearBottom = useCallback((): boolean => {
+    const composer = document.getElementById("juice-composer-bar");
+    const sentinel = bottomSentinelRef.current;
+    if (composer && sentinel) {
+      const composerTop = composer.getBoundingClientRect().top;
+      const sentinelTop = sentinel.getBoundingClientRect().top;
+      return sentinelTop - composerTop <= FEED_NEAR_BOTTOM_PX;
+    }
+    const doc = document.documentElement;
+    return (
+      doc.scrollHeight - window.scrollY - window.innerHeight <
+      FEED_NEAR_BOTTOM_PX
+    );
+  }, []);
+
   useEffect(() => {
     const update = () => {
       const wasNear = nearBottomRef.current;
-      const doc = document.documentElement;
-      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
-      const isNear = remaining < NEAR_BOTTOM_PX;
+      const isNear = computeIsNearBottom();
       nearBottomRef.current = isNear;
       // Mark-read trigger: the user manually scrolled back into the
       // near-bottom band. Edge-triggered so simply being near bottom while
@@ -3295,18 +3473,54 @@ function FeedList({
     // happens AFTER the effect body returns — keeps setState out of
     // the effect's synchronous path (react-hooks/set-state-in-effect).
     const seed = () => {
-      const doc = document.documentElement;
-      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
-      const isNear = remaining < NEAR_BOTTOM_PX;
+      const isNear = computeIsNearBottom();
       nearBottomRef.current = isNear;
       onNearBottomChangeRef.current?.(isNear);
     };
     queueMicrotask(seed);
     window.addEventListener("scroll", update, { passive: true });
     window.addEventListener("resize", update);
+    // visualViewport tracks the mobile keyboard / collapsing toolbar, which
+    // window 'resize'/'scroll' miss — keeping near-bottom honest there.
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
     return () => {
       window.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
+    };
+  }, [computeIsNearBottom]);
+
+  // Measured bottom-sentinel height (composer + nav gap + safe-area +
+  // comfort). Recomputed on mount and whenever the composer resizes
+  // (expanded composer / media attachment) or the viewport changes
+  // (rotation, mobile toolbar/keyboard).
+  const [sentinelHeight, setSentinelHeight] = useState(
+    FEED_SENTINEL_FALLBACK_PX,
+  );
+  useEffect(() => {
+    const recompute = () => {
+      const h = measureSentinelHeight();
+      if (h <= 0) return; // composer not measurable yet — keep the fallback
+      setSentinelHeight((prev) => (Math.abs(prev - h) > 1 ? h : prev));
+    };
+    // Defer the first read out of the effect body (avoids sync setState).
+    queueMicrotask(recompute);
+    const composer = document.getElementById("juice-composer-bar");
+    let observer: ResizeObserver | null = null;
+    if (composer && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(recompute);
+      observer.observe(composer);
+    }
+    window.addEventListener("resize", recompute);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", recompute);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", recompute);
+      vv?.removeEventListener("resize", recompute);
     };
   }, []);
 
@@ -3326,6 +3540,27 @@ function FeedList({
   // (freshFeedLoaded + unreadLoaded + DOM), not on a side-effected
   // ref the browser hadn't refreshed yet.
   const finalLandingPendingRef = useRef(true);
+  // The settle routine must kick off AT MOST ONCE. Distinct from the
+  // *pending* flag (which the user's first manual scroll flips off to
+  // abort): this guards the routine from re-starting on dep changes.
+  const finalLandingStartedRef = useRef(false);
+  // Imperative teardown for the in-flight settle routine. Held in a ref
+  // (not returned from the landing effect) so a volatile dep change
+  // re-rendering that effect can NEVER abort the settle mid-flight — only
+  // the routine's own close timer or unmount tears it down.
+  const finalLandingCleanupRef = useRef<(() => void) | null>(null);
+  // The messages <section>, observed for height changes (lazy media /
+  // link previews settling) so the initial landing can self-correct.
+  const feedSectionRef = useRef<HTMLElement>(null);
+
+  // Unmount-only teardown of any in-flight settle routine (timers +
+  // ResizeObserver). Keyed on [] so dep-change re-renders don't trigger it.
+  useEffect(() => {
+    return () => {
+      finalLandingCleanupRef.current?.();
+      finalLandingCleanupRef.current = null;
+    };
+  }, []);
 
   // Cancel listener: a real user wheel/touchmove before final landing
   // → consume the pending flag so we don't yank them. Programmatic
@@ -3394,19 +3629,9 @@ function FeedList({
       forceScrollRef.current || nearBottomRef.current;
 
     if (shouldScroll && latestMessageId) {
-      const messageEl = document.getElementById(
-        `juice-message-${latestMessageId}`,
-      );
-      const composer = document.getElementById("juice-composer-bar");
-      if (messageEl && composer) {
-        const messageBottom = messageEl.getBoundingClientRect().bottom;
-        const composerTop = composer.getBoundingClientRect().top;
-        const target = Math.max(
-          0,
-          window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
-        );
-        window.scrollTo({ top: target, behavior: "smooth" });
-      }
+      // Self-post or a live message while near bottom → go to the TRUE bottom
+      // (newest message + sentinel), same bulletproof path as Jump-to-latest.
+      scrollFeedToBottom("smooth");
       onNearBottomRef.current();
     }
 
@@ -3416,17 +3641,33 @@ function FeedList({
     forceScrollRef.current = false;
   }, [messageCount, latestMessageId, firstMessageId, forceScrollRef]);
 
-  // ─── Final-landing effect ─────────────────────────────────────────────
+  // ─── Final-landing effect (initial open) ──────────────────────────────
   // Fires AT MOST ONCE per mount. Waits for the bootstrap fetch to
   // settle AND the unread bootstrap to resolve AND messages to be
   // rendered, then picks the target:
   //   * firstUnread if any unread exists,
   //   * latest otherwise.
   //
+  // RELIABILITY: lazy images / GIFs / link previews load AFTER first
+  // paint and grow the layout, which previously left the target stranded
+  // behind the composer (the scroll ran once, against pre-load
+  // positions, then was consumed). Instead we run a short SETTLE WINDOW:
+  // land immediately on a rAF, re-land on a few staggered timeouts, AND
+  // re-land on every feed height change (ResizeObserver) — each time
+  // recomputing against the SAME captured target. After the window we
+  // consume the pending flag and the generic ongoing effect takes over.
+  //
+  // The routine's lifetime is owned by its own close timer + the unmount
+  // effect above — NOT by this effect's cleanup — so a realtime message
+  // landing mid-settle (a dep change) can't tear it down. A real user
+  // wheel/touchmove still aborts it via the cancel listener flipping
+  // finalLandingPendingRef, which every land() re-checks.
+  //
   // Independent of nearBottomRef so the cache→bootstrap race is gone:
   // the scroll fires based on data readiness alone, not on a stale
   // scroll-listener reading.
   useEffect(() => {
+    if (finalLandingStartedRef.current) return;
     if (!finalLandingPendingRef.current) return;
     if (!freshFeedLoaded) return;
     if (!unreadLoaded) return;
@@ -3435,29 +3676,83 @@ function FeedList({
     const targetId = firstUnreadMessageId ?? latestMessageId;
     if (!targetId) return;
 
-    const messageEl = document.getElementById(`juice-message-${targetId}`);
-    const composer = document.getElementById("juice-composer-bar");
-    // DOM might not be painted on this exact render (rare). Don't
-    // consume the flag — the next dep change (or messageCount tick)
-    // will retry.
-    if (!messageEl || !composer) return;
-
-    const messageBottom = messageEl.getBoundingClientRect().bottom;
-    const composerTop = composer.getBoundingClientRect().top;
-    const target = Math.max(
-      0,
-      window.scrollY + messageBottom - composerTop + AUTO_SCROLL_COMFORT_PX,
-    );
-    window.scrollTo({ top: target, behavior: "auto" });
-
-    finalLandingPendingRef.current = false;
-
-    // Mark-read only on "land at latest." Landing at first unread
-    // leaves newer unreads hidden below the composer — those should
-    // stay unread until the user scrolls into them.
-    if (firstUnreadMessageId === null) {
-      onNearBottomRef.current();
+    // DOM might not be painted on this exact render (rare). Don't start
+    // (or consume the flag) — the next dep tick will retry.
+    if (
+      !document.getElementById(`juice-message-${targetId}`) ||
+      !document.getElementById("juice-composer-bar")
+    ) {
+      return;
     }
+
+    finalLandingStartedRef.current = true;
+    const landAtLatest = firstUnreadMessageId === null;
+    let markedRead = false;
+
+    // Land. When landing at the latest we scroll to the TRUE document bottom
+    // (newest message + sentinel) — bulletproof, never an older message. When
+    // landing at a real first-unread boundary we use the shared center helper
+    // so the boundary sits in the lower-middle with unread flowing below.
+    // Recomputed every call so it self-corrects as media / link previews
+    // reflow. No-ops once the user has scrolled (pending flipped off by the
+    // cancel listener). Marks read once, on the first real land at latest.
+    const land = () => {
+      if (!finalLandingPendingRef.current) return;
+      if (landAtLatest) {
+        scrollFeedToBottom("auto");
+        if (!markedRead) {
+          markedRead = true;
+          onNearBottomRef.current();
+        }
+        return;
+      }
+      const messageEl = document.getElementById(`juice-message-${targetId}`);
+      if (!messageEl) return;
+      // Land at first unread leaves newer unreads below the fold — keep them
+      // unread until the user scrolls into them (no mark-read here).
+      scrollToFeedTarget(messageEl, { behavior: "auto" });
+    };
+
+    // Collect teardown for everything we schedule so a single cleanup()
+    // (close-timer or unmount) disposes it all, with no forward refs.
+    const disposers: Array<() => void> = [];
+    const cleanup = () => {
+      for (const dispose of disposers) dispose();
+      disposers.length = 0;
+      if (finalLandingCleanupRef.current === cleanup) {
+        finalLandingCleanupRef.current = null;
+      }
+    };
+
+    // Paint boundary: land on the next frame so this commit's layout is
+    // flushed first.
+    const raf = requestAnimationFrame(land);
+    disposers.push(() => cancelAnimationFrame(raf));
+
+    // OBSERVER-DRIVEN re-land: any height change in the feed or the composer
+    // (lazy media / GIFs / link previews settling, composer expanding) re-runs
+    // the land against the same captured target — no fixed timeout cadence.
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => land());
+      if (feedSectionRef.current) observer.observe(feedSectionRef.current);
+      const composerEl = document.getElementById("juice-composer-bar");
+      if (composerEl) observer.observe(composerEl);
+      disposers.push(() => observer.disconnect());
+    }
+
+    // Fallback cap ONLY: even if nothing ever resizes, release the pending
+    // flag so the generic ongoing scroll effect resumes ownership.
+    const finish = () => {
+      if (finalLandingPendingRef.current) land();
+      finalLandingPendingRef.current = false;
+      cleanup();
+    };
+    const closeTimer = window.setTimeout(finish, FEED_SETTLE_FALLBACK_MS);
+    disposers.push(() => window.clearTimeout(closeTimer));
+
+    finalLandingCleanupRef.current = cleanup;
+    // No cleanup returned: lifetime is owned by closeTimer + the unmount
+    // effect, so dep-change re-renders never abort the in-flight settle.
   }, [
     freshFeedLoaded,
     unreadLoaded,
@@ -3485,7 +3780,9 @@ function FeedList({
     // space-y-2.5 (10px) instead of space-y-2 (8px) — a small bump that
     // makes adjacent message cards read as distinct without bloating the
     // feed when conversations get active. Polish-only.
-    <section className="space-y-2.5">
+    // ref drives the initial-landing ResizeObserver (re-land as lazy
+    // media / link previews settle).
+    <section ref={feedSectionRef} className="space-y-2.5">
       {/* Subtle "Refreshing…" pill. Only shows after a cache-hydration
           first paint while the bootstrap fetch is still in flight — so
           the user knows the feed is being updated without a full
@@ -3544,12 +3841,21 @@ function FeedList({
         })
       )}
       {/*
-        Auto-scroll is now driven by a manual window.scrollTo() in the
-        scroll effect, which reads the latest message's getBoundingClientRect
-        directly. We rely on main's pb-[18rem+safe] to give the document
-        enough scrollable range for that target to land in the lower-middle
-        of visible feed. No sentinel element here.
+        Real in-feed bottom sentinel. Its height is MEASURED from the bottom
+        chrome (composer + the gap the nav occupies + safe-area + comfort), so
+        the document has exactly enough scrollable range for the latest
+        message to land clear of the composer — instead of relying on a
+        hard-coded page padding. Its TOP edge also drives near-bottom
+        detection (distance from here to the composer top). Only rendered with
+        messages present; empty/loading/error states don't need the reserve.
       */}
+      {state.messages.length > 0 && (
+        <div
+          ref={bottomSentinelRef}
+          aria-hidden="true"
+          style={{ height: sentinelHeight }}
+        />
+      )}
     </section>
   );
 }

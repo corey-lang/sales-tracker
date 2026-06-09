@@ -152,6 +152,9 @@ export function BottomNav({
 
   return (
     <nav
+      // Stable id so the Juice Box feed can measure the real nav height when
+      // sizing its bottom sentinel / scroll math (no hard-coded rem guess).
+      id="app-bottom-nav"
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/70"
       style={{
