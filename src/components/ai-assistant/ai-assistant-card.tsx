@@ -54,7 +54,7 @@ export function AiAssistantCard({
         </CardHeader>
         <CardContent>
           <Button size="sm" onClick={() => setOpen(true)}>
-            Open Ask Smitty
+            Ask Smitty
           </Button>
         </CardContent>
       </Card>
