@@ -39,11 +39,12 @@ import {
 } from "./types";
 import {
   type CoverageAnswer,
+  type CoverageNarrowingContext,
   buildCitation,
-  classifyCoverageIntent,
-  detectMentions,
+  clarifyAnswer,
   formatBrochureCitation,
   noStateRefusal,
+  planCoverageTurn,
   refusal,
   renderAddons,
   renderCoverageItem,
@@ -489,15 +490,24 @@ async function loadSynonyms(state: string): Promise<SynonymEntry[]> {
 /**
  * Answers a coverage/pricing/plan question for one AE, grounded ONLY in their
  * state's current, approved brochure. Returns a grounded answer (with
- * citations) or a refusal. NEVER falls back to generic reasoning and NEVER
- * reads another state's documents.
+ * citations), a clarify (a narrowing question + chips, no citations), or a
+ * refusal. NEVER falls back to generic reasoning and NEVER reads another
+ * state's documents.
  *
  * `stateCode` is the AE's assigned state (null when unset → refusal). The chat
- * route is responsible for deciding a message is on-topic before calling this.
+ * route decides a turn belongs here (fresh coverage question OR an in-progress
+ * LOCAL coverage flow) before calling this.
+ *
+ * `context`/`step` carry the LOCAL narrowing state the client echoes back each
+ * turn (entirely separate from any Cogent thread). When present, a bare chip
+ * value like "Epic" is interpreted as the answer to `step`, with prior slots
+ * (e.g. coverageItem "HVAC") preserved from `context`.
  */
 export async function answerCoverageQuestion(
   stateCode: string | null,
   message: string,
+  context?: CoverageNarrowingContext,
+  step?: string,
 ): Promise<CoverageAnswer> {
   if (!stateCode) return noStateRefusal();
   const state = stateCode.trim().toUpperCase();
@@ -515,11 +525,16 @@ export async function answerCoverageQuestion(
     loadSynonyms(state),
   ]);
 
-  const intent = classifyCoverageIntent(message);
-  const plans = detectMentions(message, vocab.plans, synonyms, "plan");
-  const items = detectMentions(message, vocab.items, synonyms, "coverage_item");
+  const plan = planCoverageTurn({ message, vocab, synonyms, context, step });
 
-  switch (intent) {
+  switch (plan.action) {
+    case "clarify": {
+      // Loop guard: a narrowing question with no options can't be answered —
+      // refuse cleanly rather than emit empty chips that strand the AE.
+      if (plan.options.length === 0) return refusal(state);
+      return clarifyAnswer(plan.step, plan.prompt, plan.options, plan.context);
+    }
+
     case "list_plans": {
       if (vocab.plans.length === 0) return refusal(state);
       return renderPlanList(
@@ -533,13 +548,11 @@ export async function answerCoverageQuestion(
     }
 
     case "compare": {
-      if (plans.length < 2) {
-        return refusal(
-          state,
-          "Tell me the two plan names you'd like me to compare.",
-        );
-      }
-      const result = await coverageService.comparePlans(state, plans[0], plans[1]);
+      const result = await coverageService.comparePlans(
+        state,
+        plan.planA,
+        plan.planB,
+      );
       if (result.kind === "no_data") return refusal(state);
       return renderComparison(
         result.planA,
@@ -567,10 +580,7 @@ export async function answerCoverageQuestion(
     }
 
     case "pricing": {
-      if (plans.length === 0) {
-        return refusal(state, "Which plan's price would you like?");
-      }
-      const result = await coverageService.getPlanPricing(state, plans[0]);
+      const result = await coverageService.getPlanPricing(state, plan.plan);
       if (result.kind === "no_data") return refusal(state);
       return renderPlanPricing(
         result.pricing,
@@ -582,58 +592,59 @@ export async function answerCoverageQuestion(
       );
     }
 
-    case "coverage":
-    default: {
-      if (items.length === 0) {
-        return refusal(
-          state,
-          "Tell me the specific system, appliance, or add-on you're asking about.",
-        );
-      }
-      const item = items[0];
-      // "Does <plan> cover <item>?" — a plan was named too.
-      if (plans.length > 0) {
-        const result = await coverageService.getCoverageItem(state, plans[0], item);
-        if (result.kind === "no_data") {
-          return refusal(
-            state,
-            `The current brochure doesn't address ${item} for the ${plans[0]} plan.`,
-          );
-        }
-        if (result.kind === "unspecified") {
-          return renderCoverageItem(
-            { planName: result.planName, coverageItem: result.coverageItem, included: null, coverageLimitText: null },
-            buildCitation(
-              result.source.brochureTitle,
-              result.source.brochureVersion,
-              result.sourcePage,
-            ),
-          );
-        }
-        return renderCoverageItem(
-          result.item,
-          buildCitation(
-            result.source.brochureTitle,
-            result.source.brochureVersion,
-            result.item.sourcePage,
-          ),
-        );
-      }
-      // "Which plans include <item>?"
-      const result = await coverageService.getPlansIncluding(state, item);
+    case "plans_including": {
+      const result = await coverageService.getPlansIncluding(state, plan.item);
       if (result.kind === "no_data") {
         return refusal(
           state,
-          `The current brochure doesn't list ${item} as included in any plan.`,
+          `The current brochure doesn't list ${plan.item} as included in any plan.`,
         );
       }
       return renderPlansIncluding(
-        item,
+        plan.item,
         result.planNames,
         buildCitation(
           result.source.brochureTitle,
           result.source.brochureVersion,
           result.pages,
+        ),
+      );
+    }
+
+    case "coverage_item":
+    default: {
+      const result = await coverageService.getCoverageItem(
+        state,
+        plan.plan,
+        plan.item,
+      );
+      if (result.kind === "no_data") {
+        return refusal(
+          state,
+          `The current brochure doesn't address ${plan.item} for the ${plan.plan} plan.`,
+        );
+      }
+      if (result.kind === "unspecified") {
+        return renderCoverageItem(
+          {
+            planName: result.planName,
+            coverageItem: result.coverageItem,
+            included: null,
+            coverageLimitText: null,
+          },
+          buildCitation(
+            result.source.brochureTitle,
+            result.source.brochureVersion,
+            result.sourcePage,
+          ),
+        );
+      }
+      return renderCoverageItem(
+        result.item,
+        buildCitation(
+          result.source.brochureTitle,
+          result.source.brochureVersion,
+          result.item.sourcePage,
         ),
       );
     }

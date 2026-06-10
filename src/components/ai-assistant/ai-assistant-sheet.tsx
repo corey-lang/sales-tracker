@@ -36,6 +36,17 @@ type Citation = {
 /** The state the answer was grounded in, for the "Answering using …" banner. */
 type StateContext = { code: string; label: string };
 
+/** Accumulated LOCAL coverage-narrowing slots. Round-tripped to the server each
+ *  turn so a later chip tap ("Epic") still carries the earlier slot ("HVAC").
+ *  Kept entirely separate from the Cogent threadId/currentStep channel. */
+type CoverageContext = {
+  intent: string;
+  coverageItem?: string;
+  planName?: string;
+  comparePlans?: string[];
+  coverageAudience?: string;
+};
+
 /** Server contract for POST /api/ai/chat. */
 type ChatResponse = {
   reply: string;
@@ -50,6 +61,10 @@ type ChatResponse = {
   grounded?: boolean;
   stateContext?: StateContext | null;
   citations?: Citation[];
+  /** LOCAL coverage-narrowing channel — set only on a clarify turn. */
+  localFlow?: "coverage" | null;
+  coverageStep?: string | null;
+  coverageContext?: CoverageContext | null;
 };
 
 type ChatMessage = {
@@ -105,12 +120,21 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
-  // Guided-flow state. threadId/currentStep keep follow-up option taps in the
-  // same agent flow; pendingOptions are the chips shown under the latest reply.
+  // COGENT guided-flow state. threadId/currentStep keep follow-up option taps in
+  // the same external-agent flow; pendingOptions are the chips shown under the
+  // latest reply.
   const [threadId, setThreadId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [department, setDepartment] = useState<string | null>(null);
   const [pendingOptions, setPendingOptions] = useState<AnswerOption[]>([]);
+  // LOCAL coverage-narrowing state — a separate channel from the Cogent fields
+  // above. While localFlow === "coverage" we send these (and NOT threadId/
+  // currentStep), so coverage clarification chips can never route to Cogent.
+  const [localFlow, setLocalFlow] = useState<"coverage" | null>(null);
+  const [coverageStep, setCoverageStep] = useState<string | null>(null);
+  const [coverageContext, setCoverageContext] = useState<CoverageContext | null>(
+    null,
+  );
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -191,12 +215,20 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
       const trimmed = text.trim();
       if (!trimmed || inFlightRef.current) return;
 
-      // Guided-flow lock: while the agent is waiting on a required choice,
-      // don't send arbitrary typed text — it can't advance the flow and causes
-      // the agent to repeat its question. Option taps (fromOption) are exempt.
-      if (!opts?.fromOption && pendingOptions.length > 0) {
+      // Guided-flow lock: while the COGENT agent is waiting on a required
+      // choice, don't send arbitrary typed text — it can't advance the flow and
+      // causes the agent to repeat its question. Option taps (fromOption) are
+      // exempt. LOCAL coverage narrowing is exempt too: the server validates
+      // typed text against the current step's vocabulary and re-asks if it
+      // doesn't match, so free-text is safe (and the "Ask a new question" reset
+      // is always available).
+      if (
+        !opts?.fromOption &&
+        pendingOptions.length > 0 &&
+        localFlow !== "coverage"
+      ) {
         setError(
-          "Please choose one of the options above so I can continue this coverage flow.",
+          "Please choose one of the options above so I can continue this flow.",
         );
         return;
       }
@@ -232,33 +264,62 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             // Send the session id once the first response established it so
             // the agent keeps conversation state across turns.
             ...(sessionId ? { sessionId } : {}),
-            // Echo back the guided-flow context so option taps resume the
-            // same flow — including the department, so a quote flow's option
-            // taps stay routed to "plans".
-            ...(threadId ? { threadId } : {}),
-            ...(currentStep ? { currentStep } : {}),
-            ...(department ? { department } : {}),
+            // Two MUTUALLY EXCLUSIVE flow channels:
+            //  - LOCAL coverage narrowing: send localFlow + step + context and
+            //    DO NOT send the Cogent threadId/currentStep (keeps them
+            //    isolated, so a coverage chip can't resume a Cogent thread).
+            //  - Otherwise the Cogent guided flow: echo threadId/currentStep/
+            //    department so option taps stay in the same external flow.
+            ...(localFlow === "coverage"
+              ? {
+                  localFlow,
+                  ...(coverageStep ? { coverageStep } : {}),
+                  ...(coverageContext ? { coverageContext } : {}),
+                }
+              : {
+                  ...(threadId ? { threadId } : {}),
+                  ...(currentStep ? { currentStep } : {}),
+                  ...(department ? { department } : {}),
+                }),
           }),
         });
         if (data.sessionId) setSessionId(data.sessionId);
-        // Mirror the server's flow state every turn. When the flow ends the
-        // server omits threadId/currentStep, so coalesce to null to clear them
-        // — otherwise a stale threadId would keep resuming a finished workflow.
-        setThreadId(data.threadId ?? null);
-        setCurrentStep(data.currentStep ?? null);
-        setDepartment(data.department ?? null);
+        // Mirror the server's flow state every turn, keeping the two channels
+        // isolated. A LOCAL coverage clarify turn (data.localFlow === "coverage")
+        // stores the local slots AND clears any Cogent thread, so foreign
+        // guided-flow state can never reroute a coverage chip. Any other turn
+        // clears the local flow and mirrors the Cogent fields.
+        if (data.localFlow === "coverage") {
+          setLocalFlow("coverage");
+          setCoverageStep(data.coverageStep ?? null);
+          setCoverageContext(data.coverageContext ?? null);
+          setThreadId(null);
+          setCurrentStep(null);
+          setDepartment(null);
+        } else {
+          setLocalFlow(null);
+          setCoverageStep(null);
+          setCoverageContext(null);
+          setThreadId(data.threadId ?? null);
+          setCurrentStep(data.currentStep ?? null);
+          setDepartment(data.department ?? null);
+        }
         setMessages((prev) => [
           ...prev,
           {
             id: nextId(),
             role: "assistant",
             content: data.reply,
-            // Show the brochure sources + state banner only on a grounded
-            // coverage answer — never on a refusal or a non-coverage reply, so
-            // the chip's presence is itself the "this came from the document"
-            // trust signal.
+            // Source chips appear ONLY on a grounded coverage answer — never on
+            // a refusal, clarify, or non-coverage reply, so the chip's presence
+            // is itself the "this came from the document" trust signal. The
+            // state banner may also show on a clarify turn (it's scope context,
+            // not a citation).
             citations: data.grounded ? data.citations ?? [] : [],
-            stateContext: data.grounded ? data.stateContext ?? null : null,
+            stateContext:
+              data.department === "coverage"
+                ? data.stateContext ?? null
+                : null,
           },
         ]);
 
@@ -287,8 +348,29 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         inFlightRef.current = false;
       }
     },
-    [sessionId, threadId, currentStep, department, pendingOptions, listening, stop],
+    [
+      sessionId,
+      threadId,
+      currentStep,
+      department,
+      localFlow,
+      coverageStep,
+      coverageContext,
+      pendingOptions,
+      listening,
+      stop,
+    ],
   );
+
+  /** Clears the LOCAL coverage-narrowing flow so the next message is treated as
+   *  a fresh question. The explicit escape from a guided coverage flow. */
+  const resetLocalFlow = useCallback(() => {
+    setLocalFlow(null);
+    setCoverageStep(null);
+    setCoverageContext(null);
+    setPendingOptions([]);
+    setError(null);
+  }, []);
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Desktop affordance: Enter sends, Shift+Enter inserts a newline. On touch
@@ -430,11 +512,14 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
               </div>
             )}
             {/* Guided-flow answer chips, shown under the latest assistant
-                reply. Tapping sends the option's value but shows its label. */}
+                reply. Tapping sends the option's value but shows its label. In a
+                LOCAL coverage flow the AE can also type an answer or reset. */}
             {!sending && pendingOptions.length > 0 && (
               <div className="flex flex-col gap-1.5 pt-1">
                 <p className="text-xs font-medium text-muted-foreground">
-                  Choose one to continue:
+                  {localFlow === "coverage"
+                    ? "Tap an option — or type your answer:"
+                    : "Choose one to continue:"}
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {pendingOptions.map((opt, i) => (
@@ -454,6 +539,15 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                     </button>
                   ))}
                 </div>
+                {localFlow === "coverage" && (
+                  <button
+                    type="button"
+                    onClick={resetLocalFlow}
+                    className="self-start text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  >
+                    Ask a new question
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -476,7 +570,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             Listening… speak now, then tap stop to review.
           </div>
         )}
-        {pendingOptions.length > 0 && (
+        {pendingOptions.length > 0 && localFlow !== "coverage" && (
           <p className="mb-2 text-xs text-muted-foreground">
             Please choose an option above to continue this step.
           </p>

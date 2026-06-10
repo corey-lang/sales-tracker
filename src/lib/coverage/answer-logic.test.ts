@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ANY_PLAN_VALUE,
+  AUDIENCE_OPTIONS,
   buildCitation,
+  clarifyAnswer,
   classifyCoverageIntent,
   detectMentions,
   formatBrochureCitation,
@@ -10,6 +13,7 @@ import {
   noStateRefusal,
   normalizeTerm,
   pageSuffix,
+  planCoverageTurn,
   refusal,
   renderAddons,
   renderCoverageItem,
@@ -17,7 +21,9 @@ import {
   renderPlanList,
   renderPlanPricing,
   renderPlansIncluding,
+  shouldAnswerFromCoverage,
   stateLabel,
+  toOptions,
   uniquePages,
   type SynonymEntry,
 } from "./answer-logic";
@@ -258,5 +264,283 @@ describe("answer + refusal templates", () => {
     expect(a.text).toContain("Epic vs Elevated");
     expect(a.citations[0].label).toBe("Utah Brochure 2025.7, pp. 3, 5");
     expect(a.citations[0].pages).toEqual([3, 5]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Local coverage narrowing (Phase 1)
+// ---------------------------------------------------------------------------
+
+const VOCAB = {
+  plans: ["Essential", "Elevated", "Totally Elevated", "Epic"],
+  items: ["HVAC", "Pool", "Refrigerator"],
+  addons: ["Pool Coverage", "Guest House"],
+};
+const NO_SYN: SynonymEntry[] = [];
+
+describe("shouldAnswerFromCoverage (routing guarantee)", () => {
+  it("routes a fresh coverage question to coverage", () => {
+    expect(shouldAnswerFromCoverage(undefined, "Does Epic cover HVAC?")).toBe(
+      true,
+    );
+  });
+  it("routes ANY message to coverage while a local flow is active", () => {
+    // Bare chip values that do NOT read as coverage questions must still be
+    // intercepted by the marker — never fall through to Cogent.
+    for (const v of ["Epic", "homeowner", "real_estate", "sellers", "HVAC"]) {
+      expect(shouldAnswerFromCoverage("coverage", v)).toBe(true);
+    }
+  });
+  it("does NOT route a bare chip value without the marker (proves marker is required)", () => {
+    expect(shouldAnswerFromCoverage(undefined, "homeowner")).toBe(false);
+    expect(shouldAnswerFromCoverage(undefined, "real_estate")).toBe(false);
+  });
+  it("leaves a generic non-coverage message alone", () => {
+    expect(shouldAnswerFromCoverage(undefined, "help me plan my week")).toBe(
+      false,
+    );
+    expect(shouldAnswerFromCoverage(null, "hello there")).toBe(false);
+  });
+});
+
+describe("planCoverageTurn — clarify on under-specified questions", () => {
+  it('"Does it cover HVAC?" asks for a plan and preserves the item', () => {
+    const plan = planCoverageTurn({
+      message: "Does it cover HVAC?",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.step).toBe("coverage:plan");
+    expect(plan.context.coverageItem).toBe("HVAC");
+    const values = plan.options.map((o) => o.value);
+    expect(values).toContain("Epic");
+    expect(values).toContain(ANY_PLAN_VALUE);
+  });
+
+  it("pricing with no plan asks for plan options", () => {
+    const plan = planCoverageTurn({
+      message: "What does this cost?",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.step).toBe("pricing:plan");
+    expect(plan.options.map((o) => o.value)).toEqual(VOCAB.plans);
+  });
+
+  it("comparison with no plans asks for plan options", () => {
+    const plan = planCoverageTurn({
+      message: "Compare our plans",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.step).toBe("compare:plans");
+    expect(plan.options.length).toBeGreaterThan(0);
+  });
+
+  it("missing item asks for an item (capped chip set)", () => {
+    const plan = planCoverageTurn({
+      message: "Epic",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.step).toBe("coverage:item");
+  });
+});
+
+describe("planCoverageTurn — slot preservation across turns", () => {
+  it("selecting Epic after HVAC runs a coverage_item lookup with both slots", () => {
+    const plan = planCoverageTurn({
+      message: "Epic",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "coverage", coverageItem: "HVAC" },
+      step: "coverage:plan",
+    });
+    expect(plan).toEqual({
+      action: "coverage_item",
+      plan: "Epic",
+      item: "HVAC",
+    });
+  });
+
+  it("selecting a plan after a pricing question runs a pricing lookup", () => {
+    const plan = planCoverageTurn({
+      message: "Elevated",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "pricing" },
+      step: "pricing:plan",
+    });
+    expect(plan).toEqual({ action: "pricing", plan: "Elevated" });
+  });
+
+  it("supplying the second plan completes a comparison", () => {
+    const plan = planCoverageTurn({
+      message: "Epic",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "compare", comparePlans: ["Elevated"] },
+      step: "compare:plans",
+    });
+    expect(plan.action).toBe("compare");
+    if (plan.action !== "compare") return;
+    expect(new Set([plan.planA, plan.planB])).toEqual(
+      new Set(["Elevated", "Epic"]),
+    );
+  });
+
+  it('"Any plan" routes to a which-plans-include lookup', () => {
+    const plan = planCoverageTurn({
+      message: ANY_PLAN_VALUE,
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "coverage", coverageItem: "HVAC" },
+      step: "coverage:plan",
+    });
+    expect(plan).toEqual({ action: "plans_including", item: "HVAC" });
+  });
+});
+
+describe("planCoverageTurn — fully specified answers immediately", () => {
+  it('"Does Epic cover HVAC?" runs the lookup without clarifying', () => {
+    const plan = planCoverageTurn({
+      message: "Does Epic cover HVAC?",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan).toEqual({
+      action: "coverage_item",
+      plan: "Epic",
+      item: "HVAC",
+    });
+  });
+
+  it('"Which plans include HVAC?" answers directly', () => {
+    const plan = planCoverageTurn({
+      message: "Which plans include HVAC?",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan).toEqual({ action: "plans_including", item: "HVAC" });
+  });
+
+  it("compare with two named plans runs the comparison", () => {
+    const plan = planCoverageTurn({
+      message: "Compare Epic and Essential",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+    });
+    expect(plan.action).toBe("compare");
+    if (plan.action !== "compare") return;
+    expect(new Set([plan.planA, plan.planB])).toEqual(
+      new Set(["Epic", "Essential"]),
+    );
+  });
+
+  it("list-plans and add-ons need no narrowing", () => {
+    expect(
+      planCoverageTurn({
+        message: "What plans do we offer?",
+        vocab: VOCAB,
+        synonyms: NO_SYN,
+      }).action,
+    ).toBe("list_plans");
+    expect(
+      planCoverageTurn({
+        message: "What add-ons are available?",
+        vocab: VOCAB,
+        synonyms: NO_SYN,
+      }).action,
+    ).toBe("addons");
+  });
+});
+
+describe("planCoverageTurn — free-text only when it matches slot vocabulary", () => {
+  it("typed plan name resolves like a chip tap", () => {
+    const plan = planCoverageTurn({
+      message: "epic please",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "coverage", coverageItem: "HVAC" },
+      step: "coverage:plan",
+    });
+    expect(plan).toEqual({
+      action: "coverage_item",
+      plan: "Epic",
+      item: "HVAC",
+    });
+  });
+
+  it("unrecognized free-text re-asks the same step (no guess)", () => {
+    const plan = planCoverageTurn({
+      message: "purple monkey",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "coverage", coverageItem: "HVAC" },
+      step: "coverage:plan",
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.step).toBe("coverage:plan");
+    expect(plan.context.planName).toBeUndefined();
+  });
+});
+
+describe("planCoverageTurn — audience is context only", () => {
+  it("stores a coverage audience without changing the lookup path", () => {
+    const plan = planCoverageTurn({
+      message: "homeowner",
+      vocab: VOCAB,
+      synonyms: NO_SYN,
+      context: { intent: "coverage", coverageItem: "HVAC" },
+      step: "audience",
+    });
+    expect(plan.action).toBe("clarify");
+    if (plan.action !== "clarify") return;
+    expect(plan.context.coverageAudience).toBe("homeowner");
+    // Still narrowing to a plan — audience did not resolve or filter anything.
+    expect(plan.step).toBe("coverage:plan");
+  });
+
+  it("exposes the three coverage-type options", () => {
+    expect(AUDIENCE_OPTIONS.map((o) => o.value)).toEqual([
+      "real_estate",
+      "homeowner",
+      "sellers",
+    ]);
+  });
+});
+
+describe("clarifyAnswer + grounded citation invariants", () => {
+  it("a clarify carries chips/step/context and NO citations", () => {
+    const a = clarifyAnswer(
+      "coverage:plan",
+      "Which plan are you asking about for HVAC?",
+      toOptions(["Epic", "Elevated"]),
+      { intent: "coverage", coverageItem: "HVAC" },
+    );
+    expect(a.kind).toBe("clarify");
+    expect(a.citations).toEqual([]);
+    expect(a.coverageStep).toBe("coverage:plan");
+    expect(a.answerOptions).toHaveLength(2);
+    expect(a.context?.coverageItem).toBe("HVAC");
+  });
+
+  it("a grounded answer preserves its citation", () => {
+    const c = buildCitation("Utah Brochure", "2025.7", 4);
+    const g = renderCoverageItem(
+      { planName: "Epic", coverageItem: "HVAC", included: true, coverageLimitText: null },
+      c,
+    );
+    expect(g.kind).toBe("grounded");
+    expect(g.citations).toEqual([c]);
   });
 });

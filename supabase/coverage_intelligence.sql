@@ -14,12 +14,16 @@
 --     plan_addons         — per (brochure, add-on) catalog + price + limits
 --     coverage_synonyms   — maps typed terms → canonical brochure terms
 --
--- PRIMARY SOURCE OF TRUTH
---   Coverage Intelligence is the PRIMARY answer source for coverage lookups,
---   plan comparisons, limits, add-ons, and brochure-backed pricing. The
---   external AI agent is the FALLBACK, used only when these tables can't answer
---   (no current brochure for the state, plan/item not found, or no approved
---   row). The Coverage Service (src/lib/coverage/) enforces that order.
+-- SOLE SOURCE OF TRUTH (no fallback)
+--   Coverage Intelligence is the ONLY answer source for coverage lookups, plan
+--   comparisons, limits, add-ons, and brochure-backed pricing. When these
+--   tables can't answer (no current brochure for the state, plan/item not
+--   found, or no approved row), the assistant REFUSES from the docs ("I
+--   couldn't find that in the current <State> brochure") or asks a narrowing
+--   question — it NEVER falls back to the external AI agent for coverage/
+--   pricing/plan questions. The external agent only ever handles NON-coverage
+--   chat (app help, general coaching). The Coverage Service (src/lib/coverage/)
+--   enforces this: coverage turns are answered, clarified, or refused here.
 --
 -- REVIEW WORKFLOW / CONFIDENCE / PROVENANCE
 --   Every extracted fact row carries: source_page (which brochure page),

@@ -12,9 +12,10 @@ import {
 } from "@/lib/ai/sales-knowledge";
 import { answerCoverageQuestion } from "@/lib/coverage/service";
 import {
-  isCoverageQuestion,
+  shouldAnswerFromCoverage,
   stateLabel,
   type CoverageAnswer,
+  type CoverageNarrowingContext,
 } from "@/lib/coverage/answer-logic";
 
 // POST /api/ai/chat
@@ -157,13 +158,32 @@ const ChatSchema = z.object({
   message: z.string().trim().min(1, "Message cannot be empty.").max(4000),
   sessionId: z.string().trim().min(1).max(200).optional(),
   // Forwarded upstream when present so an in-progress guided flow
-  // (status "awaiting_user_input") resumes on the same thread/step.
+  // (status "awaiting_user_input") resumes on the same thread/step. These are
+  // the COGENT (external agent) flow fields — never used for local coverage.
   threadId: z.string().trim().min(1).max(200).optional(),
   currentStep: z.string().trim().min(1).max(200).optional(),
   // Echoed back by the client to keep a guided flow in the department it
   // started in (sticky routing). Only "sales"/"plans" are honored; anything
   // else is ignored and routing falls back to per-message intent.
   department: z.string().trim().min(1).max(40).optional(),
+  // LOCAL coverage narrowing fields — a separate channel from the Cogent flow
+  // above. When localFlow === "coverage", the turn is intercepted by Coverage
+  // Intelligence BEFORE any external-agent routing, so a bare chip value like
+  // "Epic"/"homeowner" can never fall through to Cogent. The client must NOT
+  // send threadId/currentStep while in a local coverage flow.
+  localFlow: z.literal("coverage").optional(),
+  coverageStep: z.string().trim().min(1).max(64).optional(),
+  coverageContext: z
+    .object({
+      intent: z.enum(["list_plans", "compare", "pricing", "addons", "coverage"]),
+      coverageItem: z.string().max(200).optional(),
+      planName: z.string().max(200).optional(),
+      comparePlans: z.array(z.string().max(200)).max(8).optional(),
+      coverageAudience: z
+        .enum(["real_estate", "homeowner", "sellers"])
+        .optional(),
+    })
+    .optional(),
 });
 
 /**
@@ -743,20 +763,29 @@ export async function POST(req: Request) {
     // back. Cross-state answers are impossible: the lookup is scoped to
     // `me.state_code`.
     //
-    // This runs even when the client echoes a threadId/currentStep: a NEW
-    // coverage question must not be routed to the external assistant just
-    // because a stale guided flow is in progress. `isCoverageQuestion` is a
-    // dedicated word-boundary detector (NOT the static sales-knowledge matcher)
-    // so normal phrasings — "Does Epic cover HVAC?", "Is refrigerator covered?"
-    // — are caught, while generic "plan my week" is not.
-    if (isCoverageQuestion(body.message)) {
+    // Intercept BEFORE any external-agent routing. Two ways a turn lands here:
+    //   1. body.localFlow === "coverage" — an in-progress LOCAL narrowing flow.
+    //      The message is a chip value/answer ("Epic", "homeowner", "HVAC") that
+    //      may NOT itself read as a coverage question, so it must be matched on
+    //      the marker, not the words — otherwise it would fall through to Cogent.
+    //   2. A fresh coverage question ("Does Epic cover HVAC?") — caught by the
+    //      dedicated word-boundary detector, even mid-Cogent-flow, so a new
+    //      coverage question is never routed to the external assistant.
+    // Either way the answer comes ONLY from Coverage Intelligence (grounded,
+    // clarify, or refusal) — never Cogent generic prose.
+    if (shouldAnswerFromCoverage(body.localFlow, body.message)) {
       const stateContext = me.state_code
         ? { code: me.state_code, label: stateLabel(me.state_code) }
         : null;
 
       let answer: CoverageAnswer;
       try {
-        answer = await answerCoverageQuestion(me.state_code, body.message);
+        answer = await answerCoverageQuestion(
+          me.state_code,
+          body.message,
+          body.coverageContext as CoverageNarrowingContext | undefined,
+          body.coverageStep,
+        );
       } catch (err) {
         // No generic fallback for coverage/pricing — surface a safe, sourced-
         // data-unavailable message instead of an ungrounded guess.
@@ -772,23 +801,35 @@ export async function POST(req: Request) {
           grounded: false,
           stateContext,
           citations: [],
+          localFlow: null,
+          coverageStep: null,
+          coverageContext: null,
         });
       }
 
+      const isClarify = answer.kind === "clarify";
       console.log(
         `[ai-chat] coverage: state=${me.state_code ?? "(none)"} ` +
-          `kind=${answer.kind} citations=${answer.citations.length}`,
+          `kind=${answer.kind} citations=${answer.citations.length} ` +
+          `localFlow=${isClarify ? "coverage" : "(none)"} ` +
+          `coverageStep=${isClarify ? answer.coverageStep ?? "(none)" : "(none)"}`,
       );
       return Response.json({
         reply: answer.text,
         sessionId: body.sessionId ?? null,
-        answerOptions: [],
+        // Chips only on a clarify turn. threadId/currentStep stay null — local
+        // coverage NEVER uses the Cogent thread channel.
+        answerOptions: isClarify ? answer.answerOptions ?? [] : [],
         threadId: null,
         currentStep: null,
         department: "coverage",
         grounded: answer.kind === "grounded",
         stateContext,
         citations: answer.citations,
+        // LOCAL narrowing channel — set only while a clarify is pending.
+        localFlow: isClarify ? "coverage" : null,
+        coverageStep: isClarify ? answer.coverageStep ?? null : null,
+        coverageContext: isClarify ? answer.context ?? null : null,
       });
     }
 

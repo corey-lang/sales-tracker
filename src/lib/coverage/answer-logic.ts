@@ -206,6 +206,74 @@ export type CoverageIntent =
   | "addons"
   | "coverage";
 
+// ---------------------------------------------------------------------------
+// Local narrowing (Phase 1) — deterministic clarify slots
+// ---------------------------------------------------------------------------
+
+/** One guided-flow chip surfaced to the client. label is shown, value is sent. */
+export type AnswerOption = { label: string; value: string };
+
+/** Coverage-type audience. PHASE 1: CONTEXT ONLY — the authoritative tables have
+ *  no audience dimension yet, so this is collected for narrowing but NEVER
+ *  filters rows and answers are NEVER presented as audience-specific. */
+export type CoverageAudience = "real_estate" | "homeowner" | "sellers";
+
+/** Accumulated narrowing slots. Round-tripped to the client and echoed back each
+ *  turn so a later chip tap ("Epic") still carries the earlier slot ("HVAC").
+ *  This is the LOCAL flow's state — entirely separate from Cogent's
+ *  threadId/currentStep. */
+export type CoverageNarrowingContext = {
+  intent: CoverageIntent;
+  coverageItem?: string;
+  planName?: string;
+  /** Plans collected so far for a comparison (need two). */
+  comparePlans?: string[];
+  coverageAudience?: CoverageAudience;
+};
+
+/** The three coverage-type chips. Phase 1 surfaces them for parity with the
+ *  upstream `coverageType` step; the value is stored as context only. */
+export const AUDIENCE_OPTIONS: AnswerOption[] = [
+  { label: "Real Estate", value: "real_estate" },
+  { label: "Homeowner", value: "homeowner" },
+  { label: "Sellers", value: "sellers" },
+];
+
+const AUDIENCE_VALUES = new Set<string>(["real_estate", "homeowner", "sellers"]);
+
+/** Sentinel chip value meaning "look across all plans" on a coverage:plan step —
+ *  routes to a which-plans-include lookup instead of a single-plan answer. */
+export const ANY_PLAN_VALUE = "__any_plan__";
+
+/** Cap on item chips offered when a coverage question is missing its item. */
+const MAX_ITEM_OPTIONS = 8;
+
+/** {label,value} chips from canonical names (label === value). */
+export function toOptions(names: string[]): AnswerOption[] {
+  return names.map((n) => ({ label: n, value: n }));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+/** "Which plan(s) include X" phrasings answer directly rather than narrowing. */
+const WHICH_PLANS_PATTERNS = [
+  "which plan",
+  "which plans",
+  "what plan has",
+  "what plans have",
+  "what plan includes",
+  "what plans include",
+  "which plan includes",
+  "which plans include",
+];
+
+function asksWhichPlans(message: string): boolean {
+  const t = normalizeTerm(message);
+  return WHICH_PLANS_PATTERNS.some((p) => t.includes(p));
+}
+
 const COMPARE_KEYWORDS = ["compare", " vs ", " vs.", "versus", "difference between"];
 const LIST_PLANS_KEYWORDS = [
   "what plans",
@@ -368,13 +436,30 @@ export function includedToKind(included: boolean | null): CoverageKind {
 // Answer + refusal templates
 // ---------------------------------------------------------------------------
 
-/** The outcome the service hands back to the chat route. A grounded answer
- *  always has ≥1 citation; a refusal has none. */
+/** The outcome the service hands back to the chat route.
+ *   - "grounded" → always has ≥1 citation.
+ *   - "refusal"  → has none; names the state.
+ *   - "clarify"  → a narrowing question; NO citations, carries the next step's
+ *                  chips and the accumulated context to round-trip. */
 export type CoverageAnswer = {
-  kind: "grounded" | "refusal";
+  kind: "grounded" | "refusal" | "clarify";
   text: string;
   citations: Citation[];
+  /** Present only on kind === "clarify". */
+  coverageStep?: string;
+  answerOptions?: AnswerOption[];
+  context?: CoverageNarrowingContext;
 };
+
+/** Builds a clarify outcome — a narrowing question with chips, never cited. */
+export function clarifyAnswer(
+  coverageStep: string,
+  text: string,
+  answerOptions: AnswerOption[],
+  context: CoverageNarrowingContext,
+): CoverageAnswer {
+  return { kind: "clarify", text, citations: [], coverageStep, answerOptions, context };
+}
 
 /** Standard "couldn't find it" refusal — names the state so it's obvious which
  *  brochure was searched. No citations (nothing was found). */
@@ -501,4 +586,205 @@ export function renderComparison(
     text: `${planA} vs ${planB}:\n${lines.join("\n")}`,
     citations: [citation],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Local narrowing state machine (Phase 1) — pure planner
+// ---------------------------------------------------------------------------
+
+/**
+ * Route decision (pure): should this turn be answered by Coverage Intelligence
+ * rather than the external agent? True when a LOCAL coverage flow is in progress
+ * (so a bare chip value like "Epic"/"homeowner" is intercepted) OR the message
+ * is a fresh coverage question. This is the guarantee that local coverage
+ * continuations NEVER fall through to Cogent generic prose.
+ */
+export function shouldAnswerFromCoverage(
+  localFlow: string | null | undefined,
+  message: string,
+): boolean {
+  if (localFlow === "coverage") return true;
+  return isCoverageQuestion(message);
+}
+
+/** The action the service should execute for a coverage turn. A "clarify" asks
+ *  the next narrowing question; every other action is a terminal authoritative
+ *  lookup (or list) the service renders + cites. */
+export type CoverageTurnPlan =
+  | { action: "list_plans" }
+  | { action: "addons" }
+  | { action: "coverage_item"; plan: string; item: string }
+  | { action: "plans_including"; item: string }
+  | { action: "pricing"; plan: string }
+  | { action: "compare"; planA: string; planB: string }
+  | {
+      action: "clarify";
+      step: string;
+      prompt: string;
+      options: AnswerOption[];
+      context: CoverageNarrowingContext;
+    };
+
+/** Folds a chip tap / vocabulary-matching free-text answer into the context,
+ *  keyed by the step it answers. A value that doesn't resolve to known
+ *  vocabulary is simply ignored — the planner then re-asks the same step, which
+ *  is how typed free-text is accepted ONLY when it matches the slot's vocabulary. */
+function mergeStepAnswer(
+  ctx: CoverageNarrowingContext,
+  step: string,
+  message: string,
+  vocab: { plans: string[]; items: string[] },
+  synonyms: SynonymEntry[],
+): void {
+  const planMatch = detectMentions(message, vocab.plans, synonyms, "plan")[0];
+  switch (step) {
+    case "coverage:plan":
+    case "pricing:plan": {
+      if (normalizeTerm(message) === ANY_PLAN_VALUE) {
+        ctx.planName = ANY_PLAN_VALUE;
+      } else if (planMatch) {
+        ctx.planName = planMatch;
+      }
+      break;
+    }
+    case "coverage:item": {
+      const itemMatch = detectMentions(
+        message,
+        vocab.items,
+        synonyms,
+        "coverage_item",
+      )[0];
+      if (itemMatch) ctx.coverageItem = itemMatch;
+      break;
+    }
+    case "compare:plans": {
+      if (planMatch) {
+        ctx.comparePlans = uniqueStrings([...(ctx.comparePlans ?? []), planMatch]);
+      }
+      break;
+    }
+    case "audience": {
+      const a = normalizeTerm(message);
+      if (AUDIENCE_VALUES.has(a)) ctx.coverageAudience = a as CoverageAudience;
+      break;
+    }
+  }
+}
+
+/**
+ * Deterministic narrowing planner. Given the message, the state's vocabulary,
+ * and any prior narrowing context/step, decides whether enough is known to run
+ * an authoritative lookup or which clarifying question to ask next.
+ *
+ * PURE: no I/O. The service feeds it DB-loaded vocabulary/synonyms and executes
+ * the returned action against the authoritative views. Intent is preserved
+ * across turns from `context.intent` (a chip value like "Epic" must not be
+ * re-classified); only a fresh turn classifies from the message.
+ */
+export function planCoverageTurn(input: {
+  message: string;
+  vocab: { plans: string[]; items: string[]; addons: string[] };
+  synonyms: SynonymEntry[];
+  context?: CoverageNarrowingContext;
+  step?: string;
+}): CoverageTurnPlan {
+  const { message, vocab, synonyms } = input;
+  const ctx: CoverageNarrowingContext = {
+    ...(input.context ?? { intent: "coverage" }),
+  };
+  if (input.step) mergeStepAnswer(ctx, input.step, message, vocab, synonyms);
+
+  const intent: CoverageIntent =
+    input.context?.intent ?? classifyCoverageIntent(message);
+  ctx.intent = intent;
+
+  const detectedPlans = detectMentions(message, vocab.plans, synonyms, "plan");
+  const detectedItems = detectMentions(
+    message,
+    vocab.items,
+    synonyms,
+    "coverage_item",
+  );
+
+  switch (intent) {
+    case "list_plans":
+      return { action: "list_plans" };
+
+    case "addons":
+      return { action: "addons" };
+
+    case "compare": {
+      const collected = uniqueStrings([
+        ...(ctx.comparePlans ?? []),
+        ...detectedPlans,
+      ]);
+      if (collected.length >= 2) {
+        return { action: "compare", planA: collected[0], planB: collected[1] };
+      }
+      ctx.comparePlans = collected;
+      const remaining = vocab.plans.filter((p) => !collected.includes(p));
+      return {
+        action: "clarify",
+        step: "compare:plans",
+        prompt:
+          collected.length === 0
+            ? "Which two plans should I compare? Pick the first."
+            : `Which plan should I compare with ${collected[0]}?`,
+        options: toOptions(remaining.length ? remaining : vocab.plans),
+        context: ctx,
+      };
+    }
+
+    case "pricing": {
+      const plan = ctx.planName ?? detectedPlans[0];
+      if (plan && plan !== ANY_PLAN_VALUE) {
+        return { action: "pricing", plan };
+      }
+      return {
+        action: "clarify",
+        step: "pricing:plan",
+        prompt: "Which plan's price would you like?",
+        options: toOptions(vocab.plans),
+        context: ctx,
+      };
+    }
+
+    case "coverage":
+    default: {
+      const item = ctx.coverageItem ?? detectedItems[0];
+      if (!item) {
+        return {
+          action: "clarify",
+          step: "coverage:item",
+          prompt: "Which system or appliance are you asking about?",
+          options: toOptions(vocab.items.slice(0, MAX_ITEM_OPTIONS)),
+          context: ctx,
+        };
+      }
+      ctx.coverageItem = item;
+
+      const plan = ctx.planName ?? detectedPlans[0];
+      if (plan === ANY_PLAN_VALUE) {
+        return { action: "plans_including", item };
+      }
+      if (plan) {
+        return { action: "coverage_item", plan, item };
+      }
+      // No plan yet: an explicit "which plans include X" answers directly;
+      // otherwise narrow to a plan (with an "Any plan" escape).
+      if (asksWhichPlans(message)) {
+        return { action: "plans_including", item };
+      }
+      return {
+        action: "clarify",
+        step: "coverage:plan",
+        prompt: `Which plan are you asking about for ${item}?`,
+        options: [
+          ...toOptions(vocab.plans),
+          { label: "Any plan", value: ANY_PLAN_VALUE },
+        ],
+        context: ctx,
+      };
+    }
+  }
 }
