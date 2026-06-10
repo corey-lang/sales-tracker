@@ -10,6 +10,12 @@ import {
   getRelevantKnowledge,
   isCoveragePricingQuestion,
 } from "@/lib/ai/sales-knowledge";
+import { answerCoverageQuestion } from "@/lib/coverage/service";
+import {
+  isCoverageQuestion,
+  stateLabel,
+  type CoverageAnswer,
+} from "@/lib/coverage/answer-logic";
 
 // POST /api/ai/chat
 //
@@ -723,8 +729,68 @@ function summarizeShape(value: unknown, depth = 0): unknown {
 
 export async function POST(req: Request) {
   try {
-    await requireTestAccount(req);
+    const me = await requireTestAccount(req);
     const body = await parseBody(req, ChatSchema);
+
+    // -----------------------------------------------------------------------
+    // PRIMARY SOURCE: Coverage Intelligence — checked FIRST, before any
+    // guided-flow / external-agent routing.
+    //
+    // A coverage/pricing/plan/brochure question is answered ONLY from the AE's
+    // current, approved state brochure — grounded, cited, and never from the
+    // external agent or generic reasoning. If the brochure doesn't support an
+    // answer, Ask Smitty refuses from the docs rather than guessing or falling
+    // back. Cross-state answers are impossible: the lookup is scoped to
+    // `me.state_code`.
+    //
+    // This runs even when the client echoes a threadId/currentStep: a NEW
+    // coverage question must not be routed to the external assistant just
+    // because a stale guided flow is in progress. `isCoverageQuestion` is a
+    // dedicated word-boundary detector (NOT the static sales-knowledge matcher)
+    // so normal phrasings — "Does Epic cover HVAC?", "Is refrigerator covered?"
+    // — are caught, while generic "plan my week" is not.
+    if (isCoverageQuestion(body.message)) {
+      const stateContext = me.state_code
+        ? { code: me.state_code, label: stateLabel(me.state_code) }
+        : null;
+
+      let answer: CoverageAnswer;
+      try {
+        answer = await answerCoverageQuestion(me.state_code, body.message);
+      } catch (err) {
+        // No generic fallback for coverage/pricing — surface a safe, sourced-
+        // data-unavailable message instead of an ungrounded guess.
+        console.warn(`[ai-chat] coverage lookup failed err=${String(err)}`);
+        return Response.json({
+          reply:
+            "I'm having trouble reaching the plan documents right now. Please try again in a moment.",
+          sessionId: body.sessionId ?? null,
+          answerOptions: [],
+          threadId: null,
+          currentStep: null,
+          department: "coverage",
+          grounded: false,
+          stateContext,
+          citations: [],
+        });
+      }
+
+      console.log(
+        `[ai-chat] coverage: state=${me.state_code ?? "(none)"} ` +
+          `kind=${answer.kind} citations=${answer.citations.length}`,
+      );
+      return Response.json({
+        reply: answer.text,
+        sessionId: body.sessionId ?? null,
+        answerOptions: [],
+        threadId: null,
+        currentStep: null,
+        department: "coverage",
+        grounded: answer.kind === "grounded",
+        stateContext,
+        citations: answer.citations,
+      });
+    }
 
     const apiKey = process.env.AGENTIC_AI_API_KEY?.trim();
     const endpoint = process.env.AGENTIC_AI_CHAT_URL?.trim();
@@ -928,11 +994,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // Response guardrail: on plan/coverage/pricing questions, if the reply
-    // states an obvious invented exact price or absolute coverage guarantee
-    // (while the live plan/pricing table isn't connected), swap it for the safe
-    // framing. getRelevantKnowledge(...) !== null is the on-topic signal — the
-    // same detector that decides whether approved knowledge was attached.
+    // Response guardrail (BACKUP, external-agent path only): a coverage/pricing
+    // question never reaches here — it returns from the Coverage Intelligence
+    // branch above. This only hardens the external agent's NON-coverage replies
+    // against an invented exact price / absolute coverage guarantee. The
+    // `getRelevantKnowledge(...) !== null` check here is just this guardrail's
+    // own narrow topic signal; it does NOT gate coverage routing (that's
+    // `isCoverageQuestion`, checked at the top of the handler).
     const isPlanPricingTopic = getRelevantKnowledge(body.message) !== null;
     const safeReply =
       isPlanPricingTopic && replyHasRiskyClaim(reply)

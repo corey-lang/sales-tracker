@@ -13,9 +13,13 @@
  *   - AUTHORITATIVE-ONLY: every fact carries the raw brochure wording
  *     (`*_text` / `sourceText`) alongside any structured value. Pricing is only
  *     ever present when the brochure stated it — the service never infers it.
- *   - PRIMARY SOURCE: Coverage Intelligence is the primary answer source for
- *     coverage lookups, plan comparisons, limits, add-ons, and brochure-backed
- *     pricing. The external agent is the FALLBACK (used only on `no_data`).
+ *   - SOLE SOURCE for coverage: Coverage Intelligence is the ONLY answer source
+ *     for coverage lookups, plan comparisons, limits, add-ons, and brochure-
+ *     backed pricing. When authoritative facts are missing (`no_data` /
+ *     `unspecified`), Ask Smitty refuses from the docs ("I couldn't find that
+ *     in the current <State> brochure") — it does NOT fall back to the external
+ *     agent or any generic AI for coverage/pricing/plan questions. The external
+ *     agent only ever handles NON-coverage chat (app help, general coaching).
  *   - REVIEW GATE: only `reviewStatus === "approved"` rows on a `status:
  *     "current"` brochure are served as authoritative. Confidence + provenance
  *     (sourcePage) ride along for the admin review workflow.
@@ -152,15 +156,22 @@ export type PlanAddon = ExtractionMeta & {
  *   - "answer"      → authoritative; answer directly + cite.
  *   - "not_covered" → authoritative negative; answer directly + cite.
  *   - "unspecified" → the plan exists in the brochure but the item isn't
- *                     addressed; state that plainly (don't guess), then the AI
- *                     layer may augment.
- *   - "no_data"     → no current brochure / plan not found → fall back to the
- *                     external agent.
+ *                     addressed; state that plainly (don't guess). `sourcePage`
+ *                     is the page of the plan row, when recorded.
+ *   - "no_data"     → no current brochure / plan not found → REFUSE from the
+ *                     docs. Coverage/pricing/plan questions never fall back to
+ *                     the external agent or generic AI.
  */
 export type CoverageLookupResult =
   | { kind: "answer"; item: CoverageItem; source: BrochureRef }
   | { kind: "not_covered"; item: CoverageItem; source: BrochureRef }
-  | { kind: "unspecified"; planName: string; coverageItem: string; source: BrochureRef }
+  | {
+      kind: "unspecified";
+      planName: string;
+      coverageItem: string;
+      sourcePage: number | null;
+      source: BrochureRef;
+    }
   | { kind: "no_data" };
 
 /** One row of a plan comparison, aligned by coverage item. */
@@ -177,6 +188,8 @@ export type PlanComparisonResult =
       planA: string;
       planB: string;
       rows: PlanComparisonRow[];
+      /** Unique source pages across every compared row (for citation). */
+      pages: number[];
       source: BrochureRef;
     }
   | { kind: "no_data" };
@@ -194,8 +207,9 @@ export type PlanPricingResult =
   | { kind: "no_data" };
 
 /**
- * The Coverage Intelligence read API the AI Assistant calls BEFORE the external
- * agent. Every method resolves against the state's `status='current'` brochure
+ * The Coverage Intelligence read API the AI Assistant uses as the SOLE source
+ * for coverage/pricing/plan questions (the external agent only handles
+ * non-coverage chat). Every method resolves against the state's `status='current'` brochure
  * unless a specific brochure is requested, and every successful result carries
  * a `BrochureRef` so the answer can be cited. Implemented in Phase 5.
  *
@@ -220,11 +234,15 @@ export interface CoverageService {
     coverageItem: string,
   ): Promise<CoverageLookupResult>;
 
-  /** "Which plans include <item> in <state>?" */
+  /** "Which plans include <item> in <state>?" `pages` carries the unique source
+   *  pages of the matched rows for citation. */
   getPlansIncluding(
     state: StateCode,
     coverageItem: string,
-  ): Promise<{ kind: "plans"; planNames: string[]; source: BrochureRef } | { kind: "no_data" }>;
+  ): Promise<
+    | { kind: "plans"; planNames: string[]; pages: number[]; source: BrochureRef }
+    | { kind: "no_data" }
+  >;
 
   /** Structured comparison of two plans, aligned by coverage item. */
   comparePlans(

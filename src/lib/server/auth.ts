@@ -174,6 +174,11 @@ export type AuthedSalesperson = {
   role: UserRole;
   /** True for the seeded test account — routes use this to stay test-safe. */
   is_test: boolean;
+  /** The AE's assigned USPS state code (UPPER, e.g. "UT"), or null when unset.
+   *  Ask Smitty uses this as the default state for Coverage Intelligence
+   *  lookups; null means it declines coverage questions (it never guesses a
+   *  state). See supabase/salespeople_state_code.sql. */
+  state_code: string | null;
   /** Scoped permission for the office-import surface (migration #26).
    *  Admins (role === 'admin') bypass this flag entirely; non-admins must
    *  have it set to reach `/api/admin/offices/import`. See
@@ -218,7 +223,7 @@ export async function requireSalesperson(
   const supabase = getServerSupabase();
   const res = await supabase
     .from("salespeople")
-    .select("id, first_name, role, is_test, can_import_offices")
+    .select("id, first_name, role, is_test, can_import_offices, state_code")
     .eq("id", payload.sub)
     .maybeSingle();
 
@@ -243,8 +248,15 @@ export async function requireSalesperson(
     role: unknown;
     is_test: boolean | null;
     can_import_offices: boolean | null;
+    state_code: string | null;
   };
   const role: UserRole = isUserRole(row.role) ? row.role : "ae";
+  // Normalize to UPPER so it matches plan_brochures.state_code / the
+  // authoritative_* views; an empty/whitespace value reads as "unset".
+  const stateCode =
+    typeof row.state_code === "string" && row.state_code.trim()
+      ? row.state_code.trim().toUpperCase()
+      : null;
 
   return {
     id: row.id,
@@ -252,6 +264,7 @@ export async function requireSalesperson(
     role,
     is_test: isTestAccount(row),
     can_import_offices: row.can_import_offices === true,
+    state_code: stateCode,
   };
 }
 

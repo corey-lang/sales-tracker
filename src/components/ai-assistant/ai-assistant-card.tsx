@@ -17,7 +17,7 @@ import {
 import { AiAssistantSheet } from "./ai-assistant-sheet";
 
 /**
- * Home-dashboard entry point for the Test-AE-only AI Assistant beta.
+ * Home-dashboard entry point for the Test-AE-only Ask Smitty beta.
  *
  * Renders nothing for anyone but the test account, so it's safe to drop into
  * the shared dashboard unconditionally — the visibility decision lives here,
@@ -41,20 +41,20 @@ export function AiAssistantCard({
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Sparkles aria-hidden="true" className="size-4 text-primary" />
-            AI Assistant
+            Ask Smitty
             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
               Beta
             </span>
           </CardTitle>
           <CardDescription>
             Your coverage &amp; pricing expert — what&apos;s covered, plan
-            comparisons, coverage lookups, and pricing. Type or speak your
-            question.
+            comparisons, coverage lookups, and pricing, grounded in your
+            state&apos;s plan documents. Type or speak your question.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Button size="sm" onClick={() => setOpen(true)}>
-            Open AI Assistant
+            Open Ask Smitty
           </Button>
         </CardContent>
       </Card>

@@ -7,13 +7,34 @@ import {
   useRef,
   useState,
 } from "react";
-import { ChevronLeft, Loader2, Mic, Send, Sparkles, Square } from "lucide-react";
+import {
+  ChevronLeft,
+  FileText,
+  Loader2,
+  Mic,
+  Send,
+  Sparkles,
+  Square,
+} from "lucide-react";
 
 import { apiFetchJson } from "@/lib/api-client";
 import { useSpeechRecognition } from "./use-speech-recognition";
 
 /** One guided-flow answer chip from the agent. */
 type AnswerOption = { label: string; value: string };
+
+/** A brochure source attached to a grounded coverage answer. */
+type Citation = {
+  brochure: string;
+  version: string | null;
+  /** Source pages the answer's facts came from (unique, sorted). */
+  pages: number[];
+  /** Rendered chip text, e.g. "Utah Brochure 2025.7, pp. 3, 5". */
+  label: string;
+};
+
+/** The state the answer was grounded in, for the "Answering using …" banner. */
+type StateContext = { code: string; label: string };
 
 /** Server contract for POST /api/ai/chat. */
 type ChatResponse = {
@@ -22,15 +43,23 @@ type ChatResponse = {
   answerOptions?: AnswerOption[];
   threadId?: string | null;
   currentStep?: string | null;
-  /** Routed department ("sales"/"plans"); echoed back to keep a guided flow
-   *  sticky to its department. */
+  /** Routed department ("sales"/"plans"/"coverage"); echoed back to keep a
+   *  guided flow sticky to its department. */
   department?: string | null;
+  /** Coverage-grounded answer fields (present when department === "coverage"). */
+  grounded?: boolean;
+  stateContext?: StateContext | null;
+  citations?: Citation[];
 };
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Brochure sources shown as chips under a grounded coverage answer. */
+  citations?: Citation[];
+  /** State banner shown above a grounded coverage answer. */
+  stateContext?: StateContext | null;
 };
 
 /** Suggested starters for the empty state — coverage/pricing first, ordered
@@ -220,7 +249,17 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         setDepartment(data.department ?? null);
         setMessages((prev) => [
           ...prev,
-          { id: nextId(), role: "assistant", content: data.reply },
+          {
+            id: nextId(),
+            role: "assistant",
+            content: data.reply,
+            // Show the brochure sources + state banner only on a grounded
+            // coverage answer — never on a refusal or a non-coverage reply, so
+            // the chip's presence is itself the "this came from the document"
+            // trust signal.
+            citations: data.grounded ? data.citations ?? [] : [],
+            stateContext: data.grounded ? data.stateContext ?? null : null,
+          },
         ]);
 
         // Use the agent's options; if a step that requires a choice came back
@@ -276,7 +315,7 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="AI Assistant"
+      aria-label="Ask Smitty"
       className="fixed inset-x-0 top-0 z-50 flex flex-col overflow-hidden bg-background"
       style={{
         height: viewportHeight ? `${viewportHeight}px` : "100dvh",
@@ -290,13 +329,13 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close AI Assistant"
+          aria-label="Close Ask Smitty"
           className="inline-flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
         >
           <ChevronLeft aria-hidden="true" className="size-5" />
         </button>
         <Sparkles aria-hidden="true" className="size-4 text-primary" />
-        <p className="text-sm font-semibold">AI Assistant</p>
+        <p className="text-sm font-semibold">Ask Smitty</p>
         <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
           Beta
         </span>
@@ -342,9 +381,18 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
               <div
                 key={m.id}
                 className={
-                  m.role === "user" ? "flex justify-end" : "flex justify-start"
+                  m.role === "user"
+                    ? "flex flex-col items-end"
+                    : "flex flex-col items-start"
                 }
               >
+                {/* State banner — makes it obvious which state's documents the
+                    answer is grounded in. */}
+                {m.role === "assistant" && m.stateContext && (
+                  <p className="mb-1 max-w-[85%] text-xs font-medium text-muted-foreground">
+                    Answering using {m.stateContext.label} plan documents.
+                  </p>
+                )}
                 <div
                   className={
                     m.role === "user"
@@ -354,6 +402,20 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                 >
                   {m.content}
                 </div>
+                {/* Source chips — one per brochure fact the answer used. */}
+                {m.role === "assistant" && m.citations && m.citations.length > 0 && (
+                  <div className="mt-1.5 flex max-w-[85%] flex-wrap gap-1.5">
+                    {m.citations.map((c, i) => (
+                      <span
+                        key={`${c.label}-${i}`}
+                        className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                      >
+                        <FileText aria-hidden="true" className="size-3" />
+                        {c.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
             {sending && (
