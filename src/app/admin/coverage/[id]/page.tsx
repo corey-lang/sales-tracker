@@ -52,6 +52,8 @@ type Scorecard = {
     duplicate: number;
     lowConfidence: number;
     citationMismatch: number;
+    planUnverified: number;
+    valueUnverified: number;
   };
   eligible: number;
   held: number;
@@ -240,6 +242,14 @@ export default function BrochureOverviewPage() {
                   <Stat
                     label="citation mismatch"
                     value={scorecard.flags.citationMismatch}
+                  />
+                  <Stat
+                    label="plan unverified"
+                    value={scorecard.flags.planUnverified}
+                  />
+                  <Stat
+                    label="value unverified"
+                    value={scorecard.flags.valueUnverified}
                   />
                 </div>
               </div>

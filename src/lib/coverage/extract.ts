@@ -171,6 +171,8 @@ const SYSTEM_PROMPT = [
   "4. `included` = true only if the text says the item is covered/included; false only if explicitly excluded/not covered; otherwise null.",
   "5. Use the brochure's exact plan and item names. If the page has no plan/coverage/pricing facts, return empty arrays.",
   "6. `confidence` (0..1) reflects how explicit the text is for that row.",
+  "7. PLAN COLUMNS: facts usually come from a grid with SEVERAL plan columns. When a row is for a specific plan, the `sourceText` you copy MUST include that plan's name/column together with the item and value, so the plan-specific assignment is provable from the quote ALONE (e.g. \"Epic: HVAC Refrigerant $300 / Request\"). A bare cell snippet that doesn't name the plan (e.g. \"HVAC Refrigerant $300 / Request\") is NOT sufficient — it could belong to a different plan column. If you cannot quote text that ties the value to a specific plan, omit the row.",
+  "8. PRICING vs ADD-ONS: `pricing` is ONLY a base plan's price or service fee, keyed by a plan name. Optional coverages sold separately (e.g. Water Softener, Pool, Sprinklers, Reverse Osmosis, Exterior Main Line Coverage) go in `addons`, NEVER in `pricing`.",
   "Output a SINGLE JSON object with keys: coverageItems[], pricing[], addons[]. Use exactly these field names:",
   "  coverageItems: { planName, coverageItem, included, coverageLimit, coverageLimitText, sourceText, confidence }",
   "  pricing:       { planName, priceAmount, priceCadence, currencyCode, priceText, sourceText, confidence }",

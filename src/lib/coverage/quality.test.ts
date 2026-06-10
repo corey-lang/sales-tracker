@@ -181,6 +181,206 @@ describe("trusted-mode eligibility (confidence gate only)", () => {
   });
 });
 
+describe("plan disambiguation (word-boundary, longest-first)", () => {
+  const trustedT = effectiveThreshold(undefined, true); // 0.50 — trusted must NOT bypass
+  const cov = (planName: string, sourceText: string) =>
+    classifyCoverage(
+      coverage({ confidence: 0.95, planName, coverageItem: "HVAC", coverageLimitText: null, sourceText, sourcePage: 4 }),
+      1,
+      trustedT,
+    );
+
+  it("HELDS an Elevated row whose source only says 'Totally Elevated'", () => {
+    const cls = cov("Elevated", "Totally Elevated: HVAC No Dollar Limit");
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("plan unverified");
+  });
+
+  it("HELDS a Totally Elevated row whose source only says 'Elevated'", () => {
+    const cls = cov("Totally Elevated", "Elevated: HVAC $300 / Request");
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("plan unverified");
+  });
+
+  it("an exact 'Elevated' source validates Elevated", () => {
+    expect(cov("Elevated", "Elevated: HVAC covered").reasons).not.toContain(
+      "plan unverified",
+    );
+  });
+
+  it("an exact 'Totally Elevated' source validates Totally Elevated", () => {
+    expect(
+      cov("Totally Elevated", "Totally Elevated: HVAC covered").reasons,
+    ).not.toContain("plan unverified");
+  });
+
+  it("an exact 'Epic' source validates Epic", () => {
+    expect(cov("Epic", "Epic: HVAC covered").reasons).not.toContain(
+      "plan unverified",
+    );
+  });
+});
+
+describe("base-plan pricing is canonical-only (never derived)", () => {
+  const trustedT = effectiveThreshold(undefined, true);
+
+  // "knownPlans" no longer exists — eligibility is the canonical set alone, so
+  // these hold regardless of any contamination from extracted rows.
+  it("HELDS 'Water Softener' as a base-plan price (not canonical)", () => {
+    const cls = classifyPricing(
+      pricing({ confidence: 0.95, planName: "Water Softener", priceText: "$100", sourceText: "Water Softener $100", sourcePage: 6 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("not a base plan");
+  });
+
+  it.each([
+    "Exterior Main Line Coverage",
+    "Reverse Osmosis System",
+    "Pool/Spa",
+    "Additional Refrigerator",
+  ])("HELDS optional coverage '%s' misfiled as pricing", (planName) => {
+    const cls = classifyPricing(
+      pricing({ confidence: 0.95, planName, priceText: "$100", sourceText: `${planName} $100`, sourcePage: 6 }),
+      1,
+      trustedT,
+    );
+    expect(cls.reasons).toContain("not a base plan");
+  });
+
+  it("a non-canonical plan named in its source is STILL held (canonical authority)", () => {
+    // Even though the source proves the (non-base) plan, it isn't canonical.
+    const cls = classifyPricing(
+      pricing({ confidence: 1, planName: "Gold", priceText: "$100", sourceText: "Gold: $100 per year", sourcePage: 6 }),
+      1,
+      trustedT,
+    );
+    expect(cls.reasons).toContain("not a base plan");
+  });
+
+  it("APPROVES a canonical base-plan price proven by its source", () => {
+    const cls = classifyPricing(
+      pricing({ confidence: 0.6, planName: "Epic", priceText: "$600 / year", sourceText: "Epic plan is $600 per year.", sourcePage: 7 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(false);
+  });
+});
+
+describe("coverage value/limit must be cited", () => {
+  const trustedT = effectiveThreshold(undefined, true);
+
+  it("HELDS Epic / HVAC Refrigerant / $300 when the source omits the value", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.95, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "Epic plan: HVAC Refrigerant covered", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("value unverified");
+  });
+
+  it("HELDS '$300 / Request' when the source proves only the amount (no '/ Request')", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.95, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "Epic: HVAC Refrigerant $300", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("value unverified");
+  });
+
+  it("PASSES '$300 / Request' when the full limit is cited", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.6, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "Epic: HVAC Refrigerant $300 / Request", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(false);
+  });
+
+  it("HELDS '$150 / night ($500 max)' when the source is only partial", () => {
+    const partials = [
+      "Epic: Lodging $150 / night", // missing 500 + max
+      "Epic: Lodging $150 night $500", // missing max
+      "Epic: Lodging $500 max", // missing 150 + night
+    ];
+    for (const sourceText of partials) {
+      const cls = classifyCoverage(
+        coverage({ confidence: 1, planName: "Epic", coverageItem: "Lodging", coverageLimitText: "$150 / night ($500 max)", sourceText, sourcePage: 5 }),
+        1,
+        trustedT,
+      );
+      expect(cls.reasons).toContain("value unverified");
+    }
+  });
+
+  it("PASSES '$150 / night ($500 max)' when night, max, and both numbers are cited", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.6, planName: "Epic", coverageItem: "Lodging", coverageLimitText: "$150 / night ($500 max)", sourceText: "Epic: Lodging $150 / night ($500 max)", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(false);
+  });
+
+  it("PASSES Epic / HVAC Refrigerant / No Dollar Limit cited in the source", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.6, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "No Dollar Limit", sourceText: "Epic: HVAC Refrigerant No Dollar Limit", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(false);
+  });
+
+  it("PASSES Essential / Ranges / $1,000 / Request cited in the source", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.6, planName: "Essential", coverageItem: "Ranges, Ovens, & Cooktops", coverageLimitText: "$1,000 / Request", sourceText: "Essential: Ranges, Ovens, & Cooktops $1,000 / Request", sourcePage: 6 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(false);
+  });
+
+  it("HELDS Epic / Ranges / $1,000 when the source proves a different plan", () => {
+    const cls = classifyCoverage(
+      coverage({ confidence: 0.95, planName: "Epic", coverageItem: "Ranges, Ovens, & Cooktops", coverageLimitText: "$1,000 / Request", sourceText: "Essential: Ranges, Ovens, & Cooktops $1,000 / Request", sourcePage: 6 }),
+      1,
+      trustedT,
+    );
+    expect(cls.isException).toBe(true);
+    expect(cls.reasons).toContain("plan unverified");
+  });
+
+  it("trusted confidence 1.0 does not bypass plan or value gates", () => {
+    const plan = classifyCoverage(
+      coverage({ confidence: 1, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "HVAC Refrigerant $300 / Request", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(plan.isException).toBe(true); // plan unverified
+    const value = classifyCoverage(
+      coverage({ confidence: 1, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "Epic: HVAC Refrigerant covered", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(value.isException).toBe(true); // value unverified
+
+    // Partial value (amount present, "/ Request" qualifier missing) is NOT
+    // bypassed by trusted + max confidence.
+    const partial = classifyCoverage(
+      coverage({ confidence: 1, planName: "Epic", coverageItem: "HVAC Refrigerant", coverageLimitText: "$300 / Request", sourceText: "Epic: HVAC Refrigerant $300", sourcePage: 5 }),
+      1,
+      trustedT,
+    );
+    expect(partial.isException).toBe(true);
+    expect(partial.reasons).toContain("value unverified");
+  });
+});
+
 describe("assertHasApprovedFacts (promote guard)", () => {
   it("throws when zero approved facts (blocks empty-current promote)", () => {
     expect(() => assertHasApprovedFacts(0)).toThrow(/no approved facts/i);
@@ -208,6 +408,8 @@ function analysis(over: Partial<BrochureAnalysis> = {}): BrochureAnalysis {
       duplicate: 0,
       lowConfidence: 0,
       citationMismatch: 0,
+      planUnverified: 0,
+      valueUnverified: 0,
     },
     eligible: 2,
     held: 0,

@@ -31,6 +31,19 @@ import {
 /** Non-trusted hard floor: rows below this confidence are NEVER auto-approved. */
 export const DEFAULT_CONFIDENCE_THRESHOLD = 0.85;
 
+/**
+ * The canonical base plan names. Base-plan PRICING may only auto-approve for one
+ * of these — independent of (never derived from) extracted coverage rows, so a
+ * misfiled add-on can't become a "known plan". Add a state's plan names here as
+ * states are onboarded. Matched case-insensitively, whole-phrase.
+ */
+export const CANONICAL_BASE_PLANS = [
+  "Essential",
+  "Elevated",
+  "Totally Elevated",
+  "Epic",
+];
+
 /** Trusted Brochure Mode hard floor. For an official (trusted) brochure the
  *  confidence gate is relaxed to this floor — obvious high/medium-confidence
  *  rows auto-approve — while EVERY structural gate (citation present, citation
@@ -117,12 +130,129 @@ function tokensSupported(needle: string, hay: string): boolean {
   return present >= Math.ceil(toks.length / 2);
 }
 
+const CANONICAL_BASE_PLAN_SET = new Set(
+  CANONICAL_BASE_PLANS.map(normalizeForMatch),
+);
+
+/** True when `planName` is one of the canonical base plans (case-insensitive,
+ *  whole-phrase). Independent of any extracted rows. */
+function isCanonicalBasePlan(planName: string | null): boolean {
+  return CANONICAL_BASE_PLAN_SET.has(normalizeForMatch(planName ?? ""));
+}
+
+/**
+ * Which of `candidateLabels` appear in the source as WHOLE PHRASES (space-
+ * delimited word boundaries on the normalized text), matched LONGEST-FIRST with
+ * the matched span removed. Longest-first + removal is what disambiguates nested
+ * plan names: a source that says "Totally Elevated" yields ONLY {totally
+ * elevated} — the contained "elevated" is consumed and can't also match an
+ * "Elevated" row. Returns the normalized labels found.
+ */
+function plansPresentInSource(
+  sourceText: string | null,
+  candidateLabels: string[],
+): Set<string> {
+  let hay = ` ${normalizeForMatch(sourceText)} `;
+  const present = new Set<string>();
+  const labels = [
+    ...new Set(candidateLabels.map(normalizeForMatch).filter((s) => s.length > 0)),
+  ].sort((a, b) => b.length - a.length);
+  for (const label of labels) {
+    const padded = ` ${label} `;
+    if (hay.includes(padded)) {
+      present.add(label);
+      hay = hay.split(padded).join("  "); // consume so a nested label can't re-match
+    }
+  }
+  return present;
+}
+
+/**
+ * True when the source_text proves the row's specific PLAN assignment.
+ *
+ * Multi-column-table guard. A brochure grid has several plan columns, so a
+ * single-cell snippet proves the value exists but NOT which column owns it. The
+ * source must name the row's plan as a whole phrase — and, via longest-first
+ * matching, "Elevated" can't be validated by a source that only says "Totally
+ * Elevated" (and vice-versa). Candidate labels are the canonical base plans plus
+ * the row's own plan (so a non-canonical plan can still match itself). A blank
+ * plan name is uncheckable → true (other gates decide).
+ */
+function sourceProvesPlan(planName: string | null, sourceText: string | null): boolean {
+  const norm = normalizeForMatch(planName ?? "");
+  if (!norm) return true;
+  const present = plansPresentInSource(sourceText, [
+    ...CANONICAL_BASE_PLANS,
+    planName ?? "",
+  ]);
+  return present.has(norm);
+}
+
 /** True when the coverage item is supported by its source_text. */
 function coverageCitationOk(r: PendingCoverage): boolean {
   const hay = normalizeForMatch(r.sourceText);
-  // Item name is the key signal; plan name is intentionally NOT required (it's
-  // often a table header, not on the cited line).
+  // Item name is the key signal; plan and value are proven separately so a
+  // multi-column row needs plan + item + value all supported by the cited text.
   return tokensSupported(r.coverageItem, hay);
+}
+
+/**
+ * The significant NON-NUMERIC qualifier tokens of a limit string — the words
+ * that change the meaning of the value (e.g. "Request", "night", "max",
+ * "Dollar", "Limit"). Currency/punctuation/slashes/commas are normalized away
+ * by normalizeForMatch; numeric groups are validated separately, so purely
+ * numeric tokens are excluded here. Length ≥ 3 (so "max"/"day" count) and
+ * stopwords ("per", "than", …) are dropped.
+ */
+function limitQualifierTokens(s: string | null | undefined): string[] {
+  return normalizeForMatch(s)
+    .split(" ")
+    .filter(
+      (t) => t.length >= 3 && !/^\d+$/.test(t) && !CITATION_STOPWORDS.has(t),
+    );
+}
+
+/**
+ * True when the coverage row's full VALUE/limit is proven by its source_text.
+ * A row that carries a limit must cite the WHOLE limit, not just the number:
+ *   - EVERY numeric group (from coverage_limit and the digits in
+ *     coverage_limit_text) must appear in the source's digits, AND
+ *   - EVERY significant qualifier token of coverage_limit_text (e.g. "Request",
+ *     "night", "max", "Dollar", "Limit") must appear in the source.
+ * So "Epic: HVAC Refrigerant $300" does NOT prove "$300 / Request" (the
+ * "/ Request" qualifier is missing). A row with no limit/value → true.
+ */
+function coverageValueOk(r: PendingCoverage): boolean {
+  const hay = normalizeForMatch(r.sourceText);
+  const sourceDigits = digitGroups(r.sourceText);
+
+  // 1) Numeric groups: structured numeric limit + any digit groups in the text.
+  const wantDigits = new Set<string>();
+  if (r.coverageLimit != null) wantDigits.add(String(Math.trunc(r.coverageLimit)));
+  for (const d of digitGroups(r.coverageLimitText)) wantDigits.add(d);
+  for (const d of wantDigits) {
+    if (!sourceDigits.includes(d)) return false;
+  }
+
+  // 2) Qualifier tokens of the limit text must all be present.
+  const limitText = r.coverageLimitText?.trim();
+  if (limitText) {
+    const tokens = limitQualifierTokens(limitText);
+    for (const t of tokens) {
+      if (!hay.includes(t)) return false;
+    }
+    // A limit string with neither digits nor qualifier tokens (rare) still must
+    // be supported rather than silently passing on nothing.
+    if (wantDigits.size === 0 && tokens.length === 0) {
+      return tokensSupported(limitText, hay);
+    }
+  }
+  return true;
+}
+
+/** True when a coverage row carries a value/limit that must be cited. */
+function coverageHasValue(r: PendingCoverage): boolean {
+  return r.coverageLimit != null || !!r.coverageLimitText?.trim();
 }
 
 /** True when the pricing row's price is supported by its source_text. */
@@ -159,9 +289,25 @@ export function classifyCoverage(
   if (dup > 1) reasons.push("duplicate");
   if (r.sourceText?.trim() && !coverageCitationOk(r))
     reasons.push("citation mismatch");
+  // The cited text must prove the PLAN this value belongs to (multi-column guard).
+  if (r.sourceText?.trim() && !sourceProvesPlan(r.planName, r.sourceText))
+    reasons.push("plan unverified");
+  // ...and the VALUE/limit itself, when the row carries one — a row whose limit
+  // ("$300 / Request") isn't in the cited text can't auto-approve.
+  if (r.sourceText?.trim() && coverageHasValue(r) && !coverageValueOk(r))
+    reasons.push("value unverified");
   return { isException: reasons.length > 0, reasons };
 }
 
+/**
+ * Base-plan pricing eligibility is structurally limited to the CANONICAL base
+ * plans (CANONICAL_BASE_PLANS) — NEVER derived from extracted coverage rows, so
+ * a misfiled add-on can't contaminate the set of "known plans". A `plan_pricing`
+ * row whose plan_name isn't canonical (e.g. "Water Softener", "Exterior Main
+ * Line Coverage", "Reverse Osmosis System", pool/spa, extra fridge) is held as
+ * "not a base plan". A canonical plan still must have the plan AND price proven
+ * by the cited text.
+ */
 export function classifyPricing(
   r: PendingPricing,
   dup: number,
@@ -176,6 +322,12 @@ export function classifyPricing(
   if (dup > 1) reasons.push("duplicate");
   if (r.sourceText?.trim() && !pricingCitationOk(r))
     reasons.push("citation mismatch");
+  // The cited text must prove the PLAN the price belongs to (multi-column guard).
+  if (r.sourceText?.trim() && !sourceProvesPlan(r.planName, r.sourceText))
+    reasons.push("plan unverified");
+  // Base-plan pricing only — canonical plan names, independent of extracted rows.
+  if (r.planName.trim() && !isCanonicalBasePlan(r.planName))
+    reasons.push("not a base plan");
   return { isException: reasons.length > 0, reasons };
 }
 
@@ -197,6 +349,14 @@ export function classifyAddon(
   if (dup > 1) reasons.push("duplicate");
   if (r.sourceText?.trim() && !addonCitationOk(r))
     reasons.push("citation mismatch");
+  // When an add-on is scoped to a specific plan, the cited text must prove that
+  // plan assignment. Catalog-level add-ons (plan_name null) are plan-agnostic.
+  if (
+    r.planName?.trim() &&
+    r.sourceText?.trim() &&
+    !sourceProvesPlan(r.planName, r.sourceText)
+  )
+    reasons.push("plan unverified");
   return { isException: reasons.length > 0, reasons };
 }
 
@@ -222,6 +382,11 @@ export type BrochureAnalysis = {
     duplicate: number;
     lowConfidence: number;
     citationMismatch: number;
+    /** Rows where the source_text can't prove the plan-specific value, or a
+     *  pricing row whose plan_name isn't a canonical base plan. */
+    planUnverified: number;
+    /** Coverage rows whose limit/value isn't cited in the source_text. */
+    valueUnverified: number;
   };
   eligible: number;
   held: number;
@@ -250,6 +415,8 @@ export async function analyzeBrochure(
     duplicate: 0,
     lowConfidence: 0,
     citationMismatch: 0,
+    planUnverified: 0,
+    valueUnverified: 0,
   };
   const confidence = { high: 0, medium: 0, low: 0 };
   const eligibleIds = {
@@ -278,6 +445,10 @@ export async function analyzeBrochure(
     if (reasons.includes("duplicate")) flags.duplicate += 1;
     if (reasons.includes("low confidence")) flags.lowConfidence += 1;
     if (reasons.includes("citation mismatch")) flags.citationMismatch += 1;
+    // Both causes (unprovable plan, or non-plan pricing row) count once.
+    if (reasons.includes("plan unverified") || reasons.includes("not a base plan"))
+      flags.planUnverified += 1;
+    if (reasons.includes("value unverified")) flags.valueUnverified += 1;
   };
   const tallyPage = (page: number | null) => {
     if (page == null) return;
