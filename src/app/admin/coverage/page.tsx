@@ -33,6 +33,7 @@ type Brochure = {
   fileHash: string | null;
   importedAt: string;
   status: string;
+  trusted: boolean;
   notes: string | null;
 };
 
@@ -76,6 +77,7 @@ export default function AdminCoveragePage() {
   const [listError, setListError] = useState<string | null>(null);
 
   const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [trusted, setTrusted] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registerOk, setRegisterOk] = useState<string | null>(null);
@@ -108,7 +110,7 @@ export default function AdminCoveragePage() {
     setRegisterOk(null);
     setRegistering(true);
     try {
-      const body: Record<string, string> = {
+      const body: Record<string, string | boolean> = {
         stateCode: form.stateCode.trim().toUpperCase(),
         brochureTitle: form.brochureTitle.trim(),
       };
@@ -116,6 +118,7 @@ export default function AdminCoveragePage() {
       if (form.effectiveDate.trim()) body.effectiveDate = form.effectiveDate.trim();
       if (form.sourceUrl.trim()) body.sourceUrl = form.sourceUrl.trim();
       if (form.notes.trim()) body.notes = form.notes.trim();
+      if (trusted) body.trusted = true;
 
       const data = await apiFetchJson<{ brochure: Brochure }>(
         "/api/admin/coverage/brochures",
@@ -126,9 +129,10 @@ export default function AdminCoveragePage() {
         },
       );
       setRegisterOk(
-        `Registered ${data.brochure.brochureTitle} (${data.brochure.stateCode}).`,
+        `Registered ${data.brochure.brochureTitle} (${data.brochure.stateCode})${data.brochure.trusted ? " · trusted" : ""}.`,
       );
       setForm({ ...EMPTY_FORM });
+      setTrusted(false);
       await loadBrochures();
     } catch (err) {
       setRegisterError(errMessage(err, "Could not register the brochure."));
@@ -158,26 +162,6 @@ export default function AdminCoveragePage() {
     }
   };
 
-  const promote = async (id: string) => {
-    if (busyId) return;
-    setBusyId(id);
-    setRowError((prev) => ({ ...prev, [id]: "" }));
-    try {
-      await apiFetchJson<{ brochure: Brochure }>(
-        `/api/admin/coverage/brochures/${id}/promote`,
-        { method: "POST" },
-      );
-      await loadBrochures();
-    } catch (err) {
-      setRowError((prev) => ({
-        ...prev,
-        [id]: errMessage(err, "Promotion failed."),
-      }));
-    } finally {
-      setBusyId(null);
-    }
-  };
-
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
       <header>
@@ -185,10 +169,12 @@ export default function AdminCoveragePage() {
           Coverage Intelligence
         </h1>
         <p className="text-sm text-muted-foreground">
-          Phase 2 testing surface. Register a brochure, run extraction, and
-          inspect the result. Extracted rows are saved as{" "}
-          <span className="font-medium">pending</span> review — nothing is
-          approved or served to the AI Assistant yet.
+          Register a brochure and run extraction, then open{" "}
+          <span className="font-medium">Review &amp; Publish</span> to
+          auto-approve the trustworthy rows and make it current. Extracted rows
+          start as <span className="font-medium">pending</span>; a brochure only
+          goes <span className="font-medium">current</span> — and reaches Ask
+          Smitty — at the publish step, after it has approved facts.
         </p>
       </header>
 
@@ -275,6 +261,20 @@ export default function AdminCoveragePage() {
                 />
               </div>
             </div>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={trusted}
+                onChange={(e) => setTrusted(e.target.checked)}
+                className="mt-0.5 size-4 accent-primary"
+              />
+              <span>
+                <span className="font-medium">Trusted</span> official company
+                brochure — auto-approve high/medium-confidence rows (confidence
+                floor 0.50). Citation, consistency, dedupe, and required-field
+                checks still apply.
+              </span>
+            </label>
             {registerError && (
               <p className="text-sm text-destructive">{registerError}</p>
             )}
@@ -344,6 +344,11 @@ export default function AdminCoveragePage() {
                     >
                       {b.status}
                     </span>
+                    {b.trusted && (
+                      <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-600">
+                        trusted
+                      </span>
+                    )}
                   </div>
                   <p className="mt-1 break-all text-xs text-muted-foreground">
                     {b.sourceUrl ?? "(no source URL)"}
@@ -353,32 +358,28 @@ export default function AdminCoveragePage() {
                     {b.fileHash ? `${b.fileHash.slice(0, 12)}…` : "(none yet)"}
                   </p>
 
-                  <div className="mt-2 flex flex-wrap gap-2">
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {/* Review & Publish is the primary, safe path: it shows the
+                        scorecard, auto-approves trustworthy rows, and promotes
+                        to current LAST (only when approved facts exist). The raw
+                        "make current" promote is intentionally not exposed here
+                        — promoting an unreviewed brochure is what caused the
+                        empty-current bug. */}
+                    <Link
+                      href={`/admin/coverage/${b.id}`}
+                      className="inline-flex h-8 items-center rounded-md bg-primary px-3 text-[0.8rem] font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                    >
+                      Review &amp; Publish
+                    </Link>
                     <Button
                       type="button"
                       size="sm"
+                      variant="outline"
                       disabled={busy || !b.sourceUrl}
                       onClick={() => void runExtraction(b.id)}
                     >
                       {busy ? "Working…" : "Run extraction"}
                     </Button>
-                    {b.status !== "current" && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() => void promote(b.id)}
-                      >
-                        Make current
-                      </Button>
-                    )}
-                    <Link
-                      href={`/admin/coverage/${b.id}`}
-                      className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-[0.8rem] font-medium text-foreground transition-colors hover:bg-muted"
-                    >
-                      Open
-                    </Link>
                   </div>
 
                   {error && (

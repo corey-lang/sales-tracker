@@ -16,6 +16,50 @@ import { ApiError, notFound } from "@/lib/server/auth";
 export type ReviewKind = "coverage" | "pricing" | "addons";
 export const REVIEW_KINDS: ReviewKind[] = ["coverage", "pricing", "addons"];
 
+/**
+ * Counts a brochure's APPROVED facts across all three fact tables. An approved
+ * fact becomes authoritative the moment the brochure is `current`, so this is
+ * the "is there anything to serve?" signal used to guard promotion.
+ *
+ * Lives here (not in brochures.ts / quality.ts) so both can import it without a
+ * cycle — review.ts depends on neither.
+ */
+export async function countApprovedFacts(brochureId: string): Promise<number> {
+  const supabase = getServerSupabase();
+  const tables = ["plan_coverage_items", "plan_pricing", "plan_addons"];
+  let total = 0;
+  for (const table of tables) {
+    const res = await supabase
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("brochure_id", brochureId)
+      .eq("review_status", "approved");
+    if (res.error) {
+      console.warn(
+        `[coverage] approved-fact count failed table=${table} brochure=${brochureId} code=${res.error.code ?? "?"}`,
+      );
+      throw new ApiError(500, "Could not verify approved facts for this brochure.");
+    }
+    total += res.count ?? 0;
+  }
+  return total;
+}
+
+/**
+ * Guard: a brochure may only become `current` when it has at least one approved
+ * fact — otherwise it would publish an empty/unreviewed brochure as the
+ * authoritative source (the "empty-current" stale-answer bug). Throws 409 when
+ * the count is zero. Used by both the manual promote path and approve-publish.
+ */
+export function assertHasApprovedFacts(approvedCount: number): void {
+  if (approvedCount <= 0) {
+    throw new ApiError(
+      409,
+      "This brochure has no approved facts yet, so it can't be made current. Extract and approve at least one fact first.",
+    );
+  }
+}
+
 export function isReviewKind(v: string): v is ReviewKind {
   return v === "coverage" || v === "pricing" || v === "addons";
 }

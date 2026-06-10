@@ -178,7 +178,7 @@ class SupabaseCoverageService implements CoverageService {
     const res = await supabase
       .from("plan_brochures")
       .select(
-        "id, state_code, brochure_title, brochure_version, effective_date, source_url, file_hash, imported_at, status, notes",
+        "id, state_code, brochure_title, brochure_version, effective_date, source_url, file_hash, imported_at, status, trusted, notes",
       )
       .eq("state_code", normState(state))
       .eq("status", "current")
@@ -195,6 +195,7 @@ class SupabaseCoverageService implements CoverageService {
       fileHash: (r.file_hash as string | null) ?? null,
       importedAt: r.imported_at as string,
       status: "current",
+      trusted: r.trusted === true,
       notes: (r.notes as string | null) ?? null,
     };
   }

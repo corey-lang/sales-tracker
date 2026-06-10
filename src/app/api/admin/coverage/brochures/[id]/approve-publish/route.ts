@@ -10,6 +10,7 @@ import { getBrochure } from "@/lib/coverage/brochures";
 import {
   approveAndPublishBrochure,
   coerceThreshold,
+  effectiveThreshold,
 } from "@/lib/coverage/quality";
 
 // POST /api/admin/coverage/brochures/:id/approve-publish
@@ -41,7 +42,12 @@ export async function POST(
     if (!brochure) throw new ApiError(404, "Brochure not found.");
 
     const body = await parseBody(req, BodySchema);
-    const threshold = coerceThreshold(body.confidenceThreshold);
+    // Trusted official brochures relax the confidence gate to the 0.50 floor;
+    // structural gates (citation, consistency, dedupe, required fields) unchanged.
+    const threshold = effectiveThreshold(
+      coerceThreshold(body.confidenceThreshold),
+      brochure.trusted,
+    );
 
     const result = await approveAndPublishBrochure(
       id,

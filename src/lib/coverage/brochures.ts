@@ -14,9 +14,10 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { ApiError } from "@/lib/server/auth";
 import type { Brochure, BrochureStatus, StateCode } from "./types";
+import { assertHasApprovedFacts, countApprovedFacts } from "./review";
 
 const BROCHURE_COLUMNS =
-  "id, state_code, brochure_title, brochure_version, effective_date, source_url, file_hash, imported_at, status, notes";
+  "id, state_code, brochure_title, brochure_version, effective_date, source_url, file_hash, imported_at, status, trusted, notes";
 
 type BrochureRow = {
   id: string;
@@ -28,6 +29,7 @@ type BrochureRow = {
   file_hash: string | null;
   imported_at: string;
   status: BrochureStatus;
+  trusted: boolean | null;
   notes: string | null;
 };
 
@@ -42,6 +44,7 @@ function mapRow(row: BrochureRow): Brochure {
     fileHash: row.file_hash,
     importedAt: row.imported_at,
     status: row.status,
+    trusted: row.trusted === true,
     notes: row.notes,
   };
 }
@@ -59,6 +62,8 @@ export type RegisterBrochureInput = {
    * DB freeze trigger permits a one-time NULL→value backfill but no later change.
    */
   fileHash?: string;
+  /** Opt-in Trusted Brochure Mode (official brochure). Defaults to false. */
+  trusted?: boolean;
   notes?: string;
 };
 
@@ -80,6 +85,7 @@ export async function registerBrochure(
       effective_date: input.effectiveDate ?? null,
       source_url: input.sourceUrl ?? null,
       file_hash: input.fileHash ?? null,
+      trusted: input.trusted === true,
       notes: input.notes ?? null,
       status: "imported",
     })
@@ -137,6 +143,13 @@ export async function listBrochures(filter: {
  * one-current-per-state invariant is never transiently violated.
  */
 export async function promoteCurrentBrochure(id: string): Promise<Brochure> {
+  // Guard (empty-current prevention): a brochure may only become `current` when
+  // it has at least one approved fact. Without this, an imported-but-unreviewed
+  // brochure could be promoted and serve nothing — the stale "empty current"
+  // bug. Enforced here so BOTH the manual promote route and approve-publish
+  // (which calls this) are covered in one place.
+  assertHasApprovedFacts(await countApprovedFacts(id));
+
   const supabase = getServerSupabase();
   const res = await supabase.rpc("coverage_promote_current_brochure", {
     target_id: id,

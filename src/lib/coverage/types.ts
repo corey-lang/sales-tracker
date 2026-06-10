@@ -85,6 +85,10 @@ export type Brochure = {
   fileHash: string | null;
   importedAt: string;
   status: BrochureStatus;
+  /** Trusted Brochure Mode — official brochure whose high/medium-confidence
+   *  rows auto-approve at the 0.50 confidence floor (structural gates still
+   *  apply). Opt-in at registration. See supabase/plan_brochures_trusted.sql. */
+  trusted: boolean;
   notes: string | null;
 };
 

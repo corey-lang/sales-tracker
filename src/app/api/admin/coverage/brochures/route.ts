@@ -47,6 +47,8 @@ const RegisterSchema = z.object({
     .optional(),
   sourceUrl: z.string().trim().url("sourceUrl must be a valid URL.").max(2000).optional(),
   fileHash: z.string().trim().min(8).max(128).optional(),
+  // Opt-in Trusted Brochure Mode (official company brochure). Defaults false.
+  trusted: z.boolean().optional(),
   notes: z.string().trim().max(2000).optional(),
 });
 

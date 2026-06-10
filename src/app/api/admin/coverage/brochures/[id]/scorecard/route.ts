@@ -3,7 +3,7 @@ import { getBrochure } from "@/lib/coverage/brochures";
 import {
   analyzeBrochure,
   coerceThreshold,
-  DEFAULT_CONFIDENCE_THRESHOLD,
+  effectiveThreshold,
 } from "@/lib/coverage/quality";
 
 // GET /api/admin/coverage/brochures/:id/scorecard?threshold=0.85
@@ -27,10 +27,10 @@ export async function GET(
 
     const url = new URL(req.url);
     const tParam = url.searchParams.get("threshold");
-    const threshold =
-      tParam !== null
-        ? coerceThreshold(Number(tParam))
-        : DEFAULT_CONFIDENCE_THRESHOLD;
+    // Optional caller request; the server-owned floor (0.85, or 0.50 for a
+    // trusted brochure) is the baseline. A caller may only RAISE the gate.
+    const requested = tParam !== null ? coerceThreshold(Number(tParam)) : undefined;
+    const threshold = effectiveThreshold(requested, brochure.trusted);
 
     const analysis = await analyzeBrochure(id, threshold);
     // eligibleIds is an internal detail for the publish action — don't ship it.

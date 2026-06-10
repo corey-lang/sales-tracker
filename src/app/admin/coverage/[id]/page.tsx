@@ -28,6 +28,7 @@ type Brochure = {
   brochureTitle: string;
   brochureVersion: string | null;
   status: string;
+  trusted: boolean;
 };
 
 type SampleRow = {
@@ -45,6 +46,7 @@ type Scorecard = {
   confidence: { high: number; medium: number; low: number };
   flags: {
     missingSource: number;
+    missingPage: number;
     missingPlan: number;
     missingPrice: number;
     duplicate: number;
@@ -163,10 +165,17 @@ export default function BrochureOverviewPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Brochure overview</h1>
           {brochure && (
-            <p className="text-sm text-muted-foreground">
-              {brochure.stateCode} · {brochure.brochureTitle}
-              {brochure.brochureVersion ? ` · v${brochure.brochureVersion}` : ""}{" "}
-              · {brochure.status}
+            <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+              <span>
+                {brochure.stateCode} · {brochure.brochureTitle}
+                {brochure.brochureVersion ? ` · v${brochure.brochureVersion}` : ""}{" "}
+                · {brochure.status}
+              </span>
+              {brochure.trusted && (
+                <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-600">
+                  trusted · floor 0.50
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -223,6 +232,7 @@ export default function BrochureOverviewPage() {
                 </p>
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                   <Stat label="missing source" value={scorecard.flags.missingSource} />
+                  <Stat label="missing page" value={scorecard.flags.missingPage} />
                   <Stat label="missing plan" value={scorecard.flags.missingPlan} />
                   <Stat label="missing price" value={scorecard.flags.missingPrice} />
                   <Stat label="duplicate" value={scorecard.flags.duplicate} />
