@@ -47,9 +47,10 @@ export function AiAssistantCard({
             </span>
           </CardTitle>
           <CardDescription>
-            Your coverage &amp; pricing expert — what&apos;s covered, plan
-            comparisons, coverage lookups, and pricing, grounded in your
-            state&apos;s plan documents. Type or speak your question.
+            Ask me what&apos;s covered. I probably helped write it.
+            <span className="mt-1 block text-xs text-muted-foreground/80">
+              Try to stump me. Seriously.
+            </span>
           </CardDescription>
         </CardHeader>
         <CardContent>
