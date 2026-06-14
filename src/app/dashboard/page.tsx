@@ -23,6 +23,7 @@ import { Logo } from "@/components/logo";
 import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 import { ThisWeekCard } from "@/components/this-week-card";
 import { DailyEntryForm } from "@/components/daily-entry-form";
+import { ActivityWeekContext } from "@/components/activity-week-context";
 import { MyWeekCard } from "@/components/my-week-card";
 import { EditWeekCard } from "@/components/edit-week-card";
 import { MessagesCard } from "@/components/messages-card";
@@ -188,6 +189,8 @@ export default function DashboardPage() {
             the map grew into a full territory-execution surface. */}
 
         <MessagesCard salespersonId={salesperson.id} />
+
+        <ActivityWeekContext />
 
         <Card id="log-activity" size="sm" className="scroll-mt-4">
           <CardHeader>

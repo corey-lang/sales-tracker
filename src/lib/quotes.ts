@@ -212,6 +212,40 @@ const QUOTES = [
   "Tomorrow's you is watching.",
 ];
 
+// A small, curated set of sales/activity/team-focused lines for the dashboard
+// "Daily boost" strip. Deliberately separate from the large QUOTES footer pool:
+// kept short, specific, and chosen deterministically by date (see dailyBoost)
+// so the line stays put for the whole day instead of flickering per render.
+const DAILY_BOOST = [
+  "Every touch counts — log it and watch the week add up.",
+  "Small daily reps build big weekly numbers.",
+  "Pick up the phone before you check your inbox.",
+  "Consistency beats intensity — show up and log it.",
+  "One more conversation today is one more shot at yes.",
+  "Track what you do; momentum loves a record.",
+  "Win the morning, log the wins, win the week.",
+  "Your next quota is built one activity at a time.",
+  "Stay curious, stay in motion, keep the count climbing.",
+  "Team effort — every entry pushes the whole crew forward.",
+  "Progress shows up in the totals. Add to yours today.",
+  "Do the work, log the work, trust the week.",
+  "A strong week is built one logged day at a time.",
+  "Lead with activity and the results follow.",
+];
+
+// Deterministic daily quote: the same calendar day always maps to the same
+// line, so the "Daily boost" stays stable all day rather than changing on every
+// render. `dateKey` should be a yyyy-MM-dd string (Denver date) so the rotation
+// follows the app timezone, not the browser's clock.
+export function dailyBoost(dateKey: string): string {
+  if (DAILY_BOOST.length === 0) return "";
+  let hash = 0;
+  for (let i = 0; i < dateKey.length; i++) {
+    hash = (hash * 31 + dateKey.charCodeAt(i)) >>> 0;
+  }
+  return DAILY_BOOST[hash % DAILY_BOOST.length];
+}
+
 const SEEN_KEY = "sales-tracker:quotes-seen-v2";
 const COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
