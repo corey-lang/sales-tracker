@@ -1,5 +1,3 @@
-import { isWeekend, parseISO } from "date-fns";
-
 import { getServerSupabase } from "@/lib/supabase/server";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import {
@@ -96,11 +94,13 @@ export async function GET(req: Request) {
       Partial<ActivityValues> & { salesperson_id: string; entry_date: string }
     >;
 
-    // Sum each AE's WEEKDAY activity over the range.
+    // Sum each AE's logged activity over the range, weekends INCLUDED —
+    // activity totals are the Sun-Sat numerator. Targets stay business-day
+    // (Mon-Fri) based via the Range Goal Engine, so weekend work counts toward
+    // the totals without changing the working-day target.
     const actualsByPerson = new Map<string, ActivityValues>();
     for (const p of people) actualsByPerson.set(p.id, { ...ZERO_ACTIVITY });
     for (const e of entries) {
-      if (isWeekend(parseISO(e.entry_date))) continue;
       const bucket = actualsByPerson.get(e.salesperson_id);
       if (!bucket) continue;
       for (const k of ACTIVITY_KEYS) bucket[k] += Number(e[k] ?? 0);

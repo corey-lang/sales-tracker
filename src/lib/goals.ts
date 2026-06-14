@@ -1,4 +1,11 @@
-import { addDays, format, isWeekend, startOfWeek, subWeeks } from "date-fns";
+import {
+  addDays,
+  format,
+  isWeekend,
+  parseISO,
+  startOfWeek,
+  subWeeks,
+} from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import type { ActivityKey, ActivityValues } from "@/lib/activities";
@@ -102,6 +109,56 @@ export function activityWeekToDateRange(
   };
 }
 
+// THE bridge between the two week definitions. Given a Mon-Fri BUSINESS week
+// (identified by its Monday), returns the Sun-Sat ACTIVITY numerator window for
+// that same week. The activity week that CONTAINS business-Monday M runs from
+// Sunday (M-1) through Saturday (M+5).
+//
+//   activity week  = Sun-Sat   → numerators / "what was logged this week"
+//   business week  = Mon-Fri   → targets, available days, PTO, pace
+//
+// Server-side weekly readers (leaderboard, scorecard, admin activity report,
+// coaching trend) call this so the ACTIVITY total counts the full Sun-Sat week
+// (including that week's Sunday and Saturday) while availability / adjusted
+// goals / pace stay anchored to the Mon-Fri week via `businessMonday`. This is
+// the intentional split: weekend activity counts toward the numerator, but it
+// never changes working-day target/pace math.
+//
+// `through` is capped at `today` so a current/partial week never counts future
+// days; a fully-past week returns the whole Sunday…Saturday span. Pass the REAL
+// current Denver date as `today` (NOT a Mon-Fri-clamped value) or a past week's
+// Saturday would be dropped.
+export function activityWindowForBusinessWeek(
+  businessMonday: string, // yyyy-MM-dd, a Monday
+  today: string, // yyyy-MM-dd, real current Denver date
+): { since: string; through: string } {
+  const monday = parseISO(businessMonday);
+  const since = format(addDays(monday, -1), "yyyy-MM-dd"); // Sunday (M-1)
+  const saturday = format(addDays(monday, 5), "yyyy-MM-dd"); // Saturday (M+5)
+  const through = today < saturday ? today : saturday;
+  return { since, through };
+}
+
+// The business Monday PAIRED with the activity week containing `dayInWeek`.
+// The activity week rolls on SUNDAY (weekStartsOn:0); its inner Mon-Fri starts
+// the next day. So: Sunday S → Monday S+1.
+//
+// Use this — NOT businessWeekToDateRange — to anchor a LIVE or SELECTED "this
+// week" activity surface. The difference shows up only on a SUNDAY:
+//   * businessWeekToDateRange(Sunday) → the PRIOR Monday (Sunday is the tail of
+//     the Mon-Sun week), so a week keyed off it would still roll on Monday.
+//   * pairedBusinessMonday(Sunday)    → the UPCOMING Monday, because Sunday
+//     already starts the new activity week — today's Sunday activity counts now.
+// Feeding the result into computeStandings / activityWindowForBusinessWeek
+// yields the current Sun-Sat numerator window with the right Mon-Fri week for
+// availability/pace. Robust to a legacy Monday input (maps to the same week).
+export function pairedBusinessMonday(
+  dayInWeek: Date = todayInAppTimezone(),
+): string {
+  const sunday = startOfWeek(dayInWeek, { weekStartsOn: 0 });
+  return format(addDays(sunday, 1), "yyyy-MM-dd");
+}
+
 // Monday (YYYY-MM-DD) of the business week that contains `today`. Single
 // source of truth for the Weekly Focus row's `week_start` so the API,
 // server helpers, and UI all key off the same Monday — picks Monday via
@@ -159,26 +216,23 @@ export function recentBusinessWeeks(
 
 // One Sunday-Saturday ACTIVITY week, identified by its Sunday (`weekStart`).
 // Mirrors activityWeekToDateRange's weekStartsOn:0 boundary so the AE
-// "Edit activity week" card lines up with the dashboard's Sun-Sat display.
+// "Edit activity week" card lines up with the dashboard's Sun-Sat display and
+// with the Sun-Sat numerators every weekly-activity reader uses.
 //
-// It also exposes the INNER Monday-Friday business range (`monday`/`friday`) so
-// the editor can edit the three parts of the week SEPARATELY and SAFELY:
-//   - Sunday (`weekStart`) and Saturday (`weekEnd`) are weekend rows, each
-//     edited on its OWN entry_date — weekend activity is never folded into a
-//     weekday row.
-//   - Monday-Friday is the existing safe Mon-Fri business-week replacement that
-//     leaderboard / scorecard / admin reports read.
-// There is intentionally NO single "consolidate the whole week" anchor — that
-// would move weekend activity into a weekday and corrupt Mon-Fri fairness math.
+// `monday`/`friday` expose the INNER Mon-Fri business week for reference (the
+// business week this activity week pairs with — see activityWindowForBusinessWeek).
+// Targets, available days, PTO, and pace are all anchored to that Mon-Fri week;
+// the activity totals themselves are the full Sun-Sat span.
 //
 // NOTE: a Sun-Sat activity week straddles two Mon-Fri business weeks — its
 // Sunday is the tail of the PRIOR business week, while Mon-Sat belong to the
-// next one. That's expected; each section only ever touches its own dates.
+// next one. The pairing used everywhere is: business-Monday M ↔ activity week
+// Sun(M-1)…Sat(M+5).
 export type ActivityWeekOption = {
-  weekStart: string; // Sunday, yyyy-MM-dd
-  weekEnd: string; // Saturday, yyyy-MM-dd
-  monday: string; // Monday, yyyy-MM-dd — Mon-Fri business section start
-  friday: string; // Friday, yyyy-MM-dd — Mon-Fri business section end
+  weekStart: string; // Sunday, yyyy-MM-dd — activity week start (canonical save row)
+  weekEnd: string; // Saturday, yyyy-MM-dd — activity week end
+  monday: string; // Monday, yyyy-MM-dd — paired Mon-Fri business week start
+  friday: string; // Friday, yyyy-MM-dd — paired Mon-Fri business week end
   label: string; // "MM-dd-yyyy – MM-dd-yyyy" (Sun – Sat)
   isCurrent: boolean;
 };
@@ -308,24 +362,29 @@ export function progressColor(percent: number): {
   return { bar: "bg-red-500", text: "text-red-600 dark:text-red-400" };
 }
 
-// Returns the goal that should apply to this salesperson today.
+// Returns the goal that should apply to this salesperson as of `asOf`.
 // Prefers a per-person row, falls back to the global (null salesperson_id).
-// Both filtered to effective_from <= today.
-export async function fetchActiveGoalFor(salespersonId: string): Promise<{
+// Both filtered to effective_from <= asOf.
+//
+// `asOf` defaults to the Denver business date (today). AE activity surfaces
+// pass `pairedBusinessMonday()` instead, so the goal resolves for the Mon-Fri
+// week paired with the CURRENT Sun-Sat activity week — on a Sunday that's the
+// upcoming Monday, so a Monday-effective goal change applies to the new week
+// the AE is already logging into (no comparing new-week activity to the prior
+// week's goal).
+export async function fetchActiveGoalFor(
+  salespersonId: string,
+  asOf: string = format(todayInAppTimezone(), "yyyy-MM-dd"),
+): Promise<{
   data: WeeklyGoal | null;
   error: { message: string } | null;
 }> {
-  // Denver business date — keeps the "effective_from <= today" cutoff
-  // aligned with everything else that asks "which week is now". A raw
-  // UTC slice would briefly flip to the next day's goal in late Denver
-  // evening, before the Denver-aware leaderboard / Weekly Focus does.
-  const today = format(todayInAppTimezone(), "yyyy-MM-dd");
   const [personal, global] = await Promise.all([
     supabase
       .from("weekly_goals")
       .select("*")
       .eq("salesperson_id", salespersonId)
-      .lte("effective_from", today)
+      .lte("effective_from", asOf)
       .order("effective_from", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(1)
@@ -334,7 +393,7 @@ export async function fetchActiveGoalFor(salespersonId: string): Promise<{
       .from("weekly_goals")
       .select("*")
       .is("salesperson_id", null)
-      .lte("effective_from", today)
+      .lte("effective_from", asOf)
       .order("effective_from", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(1)

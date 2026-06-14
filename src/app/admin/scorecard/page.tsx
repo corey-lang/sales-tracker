@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { apiFetch } from "@/lib/api-client";
 import { formatActivityStamp } from "@/lib/dates";
-import { progressColor, recentBusinessWeeks } from "@/lib/goals";
+import { progressColor, recentActivityWeeks } from "@/lib/goals";
 import {
   DEFAULT_WORKING_DAYS,
   formatAvailableDays,
@@ -22,13 +22,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-// Admin AE Scorecard — manager-only operating snapshot for one Mon-Fri
-// week. Shows weekly score % alongside raw KPI counts (visits, cards,
-// to-dos, offices, last-active) so the manager can see how each AE is
-// USING the app, not just their leaderboard percentage.
-//
-// Raw counts live only here and on /admin/reports/activity. The
-// AE-facing /leaderboard stays percentage-only by design.
+// Admin AE Scorecard — manager-only operating snapshot for one Sun-Sat
+// activity week. Score % and Manual Visits use the Sun-Sat activity numerator;
+// the weekly target behind the score stays adjusted for working days / PTO.
+// The remaining KPI tiles (CRM visits, cards, to-dos, offices) are separate
+// timestamped operational signals over the week. The AE-facing /leaderboard
+// stays percentage-only by design.
 
 type ScorecardRow = {
   id: string;
@@ -67,7 +66,7 @@ function rankRows(rows: ScorecardRow[]): ScorecardRow[] {
 export default function AdminScorecardPage() {
   useScrollToTop();
 
-  const weeks = useMemo(() => recentBusinessWeeks(12), []);
+  const weeks = useMemo(() => recentActivityWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const [load, setLoad] = useState<Load>({ status: "loading" });
 

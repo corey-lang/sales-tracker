@@ -1,7 +1,8 @@
-import { addDays, format, isValid, parseISO, startOfWeek } from "date-fns";
+import { addDays, format, isValid, parseISO } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { todayInAppTimezone } from "@/lib/dates";
+import { pairedBusinessMonday } from "@/lib/goals";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import { buildScorecard } from "@/lib/server/scorecard";
 
@@ -39,13 +40,18 @@ export async function GET(req: Request) {
       throw badRequest("weekStart is not a valid calendar date.");
     }
 
+    // `weekStart` identifies a Sun-Sat ACTIVITY week (its Sunday); resolve its
+    // paired business Monday for availability/goals while the activity counts
+    // (manual visits + score) come from the Sun-Sat numerator. Robust to a
+    // legacy Monday param.
     const now = todayInAppTimezone();
     const todayStr = format(now, "yyyy-MM-dd");
-    const monday = startOfWeek(parsed, { weekStartsOn: 1 });
-    const since = format(monday, "yyyy-MM-dd");
-    let through = format(addDays(monday, 4), "yyyy-MM-dd");
+    const since = pairedBusinessMonday(parsed);
+    let through = format(addDays(parseISO(since), 4), "yyyy-MM-dd");
     if (through > todayStr) through = todayStr;
-    const goalAsOf = through;
+    // Never before the week's Monday (Sunday current-week case); see admin
+    // leaderboard route for rationale.
+    const goalAsOf = through < since ? since : through;
 
     const { rows, error } = await buildScorecard(
       getServerSupabase(),

@@ -7,6 +7,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
+  activityWindowForBusinessWeek,
   adjustedWeekScore,
   resolveActiveGoal,
   weeklyTargetsFrom,
@@ -54,11 +55,16 @@ export type ActivityReportRow = {
 const REPORT_READ_ERROR = "Could not load the activity report.";
 
 /**
- * Builds the per-AE activity report for the Mon-Fri window [`since`, `through`].
- * `since` is the week's Monday (also the weekStart for available-day math),
- * `goalAsOf` resolves each AE's goal as of the week, and `today` is the real
- * Denver date for pace. FAILS CLOSED — any read error (including adjustments)
- * returns a user-safe `error`, never a silently-empty result.
+ * Builds the per-AE activity report for one week. `since` is the week's Monday
+ * (the weekStart for available-day math AND goal resolution), `through` its
+ * Mon-Fri end, `goalAsOf` resolves each AE's goal as of the week, and `today`
+ * is the real Denver date for pace.
+ *
+ * The ACTIVITY total (numerator) is summed over the Sun-Sat ACTIVITY week that
+ * contains this business week — weekend logging counts — while targets,
+ * available days, and pace stay Mon-Fri (activityWindowForBusinessWeek). FAILS
+ * CLOSED — any read error (including adjustments) returns a user-safe `error`,
+ * never a silently-empty result.
  */
 export async function buildActivityReport(
   supabase: SupabaseClient,
@@ -67,6 +73,8 @@ export async function buildActivityReport(
   goalAsOf: string,
   today: string,
 ): Promise<{ rows: ActivityReportRow[]; error: string | null }> {
+  // Numerator window = Sun-Sat activity week (weekend entries included).
+  const activity = activityWindowForBusinessWeek(since, today);
   const [peopleRes, entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
     supabase
       .from("salespeople")
@@ -77,8 +85,8 @@ export async function buildActivityReport(
     supabase
       .from("activity_entries")
       .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
-      .gte("entry_date", since)
-      .lte("entry_date", through),
+      .gte("entry_date", activity.since)
+      .lte("entry_date", activity.through),
     supabase.from("weekly_goals").select("*"),
     fetchWeekAdjustments(supabase, since),
   ]);
@@ -86,7 +94,7 @@ export async function buildActivityReport(
   if (peopleRes.error ?? entriesRes.error ?? goalsRes.error) {
     const provider = peopleRes.error ?? entriesRes.error ?? goalsRes.error;
     console.warn(
-      `[activity-report] read failed since=${since} code=${provider?.code ?? "?"} msg=${provider?.message ?? "?"}`,
+      `[activity-report] read failed business=[${since}..${through}] activity=[${activity.since}..${activity.through}] code=${provider?.code ?? "?"} msg=${provider?.message ?? "?"}`,
     );
     return { rows: [], error: REPORT_READ_ERROR };
   }

@@ -14,6 +14,7 @@ import {
   activityWeekToDateRange,
   adjustedTargetsFrom,
   fetchActiveGoalFor,
+  pairedBusinessMonday,
 } from "@/lib/goals";
 import {
   DEFAULT_WORKING_DAYS,
@@ -77,7 +78,9 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
 
     Promise.all([
       totalsPromise,
-      fetchActiveGoalFor(salespersonId),
+      // Goal for the Mon-Fri week paired with the current Sun-Sat activity week,
+      // so it aligns with the availPromise window (/api/me/working-days).
+      fetchActiveGoalFor(salespersonId, pairedBusinessMonday()),
       availPromise,
     ]).then(([totalsResult, goalResult, availableDaysOrNull]) => {
       if (cancelled) return;

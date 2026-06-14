@@ -2,7 +2,7 @@ import { format } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { todayInAppTimezone } from "@/lib/dates";
-import { businessWeekToDateRange } from "@/lib/goals";
+import { pairedBusinessMonday } from "@/lib/goals";
 import { handleApiError, requireAeToolAccess } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 
@@ -44,18 +44,24 @@ export async function GET(req: Request) {
   try {
     const me = await requireAeToolAccess(req);
 
-    // Anchor to the app business zone (America/Denver) so the
-    // leaderboard's "this week" rolls over at the same instant as the
-    // Weekly Focus surfaces. See src/lib/dates.ts for rationale.
+    // "This week" is the CURRENT Sun-Sat ACTIVITY week (rolls Sunday). We pass
+    // its paired business Monday as `since`: computeStandings sums the activity
+    // numerator over the Sun-Sat window derived from it, while availability /
+    // adjusted targets / pace use that Mon-Fri week. On Sunday this is the NEW
+    // week, so a Sunday log counts immediately. Denver-anchored so the boundary
+    // matches the rest of the app (see src/lib/dates.ts).
     const now = todayInAppTimezone();
-    const { since, through } = businessWeekToDateRange(now);
     const todayStr = format(now, "yyyy-MM-dd");
+    const since = pairedBusinessMonday(now);
 
     const { standings, error } = await computeStandings(
       getServerSupabase(),
       since,
-      through,
       todayStr,
+      // Resolve goals as of the paired business Monday (not today), so on a
+      // Sunday a Monday-effective goal applies to the new activity week rather
+      // than scoring it against the prior week's goal.
+      since,
       todayStr,
     );
     if (error) {

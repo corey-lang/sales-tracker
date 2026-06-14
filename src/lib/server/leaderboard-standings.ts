@@ -7,6 +7,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
+  activityWindowForBusinessWeek,
   adjustedWeekScore,
   resolveActiveGoal,
   type WeeklyGoal,
@@ -48,10 +49,21 @@ export type LeaderboardStanding = {
 const ACTIVITY_KEYS = ACTIVITIES.map((a) => a.key);
 
 /**
- * Computes leaderboard standings for the Mon-Fri range [`since`, `through`],
- * resolving each AE's weekly goal as of `goalAsOf`. Requires a service-role
- * Supabase client. Returns ONLY standings (id, name, raw totals, percent) —
- * goal targets never leave this function.
+ * Computes leaderboard standings. The week is identified by its Monday
+ * (`since`) and Mon-Fri end (`through`), which anchor the BUSINESS-week math:
+ * available days, goal resolution (`goalAsOf`), and pace.
+ *
+ * ACTIVITY TOTALS (the numerator), however, are summed over the Sun-Sat
+ * ACTIVITY week that contains this business week — so weekend logging counts
+ * toward "what was achieved" while targets/availability/pace stay Mon-Fri. See
+ * activityWindowForBusinessWeek.
+ *
+ *   activity week  = Sun-Sat (numerator)
+ *   business week  = Mon-Fri (targets / available days / pace)
+ *
+ * Requires a service-role Supabase client. Returns ONLY standings (id, name,
+ * raw totals, percent) — goal targets never leave this function. `today` MUST
+ * be the real current Denver date so a past week's Saturday isn't dropped.
  */
 export async function computeStandings(
   supabase: SupabaseClient,
@@ -59,11 +71,12 @@ export async function computeStandings(
   through: string,
   goalAsOf: string,
   // The real current Denver date (yyyy-MM-dd). Pace counts available days
-  // strictly before this as "elapsed", so a fully-past week reads 100%
-  // expected and the current week reads its true to-date pace. Defaults to
-  // `through` for callers that don't distinguish (current-week case).
-  today: string = through,
+  // strictly before this as "elapsed"; it also caps the Sun-Sat activity
+  // window so the current week never counts future days.
+  today: string,
 ): Promise<{ standings: LeaderboardStanding[]; error: string | null }> {
+  // Numerator window = the Sun-Sat activity week containing this Mon-Fri week.
+  const activity = activityWindowForBusinessWeek(since, today);
   const [peopleRes, entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
     // Only true AEs compete. Filtering positively on `role = 'ae'` (vs.
     // excluding known non-AE roles) keeps juice_box_only guests (Travis,
@@ -75,11 +88,13 @@ export async function computeStandings(
       .select("id, first_name")
       .eq("role", "ae")
       .eq("is_test", false),
+    // Activity numerator: Sun-Sat window (weekend entries included), NOT the
+    // Mon-Fri [since, through]. Targets/availability below stay Mon-Fri.
     supabase
       .from("activity_entries")
       .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
-      .gte("entry_date", since)
-      .lte("entry_date", through),
+      .gte("entry_date", activity.since)
+      .lte("entry_date", activity.through),
     supabase.from("weekly_goals").select("*"),
     // `since` is the week's Monday everywhere this is called, so it doubles
     // as the weekStart for available-day math. Fetched once, reused per AE.

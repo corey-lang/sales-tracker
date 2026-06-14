@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { apiFetch } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
-import { progressColor, recentBusinessWeeks } from "@/lib/goals";
+import { progressColor, recentActivityWeeks } from "@/lib/goals";
 import {
   DEFAULT_WORKING_DAYS,
   formatAvailableDays,
@@ -58,8 +58,8 @@ function rankStandings(rows: Standing[]): Standing[] {
 export default function AdminLeaderboardPage() {
   useScrollToTop();
 
-  // Current business week + the prior 11 weeks; current is first.
-  const weeks = useMemo(() => recentBusinessWeeks(12), []);
+  // Current Sun-Sat activity week + the prior 11 weeks; current is first.
+  const weeks = useMemo(() => recentActivityWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const [load, setLoad] = useState<Load>({ status: "loading" });
 
@@ -112,7 +112,7 @@ export default function AdminLeaderboardPage() {
           <div>
             <CardTitle>Team standings</CardTitle>
             <CardDescription>
-              Ranked by % of weekly goal completed Monday-Friday.
+              Ranked by % of weekly goal completed (Sunday-Saturday activity).
             </CardDescription>
           </div>
           <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">

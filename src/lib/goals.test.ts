@@ -6,8 +6,13 @@ import { describe, expect, it } from "vitest";
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "http://localhost";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "test-anon-key";
 
-const { activityWeekToDateRange, businessWeekToDateRange, recentActivityWeeks } =
-  await import("@/lib/goals");
+const {
+  activityWeekToDateRange,
+  activityWindowForBusinessWeek,
+  businessWeekToDateRange,
+  pairedBusinessMonday,
+  recentActivityWeeks,
+} = await import("@/lib/goals");
 
 // All dates constructed at local midnight so date-fns reasons about the
 // intended calendar day (mirrors todayInAppTimezone's anchor).
@@ -97,17 +102,65 @@ describe("recentActivityWeeks", () => {
     expect(current.weekEnd > current.friday).toBe(true); // Sat after Fri
   });
 
-  it("gates the current week's Mon-Fri section until its Monday arrives", () => {
-    // EditWeekCard disables the Mon-Fri save when `monday > today` (both are
-    // yyyy-MM-dd strings). Verify that invariant across the Sun→Mon boundary.
+  it("the canonical save row (Sunday/weekStart) is always <= today", () => {
+    // EditWeekCard consolidates a week's total onto its Sunday row. For any
+    // selectable week that Sunday is <= today, so capped Sun-Sat readers always
+    // see it (no future-dated write).
+    const weeks = recentActivityWeeks(4, at("2026-06-14")); // a Sunday
+    for (const w of weeks) {
+      expect(w.weekStart <= "2026-06-14").toBe(true);
+    }
+  });
+});
 
-    // Sunday 2026-06-14: current week's Monday (06-15) is in the future → gated.
-    const [sunWeek] = recentActivityWeeks(1, at("2026-06-14"));
-    expect(sunWeek.monday > "2026-06-14").toBe(true);
+describe("pairedBusinessMonday", () => {
+  it("rolls the week on SUNDAY, not Monday", () => {
+    // Sunday 2026-06-14 → the NEW week's Monday (06-15), so a Sunday log lands
+    // in the current week. businessWeekToDateRange would still point at the
+    // PRIOR Monday here (it rolls Monday) — that's the bug this fixes.
+    expect(pairedBusinessMonday(at("2026-06-14"))).toBe("2026-06-15");
+    expect(businessWeekToDateRange(at("2026-06-14")).since).toBe("2026-06-08");
+  });
 
-    // Monday 2026-06-15: same activity week, Monday has arrived → open.
-    const [monWeek] = recentActivityWeeks(1, at("2026-06-15"));
-    expect(monWeek.weekStart).toBe("2026-06-14"); // still the Sun-Sat week
-    expect(monWeek.monday > "2026-06-15").toBe(false);
+  it("matches businessWeekToDateRange's Monday on Mon-Sat", () => {
+    // Wednesday and Saturday of the same activity week both pair to Mon 06-15.
+    expect(pairedBusinessMonday(at("2026-06-17"))).toBe("2026-06-15"); // Wed
+    expect(pairedBusinessMonday(at("2026-06-20"))).toBe("2026-06-15"); // Sat
+    expect(businessWeekToDateRange(at("2026-06-17")).since).toBe("2026-06-15");
+  });
+
+  it("is robust to a legacy Monday input (same week)", () => {
+    // A stored/bookmarked Monday maps to the same paired Monday.
+    expect(pairedBusinessMonday(at("2026-06-15"))).toBe("2026-06-15");
+  });
+});
+
+describe("activityWindowForBusinessWeek", () => {
+  // The split: business-Monday M ↔ activity window Sun(M-1)…Sat(M+5).
+  it("maps a business Monday to its Sun-Sat activity window (mid-week cap)", () => {
+    // Business week Mon 2026-06-15; viewed on Wed 2026-06-17.
+    expect(activityWindowForBusinessWeek("2026-06-15", "2026-06-17")).toEqual({
+      since: "2026-06-14", // Sunday before the Monday
+      through: "2026-06-17", // capped at today
+    });
+  });
+
+  it("returns the whole Sun-Sat span for a fully-past week", () => {
+    // Same business week, but today is well past it → full Saturday included.
+    expect(activityWindowForBusinessWeek("2026-06-15", "2026-07-01")).toEqual({
+      since: "2026-06-14", // Sunday
+      through: "2026-06-20", // Saturday (M+5), not the Mon-Fri Friday
+    });
+  });
+
+  it("includes the week's own Sunday but not the next/prior week's", () => {
+    // The activity window for business Mon 06-15 starts on Sun 06-14 and ends
+    // on Sat 06-20 — the Sunday that belongs to THIS activity week, and the
+    // Saturday a Mon-Fri window would have excluded.
+    const full = activityWindowForBusinessWeek("2026-06-15", "2026-12-31");
+    const business = businessWeekToDateRange(at("2026-06-15"));
+    expect(business.since).toBe("2026-06-15"); // Mon-Fri starts Monday
+    expect(full.since).toBe("2026-06-14"); // activity starts the Sunday before
+    expect(full.through > business.through).toBe(true); // Sat 06-20 > Fri 06-19
   });
 });

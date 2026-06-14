@@ -1,9 +1,9 @@
-import { addDays, format, startOfWeek } from "date-fns";
+import { addDays, format, parseISO, startOfWeek } from "date-fns";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { appTimezoneMidnightUtc, todayInAppTimezone } from "@/lib/dates";
 import { GOAL_ACTIVITY_KEYS, ZERO_GOAL_VALUES } from "@/lib/goal-activities";
-import { businessWeekToDateRange, mondayOfWeek } from "@/lib/goals";
+import { mondayOfWeek, pairedBusinessMonday } from "@/lib/goals";
 import { ApiError, notFound } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 import type {
@@ -258,12 +258,18 @@ export async function requireCoachableAe(
 export const TREND_WEEKS = 4;
 
 /**
- * Returns Mon-Fri ranges for the last N weeks (oldest -> newest). Each
- * entry is `{ since, through, weekStart, goalAsOf }`:
- *   * since/through    — DATE strings (YYYY-MM-DD) for the activity_entries
- *                        range filter
- *   * weekStart        — DATE string of Monday (used as the trend point
- *                        label, also as goalAsOf for that week)
+ * Returns the business-Monday anchors for the last N ACTIVITY weeks (oldest ->
+ * newest). Each entry is `{ since, through, week_start, goalAsOf }`:
+ *   * since/through    — the Mon-Fri business window (since = Monday). These
+ *                        anchor availability/pace and `through` is the Mon-Fri
+ *                        end capped at today.
+ *   * week_start       — DATE string of Monday (trend label + goalAsOf).
+ *
+ * The CURRENT week is anchored on the activity week (rolls SUNDAY) via
+ * pairedBusinessMonday, NOT businessWeekToDateRange — so on a Sunday the trend's
+ * latest point is already the new week and a Sunday log shows immediately. The
+ * activity NUMERATOR for each week is the Sun-Sat span derived from `since`
+ * inside computeStandings (activityWindowForBusinessWeek).
  */
 export function recentWeekRanges(
   asOf: Date = todayInAppTimezone(),
@@ -274,6 +280,8 @@ export function recentWeekRanges(
   week_start: string;
   goalAsOf: string;
 }> {
+  const currentMonday = parseISO(pairedBusinessMonday(asOf));
+  const todayStr = format(asOf, "yyyy-MM-dd");
   const out: Array<{
     since: string;
     through: string;
@@ -281,15 +289,16 @@ export function recentWeekRanges(
     goalAsOf: string;
   }> = [];
   for (let i = weeks - 1; i >= 0; i--) {
-    const dayInWeek = addDays(asOf, -7 * i);
-    const { since, through } = businessWeekToDateRange(dayInWeek);
+    const monday = format(addDays(currentMonday, -7 * i), "yyyy-MM-dd");
+    const friday = format(addDays(parseISO(monday), 4), "yyyy-MM-dd");
+    const through = friday < todayStr ? friday : todayStr; // cap current week
     out.push({
-      since,
+      since: monday,
       through,
-      week_start: since,
+      week_start: monday,
       // Resolve each AE's weekly goal AS OF that week's Monday so a
       // mid-year goal change doesn't retroactively rewrite history.
-      goalAsOf: since,
+      goalAsOf: monday,
     });
   }
   return out;
@@ -356,11 +365,15 @@ export async function buildSnapshots(
   if (aeIds.length === 0) return new Map();
   const weeks = recentWeekRanges(asOf);
   const currentWeek = weeks[weeks.length - 1];
+  // Real Denver date — computeStandings needs it to cap the current week's
+  // Sun-Sat activity window and to include each PAST week's Saturday (a
+  // Mon-Fri-clamped `through` would drop it). Pace/availability stay Mon-Fri.
+  const todayStr = format(asOf, "yyyy-MM-dd");
 
   const [trendResults, cardCounts] = await Promise.all([
     Promise.all(
       weeks.map((w) =>
-        computeStandings(supabase, w.since, w.through, w.goalAsOf),
+        computeStandings(supabase, w.since, w.through, w.goalAsOf, todayStr),
       ),
     ),
     businessCardCountsByAe(

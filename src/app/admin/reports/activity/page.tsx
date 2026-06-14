@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-client";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { ACTIVITIES, type ActivityKey } from "@/lib/activities";
-import { recentBusinessWeeks } from "@/lib/goals";
+import { recentActivityWeeks } from "@/lib/goals";
 import { formatDateMDY } from "@/lib/dates";
 import {
   DEFAULT_WORKING_DAYS,
@@ -22,8 +22,9 @@ import {
 } from "@/components/ui/card";
 
 // Activity Reports — per-AE progress toward weekly goals for a selectable
-// business week. Two views: Goal Progress (actual/goal counts) and Percentage
-// (completion % per activity).
+// Sun-Sat activity week. Activity actuals are the Sun-Sat numerator; the goal
+// behind each cell stays adjusted for working days / PTO. Two views: Goal
+// Progress (actual/goal counts) and Percentage (completion % per activity).
 //
 // SECURITY BOUNDARY: the data is computed SERVER-SIDE behind the admin-gated
 // GET /api/admin/reports/activity (requireAdmin). The browser no longer reads
@@ -120,8 +121,8 @@ function rankRows(rows: ReportRow[]): ReportRow[] {
 export default function ActivityReportPage() {
   useScrollToTop();
 
-  // Current business week + the prior 11 weeks; current is first.
-  const weeks = useMemo(() => recentBusinessWeeks(12), []);
+  // Current Sun-Sat activity week + the prior 11 weeks; current is first.
+  const weeks = useMemo(() => recentActivityWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const week = useMemo(
     () => weeks.find((w) => w.weekStart === weekStart) ?? weeks[0],
@@ -184,7 +185,8 @@ export default function ActivityReportPage() {
             <div>
               <CardTitle>Activity Reports</CardTitle>
               <CardDescription>
-                Each AE&apos;s progress toward their weekly goal, Monday-Friday.
+                Each AE&apos;s Sunday-Saturday activity vs their weekly goal
+                (target adjusted for working days).
                 {partialWeek && ` Through ${formatDateMDY(through)}.`}
               </CardDescription>
             </div>

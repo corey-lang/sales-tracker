@@ -58,23 +58,26 @@ export function FiltersCard({
     onChangeTo(fmt(end));
   };
 
-  // All quick-filter buttons anchor to the Denver business calendar so
-  // "This week" / "Today" / "MTD" line up with the leaderboard and
-  // Weekly Focus's notion of the current day/week regardless of the
-  // admin's browser timezone.
+  // Quick-filter buttons anchor to the Denver calendar. Week ranges use the
+  // Sun-Sat ACTIVITY week (rolls Sunday) so weekend logging — and today's
+  // Sunday activity — counts. The range engine still adjusts targets on the
+  // Mon-Fri working days inside the range.
   const applyToday = () => {
     const n = todayInAppTimezone();
     apply(n, n);
   };
   const applyThisWeek = () => {
     const n = todayInAppTimezone();
-    const start = startOfWeek(n, { weekStartsOn: 1 });
-    apply(start, addDays(start, 4));
+    const sunday = startOfWeek(n, { weekStartsOn: 0 });
+    const saturday = addDays(sunday, 6);
+    apply(sunday, n < saturday ? n : saturday); // cap at today
   };
   const applyLastWeek = () => {
-    const n = subWeeks(todayInAppTimezone(), 1);
-    const start = startOfWeek(n, { weekStartsOn: 1 });
-    apply(start, addDays(start, 4));
+    const sunday = subWeeks(
+      startOfWeek(todayInAppTimezone(), { weekStartsOn: 0 }),
+      1,
+    );
+    apply(sunday, addDays(sunday, 6));
   };
   const applyMTD = () => {
     const n = todayInAppTimezone();

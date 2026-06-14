@@ -1,7 +1,8 @@
-import { addDays, format, isValid, parseISO, startOfWeek } from "date-fns";
+import { addDays, format, isValid, parseISO } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { todayInAppTimezone } from "@/lib/dates";
+import { pairedBusinessMonday } from "@/lib/goals";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 
@@ -40,19 +41,21 @@ export async function GET(req: Request) {
       throw badRequest("weekStart is not a valid calendar date.");
     }
 
-    // Normalize to the Monday of that week, then Mon-Fri. Never report past
-    // today, so picking the current week shows progress so far. "Today" is
-    // the Denver business-day so this admin view never drifts ahead of the
-    // AE-facing leaderboard.
+    // `weekStart` identifies a Sun-Sat ACTIVITY week (its Sunday). Resolve its
+    // paired business Monday for availability/goal/pace; computeStandings sums
+    // the activity NUMERATOR over the Sun-Sat window derived from it. Robust to
+    // a legacy Monday param. Never report past today, so the current week shows
+    // progress so far. "Today" is the Denver business day.
     const now = todayInAppTimezone();
     const todayStr = format(now, "yyyy-MM-dd");
-    const monday = startOfWeek(parsed, { weekStartsOn: 1 });
-    const since = format(monday, "yyyy-MM-dd");
-    let through = format(addDays(monday, 4), "yyyy-MM-dd");
+    const since = pairedBusinessMonday(parsed); // business Monday of that activity week
+    let through = format(addDays(parseISO(since), 4), "yyyy-MM-dd");
     if (through > todayStr) through = todayStr;
-    // Resolve each AE's goal as of the week's end, so prior weeks score
-    // against the goal that was in effect then.
-    const goalAsOf = through;
+    // Resolve each AE's goal as of the week's end so prior weeks score against
+    // the goal in effect then — but never BEFORE the week's Monday. On a Sunday
+    // the current week's `through` (today) is before `since`; clamp so a
+    // Monday-effective goal still applies to the new activity week.
+    const goalAsOf = through < since ? since : through;
 
     const { standings, error } = await computeStandings(
       getServerSupabase(),

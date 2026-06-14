@@ -25,17 +25,20 @@ export default function AdminDashboardPage() {
 
   useScrollToTop();
 
-  // Anchor "this week" to the Denver business calendar so the default
-  // filter on the admin dashboard agrees with the leaderboard's and
-  // Weekly Focus's notion of the current week.
-  const currentBusinessWeekStart = () =>
-    startOfWeek(todayInAppTimezone(), { weekStartsOn: 1 });
+  // Default the Activity Totals range to the current Sun-Sat ACTIVITY week
+  // (rolls Sunday), capped at today, so weekend logging — and today's Sunday
+  // activity — is included on first load. Matches the "This week" quick filter.
+  // The range engine still adjusts targets on the Mon-Fri working days inside.
+  const currentActivitySunday = () =>
+    startOfWeek(todayInAppTimezone(), { weekStartsOn: 0 });
   const [from, setFrom] = useState(() =>
-    format(currentBusinessWeekStart(), "yyyy-MM-dd"),
+    format(currentActivitySunday(), "yyyy-MM-dd"),
   );
-  const [to, setTo] = useState(() =>
-    format(addDays(currentBusinessWeekStart(), 4), "yyyy-MM-dd"),
-  );
+  const [to, setTo] = useState(() => {
+    const now = todayInAppTimezone();
+    const saturday = addDays(currentActivitySunday(), 6);
+    return format(now < saturday ? now : saturday, "yyyy-MM-dd");
+  });
   const [salespersonFilter, setSalespersonFilter] = useState<string>("all");
 
   useEffect(() => {

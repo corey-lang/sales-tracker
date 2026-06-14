@@ -1,5 +1,3 @@
-import { isWeekend, parseISO } from "date-fns";
-
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
   ApiError,
@@ -72,12 +70,14 @@ export async function GET(req: Request) {
       throw new ApiError(500, "Could not load your activity report.");
     }
 
-    // Sum WEEKDAY activity over the range (targets are business-day based).
+    // Sum ALL logged activity over the range, weekends INCLUDED — activity
+    // totals are the Sun-Sat numerator. Targets stay business-day (Mon-Fri)
+    // based via the Range Goal Engine, so weekend work counts toward what was
+    // achieved without changing the working-day target.
     const actuals: ActivityValues = { ...ZERO_ACTIVITY };
     for (const e of (entriesRes.data ?? []) as unknown as Array<
       Partial<ActivityValues> & { entry_date: string }
     >) {
-      if (isWeekend(parseISO(e.entry_date))) continue;
       for (const k of ACTIVITY_KEYS) actuals[k] += Number(e[k] ?? 0);
     }
 

@@ -9,8 +9,9 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
-  businessWeekToDateRange,
+  activityWeekToDateRange,
   fetchActiveGoalFor,
+  pairedBusinessMonday,
   weeklyTargetsFrom,
 } from "@/lib/goals";
 
@@ -37,7 +38,8 @@ export function TodayTotalsCard({ salespersonId, refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const { since, through } = businessWeekToDateRange();
+    // Sun-Sat activity week so weekend logging shows in the weekly totals.
+    const { since, through } = activityWeekToDateRange();
 
     const totalsPromise = supabase
       .from("activity_entries")
@@ -46,7 +48,11 @@ export function TodayTotalsCard({ salespersonId, refreshKey }: Props) {
       .gte("entry_date", since)
       .lte("entry_date", through);
 
-    Promise.all([totalsPromise, fetchActiveGoalFor(salespersonId)]).then(
+    Promise.all([
+      totalsPromise,
+      // Goal for the Mon-Fri week paired with the current Sun-Sat activity week.
+      fetchActiveGoalFor(salespersonId, pairedBusinessMonday()),
+    ]).then(
       ([totalsResult, goalResult]) => {
         if (cancelled) return;
 

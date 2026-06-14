@@ -14,6 +14,7 @@ import { todayInAppTimezone } from "@/lib/dates";
 import {
   activityWeekToDateRange,
   fetchActiveGoalFor,
+  pairedBusinessMonday,
   weeklyTargetsFrom,
 } from "@/lib/goals";
 
@@ -51,7 +52,8 @@ export function DailyEntryForm({
         .eq("salesperson_id", salespersonId)
         .gte("entry_date", since)
         .lte("entry_date", through),
-      fetchActiveGoalFor(salespersonId),
+      // Goal for the Mon-Fri week paired with the current Sun-Sat activity week.
+      fetchActiveGoalFor(salespersonId, pairedBusinessMonday()),
     ]).then(([totalsRes, goalRes]) => {
       if (cancelled) return;
       const firstErr = totalsRes.error ?? goalRes.error;

@@ -94,20 +94,27 @@ const PRESETS: { key: PresetKey; label: string }[] = [
 
 const iso = (d: Date) => format(d, "yyyy-MM-dd");
 
-/** Resolve a preset to a {from,to} business range, anchored to Denver today. */
+/**
+ * Resolve a preset to a {from,to} range, anchored to Denver today. Week presets
+ * use the Sun-Sat ACTIVITY week (rolls Sunday) so weekend logging — and today's
+ * Sunday activity — is included. The range engine still adjusts targets on the
+ * Mon-Fri working days inside the range.
+ */
 function presetRange(preset: PresetKey, customFrom: string, customTo: string) {
   const today = todayInAppTimezone();
-  const thisMonday = startOfWeek(today, { weekStartsOn: 1 });
-  const thisFriday = addDays(thisMonday, 4);
+  // Current Sun-Sat activity week; `through` is already capped at today.
+  const thisSunday = startOfWeek(today, { weekStartsOn: 0 });
+  const thisSaturday = addDays(thisSunday, 6);
+  const thisThrough = today < thisSaturday ? today : thisSaturday;
   switch (preset) {
     case "this":
-      return { from: iso(thisMonday), to: iso(thisFriday) };
+      return { from: iso(thisSunday), to: iso(thisThrough) };
     case "last": {
-      const lastMon = subWeeks(thisMonday, 1);
-      return { from: iso(lastMon), to: iso(addDays(lastMon, 4)) };
+      const lastSun = subWeeks(thisSunday, 1);
+      return { from: iso(lastSun), to: iso(addDays(lastSun, 6)) };
     }
     case "last2":
-      return { from: iso(subWeeks(thisMonday, 1)), to: iso(thisFriday) };
+      return { from: iso(subWeeks(thisSunday, 1)), to: iso(thisThrough) };
     case "mtd":
       return { from: iso(startOfMonth(today)), to: iso(today) };
     case "lastmonth": {
