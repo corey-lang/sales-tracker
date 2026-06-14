@@ -102,6 +102,20 @@ describe("recentActivityWeeks", () => {
     expect(current.weekEnd > current.friday).toBe(true); // Sat after Fri
   });
 
+  it("emits weeks that satisfy the replace_activity_week RPC contract", () => {
+    // The RPC validates p_week_start is a Sunday and p_week_end = start + 6.
+    // EditWeekCard passes weekStart/weekEnd straight through, so every option
+    // must satisfy that contract or saves would be rejected.
+    const weeks = recentActivityWeeks(6, at("2026-06-17"));
+    for (const w of weeks) {
+      expect(at(w.weekStart).getDay()).toBe(0); // Sunday (local midnight)
+      const diffDays = Math.round(
+        (at(w.weekEnd).getTime() - at(w.weekStart).getTime()) / 86_400_000,
+      );
+      expect(diffDays).toBe(6); // Saturday = Sunday + 6
+    }
+  });
+
   it("the canonical save row (Sunday/weekStart) is always <= today", () => {
     // EditWeekCard consolidates a week's total onto its Sunday row. For any
     // selectable week that Sunday is <= today, so capped Sun-Sat readers always

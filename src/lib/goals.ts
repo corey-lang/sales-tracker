@@ -75,20 +75,22 @@ export function businessWeekToDateRange(
   };
 }
 
-// Sunday-through-Saturday range for the AE *activity logging* week.
+// Sunday-through-Saturday range for the ACTIVITY week. Sunday STARTS the
+// activity week; Saturday CLOSES it. This is the canonical window for ACTIVITY
+// TOTALS / numerators / progress / pacing — Saturday and Sunday logging count
+// toward the week. (Distinct from businessWeekToDateRange, Mon-Fri, which is
+// only the TARGET side: available days, PTO/holiday, adjusted goals, and pace
+// stay anchored to the Monday-Friday working-day week.)
 //
-// Distinct from businessWeekToDateRange (Mon-Fri) on purpose: AEs may log or
-// catch up on activity on weekends, so a rep's running "this week" total must
-// include Saturday/Sunday entries — otherwise a weekend save succeeds in the
-// DB but the visible total still reads 0/goal.
+// activity week = Sun-Sat (what was logged) · business week = Mon-Fri (targets).
 //
-// This is for AE logged-activity DISPLAY surfaces — DailyEntryForm, MyWeekCard,
-// and ActivityWeekContext. (The AE "Edit activity week" card uses
-// recentActivityWeeks for the same Sun-Sat boundary, and writes each day on its
-// OWN entry_date.) It must NOT be used for goals, PTO/working-day availability,
-// on-pace math, the scorecard, leaderboard fairness, admin scoring, or
-// adjusted-goal math — those all stay anchored to the Monday-Friday business
-// week via businessWeekToDateRange.
+// This helper is the CLIENT-side Sun-Sat range used directly by the AE display
+// surfaces (DailyEntryForm, MyWeekCard, TodayTotalsCard, ActivityWeekContext).
+// Server-side weekly readers (leaderboard, scorecard, coaching trend, admin
+// activity report) compute the SAME Sun-Sat numerator window from a business
+// Monday via activityWindowForBusinessWeek; the AE "Edit activity week" card and
+// the admin week pickers enumerate Sun-Sat weeks via recentActivityWeeks. Do NOT
+// use this for the TARGET/availability/PTO/holiday/pace math — that is Mon-Fri.
 //
 // `through` is capped at today (never future) so a mid-week view doesn't query
 // past the current day. Default `today` is the Denver business calendar date,
@@ -238,10 +240,14 @@ export type ActivityWeekOption = {
 };
 
 // The current Sun-Sat activity week plus the prior `count - 1` weeks, newest
-// first. Powers ONLY the AE "Edit activity week" card. Default `today` is the
-// Denver business calendar date so "current" agrees with activityWeekToDateRange
-// and the dashboard activity surfaces — on a Sunday, the current week is the new
-// Sun-Sat week that begins that Sunday.
+// first. Powers every Sun-Sat activity-week SELECTOR: the AE "Edit activity
+// week" card and the admin leaderboard / scorecard / activity-report week
+// pickers (all of which show activity totals over the selected Sun-Sat week).
+// Default `today` is the Denver business calendar date so "current" agrees with
+// activityWeekToDateRange and the dashboard activity surfaces — on a Sunday the
+// current week is the NEW Sun-Sat week that begins that Sunday (Sunday starts
+// the activity week). Target/availability/PTO for a selected week stay Mon-Fri
+// via the paired business week (`monday`/`friday`).
 export function recentActivityWeeks(
   count = 12,
   today: Date = todayInAppTimezone(),

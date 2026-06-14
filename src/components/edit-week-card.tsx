@@ -34,6 +34,9 @@ import {
 // activity: the total is written to the week's Sunday row (the activity week's
 // canonical day, always <= today) and every other day in the Sun-Sat range is
 // cleared, so the week sums to exactly the entered numbers — no double count.
+// Both steps run atomically in one transaction via the `replace_activity_week`
+// RPC (supabase/replace_activity_week.sql), so no partial double-count state is
+// ever observable on failure.
 //
 // Every AE-facing weekly-activity surface reads the SAME Sun-Sat window
 // (DailyEntryForm, MyWeekCard, TodayTotalsCard, the leaderboard/scorecard/
@@ -104,48 +107,23 @@ export function EditWeekCard({
     setError(null);
     setSavedMsg(null);
 
-    // KNOWN RISK (follow-up): this replacement is two calls (upsert Sunday, then
-    // delete Mon-Sat) and is NOT atomic. If the delete fails after the upsert,
-    // leftover Mon-Sat rows make the week over-count until a successful retry.
-    // It is self-revealing (the refetched Sun-Sat total shows the inflated
-    // number, prompting a retry) but the proper fix is a transactional RPC
-    // (e.g. a `replace_activity_week` Postgres function) — deferred because it
-    // needs a DB migration. Upsert-before-delete is chosen so a partial failure
-    // never DROPS activity (it would only duplicate, recoverable on retry).
-
-    // 1. Write the full weekly total onto the week's Sunday (canonical) row.
-    //    Sunday is the activity week's first day and is always <= today, so
-    //    every Sun-Sat reader (capped at today) picks it up immediately.
-    const { error: upsertErr } = await supabase
-      .from("activity_entries")
-      .upsert(
-        {
-          salesperson_id: salespersonId,
-          entry_date: weekStart,
-          ...values,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "salesperson_id,entry_date" },
-      );
-    if (upsertErr) {
-      setSaving(false);
-      setError(upsertErr.message);
-      return;
-    }
-
-    // 2. Clear every other day in the Sun-Sat range (Mon..Sat) so the week's
-    //    sum equals the entered total. gt(weekStart) keeps the Sunday row just
-    //    written; the salesperson_id + date range keep other AEs and other
-    //    weeks untouched.
-    const { error: delErr } = await supabase
-      .from("activity_entries")
-      .delete()
-      .eq("salesperson_id", salespersonId)
-      .gt("entry_date", weekStart)
-      .lte("entry_date", weekEnd);
+    // Replacing a week's totals is TWO steps — write the total onto the week's
+    // Sunday row, then clear the rest of the Sun-Sat week — and they MUST be
+    // atomic: a failure between them would leave the week double-counted. So the
+    // whole replacement runs in a single Postgres transaction via the
+    // `replace_activity_week` RPC (see supabase/replace_activity_week.sql)
+    // instead of separate upsert + delete client calls. The RPC validates the
+    // Sun-Sat window, writes Sunday, and deletes Mon..Sat — scoped to this AE
+    // and this week — all-or-nothing.
+    const { error: rpcErr } = await supabase.rpc("replace_activity_week", {
+      p_salesperson_id: salespersonId,
+      p_week_start: weekStart, // Sunday
+      p_week_end: weekEnd, // Saturday
+      p_values: values,
+    });
     setSaving(false);
-    if (delErr) {
-      setError(delErr.message);
+    if (rpcErr) {
+      setError(rpcErr.message);
       return;
     }
 
