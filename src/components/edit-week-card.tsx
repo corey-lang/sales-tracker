@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { addDays, format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import {
@@ -9,7 +10,7 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { recentBusinessWeeks } from "@/lib/goals";
+import { activityWeekToDateRange, recentBusinessWeeks } from "@/lib/goals";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,14 +31,20 @@ import {
 } from "@/components/ui/select";
 
 // `activity_entries` stores daily rows (one per salesperson_id + entry_date).
-// A "week" here is the Monday-Friday business week the rest of the app reports
-// on (see businessWeekToDateRange / weekStartsOn:1). This card loads the
-// Mon-Fri SUM for the selected week and, on save, consolidates the whole week
-// onto the Monday (week-start) row, then deletes that week's Tue-Fri rows so
-// the Mon-Fri sum equals the entered weekly total exactly — no double count.
-// Saturday/Sunday rows are intentionally left alone: they fall outside the
-// business week every other view sums over, so the editor never shows or
-// touches them. Deletes are scoped to this salesperson and this week only.
+// The EDITABLE total here is the Monday-Friday BUSINESS week the leaderboard,
+// scorecard, and admin reports sum over (see businessWeekToDateRange /
+// weekStartsOn:1). This card loads the Mon-Fri SUM for the selected week and,
+// on save, consolidates the whole week onto the Monday (week-start) row, then
+// deletes that week's Tue-Fri rows so the Mon-Fri sum equals the entered weekly
+// total exactly — no double count. Deletes are scoped to this salesperson and
+// this week only.
+//
+// Saturday/Sunday rows are intentionally LEFT ALONE: weekend activity is valid
+// (reps catch up on weekends) and counts toward the AE dashboard's Sun-Sat
+// display totals, but it must NEVER be folded into a weekday row — that would
+// make leaderboard / scorecard / coaching / on-pace fairness count weekend
+// work as Mon-Fri work. So this editor neither writes nor deletes weekend rows;
+// it only shows them in a read-only summary for context.
 
 type Props = {
   salespersonId: string;
@@ -54,6 +61,7 @@ export function EditWeekCard({
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const [values, setValues] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [hasExisting, setHasExisting] = useState<boolean | null>(null);
+  const [weekendSummary, setWeekendSummary] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
@@ -93,6 +101,45 @@ export function EditWeekCard({
       cancelled = true;
     };
   }, [salespersonId, weekStart, friday, refreshKey]);
+
+  // Read-only weekend summary for the CURRENT Sun-Sat activity week — Saturday
+  // and Sunday only. Display-only context so the rep can see that weekend
+  // catch-up logged via "Log activity" is captured (it shows on the dashboard
+  // Sun-Sat totals) even though this editor replaces Mon-Fri totals only. We
+  // never write or delete these rows here.
+  useEffect(() => {
+    let cancelled = false;
+    const { since } = activityWeekToDateRange();
+    const sunday = since;
+    const saturday = format(addDays(parseISO(since), 6), "yyyy-MM-dd");
+    supabase
+      .from("activity_entries")
+      .select(ACTIVITIES.map((a) => a.key).join(","))
+      .eq("salesperson_id", salespersonId)
+      .in("entry_date", [sunday, saturday])
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          // Non-critical context line — just hide it on failure.
+          setWeekendSummary(null);
+          return;
+        }
+        const rows = (data ?? []) as unknown as Array<Partial<ActivityValues>>;
+        const totals: ActivityValues = { ...ZERO_ACTIVITY };
+        for (const row of rows) {
+          for (const a of ACTIVITIES) {
+            totals[a.key] += Number(row[a.key] ?? 0);
+          }
+        }
+        const s = ACTIVITIES.filter((a) => totals[a.key] > 0)
+          .map((a) => `${a.label} ${totals[a.key]}`)
+          .join(", ");
+        setWeekendSummary(s || null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [salespersonId, refreshKey]);
 
   const setKey = (key: ActivityKey, n: number) =>
     setValues((v) => ({ ...v, [key]: Math.max(0, Math.floor(n) || 0) }));
@@ -150,13 +197,21 @@ export function EditWeekCard({
       <CardHeader>
         <CardTitle>Edit or backfill week</CardTitle>
         <CardDescription>
-          Override or fill in a whole Monday-Friday week. The numbers below are
-          the week&apos;s <strong>totals</strong> and replace whatever is
-          stored for that week (the Log activity form above adds increments
-          instead).
+          Override or fill in a whole Monday-Friday business week. The numbers
+          below are the week&apos;s <strong>totals</strong> and replace whatever
+          is stored for that week (the Log activity form above adds increments,
+          and supports Sun-Sat weekend catch-up).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+          Current activity week weekend activity is counted in your AE dashboard
+          totals. This editor replaces Mon-Fri business-week totals only.
+          {weekendSummary
+            ? ` Current activity week's weekend logged activity: ${weekendSummary}.`
+            : ""}
+        </p>
+
         <div className="space-y-1.5">
           <Label htmlFor="edit-week">Select week</Label>
           <Select

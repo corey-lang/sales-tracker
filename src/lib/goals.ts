@@ -76,7 +76,10 @@ export function businessWeekToDateRange(
 // DB but the visible total still reads 0/goal.
 //
 // This is for AE logged-activity DISPLAY surfaces only — currently
-// DailyEntryForm and MyWeekCard. It must NOT be used for goals, PTO/working-day
+// DailyEntryForm, MyWeekCard, ActivityWeekContext, and the read-only weekend
+// summary in EditWeekCard. It must NOT be used to WRITE/replace weekly totals
+// (EditWeekCard's editable totals stay on the Mon-Fri business week so weekend
+// activity is never folded into a weekday row), nor for goals, PTO/working-day
 // availability, on-pace math, the scorecard, leaderboard fairness, admin
 // scoring, or adjusted-goal math — those all stay anchored to the Monday-Friday
 // business week via businessWeekToDateRange.

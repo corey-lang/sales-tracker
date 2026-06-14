@@ -7,7 +7,6 @@ import { format } from "date-fns";
 import { Settings } from "lucide-react";
 
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
-import { nextQuote } from "@/lib/quotes";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
@@ -46,7 +45,6 @@ export default function DashboardPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
   const [entryVersion, setEntryVersion] = useState(0);
-  const [quote, setQuote] = useState<string>("");
 
   useEffect(() => {
     if (!loaded) return;
@@ -63,14 +61,6 @@ export default function DashboardPage() {
   }, [loaded, salesperson, router]);
 
   useScrollToTop();
-
-  useEffect(() => {
-    // Picking a random quote on the client only (avoids SSR/CSR hydration
-    // mismatch from Math.random). Synchronous setState here is the right
-    // pattern for this case.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setQuote(nextQuote());
-  }, []);
 
   if (!loaded || !salesperson) {
     return (
@@ -218,11 +208,6 @@ export default function DashboardPage() {
           onSaved={() => setEntryVersion((n) => n + 1)}
         />
 
-        {quote && (
-          <p className="px-3 pb-1 text-center text-xs italic text-muted-foreground/70">
-            &ldquo;{quote}&rdquo;
-          </p>
-        )}
       </main>
       <BottomNav salesperson={salesperson} />
     </>
