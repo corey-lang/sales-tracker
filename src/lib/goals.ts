@@ -75,14 +75,13 @@ export function businessWeekToDateRange(
 // include Saturday/Sunday entries — otherwise a weekend save succeeds in the
 // DB but the visible total still reads 0/goal.
 //
-// This is for AE logged-activity DISPLAY surfaces only — currently
-// DailyEntryForm, MyWeekCard, ActivityWeekContext, and the read-only weekend
-// summary in EditWeekCard. It must NOT be used to WRITE/replace weekly totals
-// (EditWeekCard's editable totals stay on the Mon-Fri business week so weekend
-// activity is never folded into a weekday row), nor for goals, PTO/working-day
-// availability, on-pace math, the scorecard, leaderboard fairness, admin
-// scoring, or adjusted-goal math — those all stay anchored to the Monday-Friday
-// business week via businessWeekToDateRange.
+// This is for AE logged-activity DISPLAY surfaces — DailyEntryForm, MyWeekCard,
+// and ActivityWeekContext. (The AE "Edit activity week" card uses
+// recentActivityWeeks for the same Sun-Sat boundary, and writes each day on its
+// OWN entry_date.) It must NOT be used for goals, PTO/working-day availability,
+// on-pace math, the scorecard, leaderboard fairness, admin scoring, or
+// adjusted-goal math — those all stay anchored to the Monday-Friday business
+// week via businessWeekToDateRange.
 //
 // `through` is capped at today (never future) so a mid-week view doesn't query
 // past the current day. Default `today` is the Denver business calendar date,
@@ -127,10 +126,11 @@ export type WeekOption = {
 };
 
 // The current Mon-Fri week plus the prior `count - 1` weeks, newest first.
-// Powers the AE "Edit or backfill week" selector, the admin leaderboard
-// week picker, and the activity-report week picker. No future weeks — this
-// is for editing/backfilling, and the rest of the app only reports up to
-// today.
+// Powers the Mon-Fri business/reporting week pickers — the admin leaderboard
+// week picker, the admin scorecard week picker, and the activity-report week
+// picker. (The AE "Edit activity week" card uses recentActivityWeeks for its
+// Sun-Sat boundary.) No future weeks — this is for editing/reporting, and the
+// rest of the app only reports up to today.
 //
 // Default `today` is the current calendar date in `APP_TIMEZONE`
 // (America/Denver) so the "current" week here agrees with
@@ -151,6 +151,58 @@ export function recentBusinessWeeks(
       weekStart: format(monday, "yyyy-MM-dd"),
       friday: format(friday, "yyyy-MM-dd"),
       label: `${formatDateMDY(monday)} – ${formatDateMDY(friday)}`,
+      isCurrent: i === 0,
+    });
+  }
+  return out;
+}
+
+// One Sunday-Saturday ACTIVITY week, identified by its Sunday (`weekStart`).
+// Mirrors activityWeekToDateRange's weekStartsOn:0 boundary so the AE
+// "Edit activity week" card lines up with the dashboard's Sun-Sat display.
+//
+// It also exposes the INNER Monday-Friday business range (`monday`/`friday`) so
+// the editor can edit the three parts of the week SEPARATELY and SAFELY:
+//   - Sunday (`weekStart`) and Saturday (`weekEnd`) are weekend rows, each
+//     edited on its OWN entry_date — weekend activity is never folded into a
+//     weekday row.
+//   - Monday-Friday is the existing safe Mon-Fri business-week replacement that
+//     leaderboard / scorecard / admin reports read.
+// There is intentionally NO single "consolidate the whole week" anchor — that
+// would move weekend activity into a weekday and corrupt Mon-Fri fairness math.
+//
+// NOTE: a Sun-Sat activity week straddles two Mon-Fri business weeks — its
+// Sunday is the tail of the PRIOR business week, while Mon-Sat belong to the
+// next one. That's expected; each section only ever touches its own dates.
+export type ActivityWeekOption = {
+  weekStart: string; // Sunday, yyyy-MM-dd
+  weekEnd: string; // Saturday, yyyy-MM-dd
+  monday: string; // Monday, yyyy-MM-dd — Mon-Fri business section start
+  friday: string; // Friday, yyyy-MM-dd — Mon-Fri business section end
+  label: string; // "MM-dd-yyyy – MM-dd-yyyy" (Sun – Sat)
+  isCurrent: boolean;
+};
+
+// The current Sun-Sat activity week plus the prior `count - 1` weeks, newest
+// first. Powers ONLY the AE "Edit activity week" card. Default `today` is the
+// Denver business calendar date so "current" agrees with activityWeekToDateRange
+// and the dashboard activity surfaces — on a Sunday, the current week is the new
+// Sun-Sat week that begins that Sunday.
+export function recentActivityWeeks(
+  count = 12,
+  today: Date = todayInAppTimezone(),
+): ActivityWeekOption[] {
+  const currentSunday = startOfWeek(today, { weekStartsOn: 0 });
+  const out: ActivityWeekOption[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const sunday = subWeeks(currentSunday, i);
+    const saturday = addDays(sunday, 6);
+    out.push({
+      weekStart: format(sunday, "yyyy-MM-dd"),
+      weekEnd: format(saturday, "yyyy-MM-dd"),
+      monday: format(addDays(sunday, 1), "yyyy-MM-dd"),
+      friday: format(addDays(sunday, 5), "yyyy-MM-dd"),
+      label: `${formatDateMDY(sunday)} – ${formatDateMDY(saturday)}`,
       isCurrent: i === 0,
     });
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { addDays, format, parseISO } from "date-fns";
+import { format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import {
@@ -10,7 +10,8 @@ import {
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { activityWeekToDateRange, recentBusinessWeeks } from "@/lib/goals";
+import { todayInAppTimezone } from "@/lib/dates";
+import { recentActivityWeeks } from "@/lib/goals";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,21 +31,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-// `activity_entries` stores daily rows (one per salesperson_id + entry_date).
-// The EDITABLE total here is the Monday-Friday BUSINESS week the leaderboard,
-// scorecard, and admin reports sum over (see businessWeekToDateRange /
-// weekStartsOn:1). This card loads the Mon-Fri SUM for the selected week and,
-// on save, consolidates the whole week onto the Monday (week-start) row, then
-// deletes that week's Tue-Fri rows so the Mon-Fri sum equals the entered weekly
-// total exactly — no double count. Deletes are scoped to this salesperson and
-// this week only.
+// Edits a whole Sunday-Saturday ACTIVITY week, split into THREE independently
+// scoped sections so weekend activity is never folded into a weekday row:
 //
-// Saturday/Sunday rows are intentionally LEFT ALONE: weekend activity is valid
-// (reps catch up on weekends) and counts toward the AE dashboard's Sun-Sat
-// display totals, but it must NEVER be folded into a weekday row — that would
-// make leaderboard / scorecard / coaching / on-pace fairness count weekend
-// work as Mon-Fri work. So this editor neither writes nor deletes weekend rows;
-// it only shows them in a read-only summary for context.
+//   - Sunday   → written only to the Sunday entry_date row.
+//   - Mon-Fri  → the existing safe BUSINESS-week replacement: the entered total
+//                is consolidated onto the Monday row and that week's Tue-Fri
+//                rows are deleted, so the Mon-Fri sum equals the entered total.
+//                Leaderboard / scorecard / admin reports read exactly this.
+//   - Saturday → written only to the Saturday entry_date row.
+//
+// Sunday and Saturday are weekend rows: they count toward the AE dashboard's
+// Sun-Sat display totals (DailyEntryForm / MyWeekCard / ActivityWeekContext)
+// but stay OUT of every Mon-Fri business surface. Saving one section never
+// touches another section's dates. All writes/deletes are scoped to this
+// salesperson. A Sun-Sat activity week straddles two business weeks (its Sunday
+// is the prior week's tail) — that's expected; each section owns its own dates.
+
+type SavingSection = "sunday" | "week" | "saturday" | null;
 
 type Props = {
   salespersonId: string;
@@ -52,172 +56,223 @@ type Props = {
   onSaved?: () => void;
 };
 
+const sumRows = (
+  rows: Array<Partial<ActivityValues>>,
+): ActivityValues => {
+  const out: ActivityValues = { ...ZERO_ACTIVITY };
+  for (const row of rows) {
+    for (const a of ACTIVITIES) {
+      out[a.key] += Number(row[a.key] ?? 0);
+    }
+  }
+  return out;
+};
+
+const summarize = (v: ActivityValues): string =>
+  ACTIVITIES.filter((a) => v[a.key] > 0)
+    .map((a) => `${a.label} ${v[a.key]}`)
+    .join(", ");
+
+const shortDate = (yyyyMmDd: string): string =>
+  format(parseISO(yyyyMmDd), "MMM d");
+
+function ActivityGrid({
+  idPrefix,
+  values,
+  onChange,
+  disabled,
+}: {
+  idPrefix: string;
+  values: ActivityValues;
+  onChange: (key: ActivityKey, n: number) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {ACTIVITIES.map((a) => (
+        <div key={a.key} className="space-y-1.5">
+          <Label htmlFor={`${idPrefix}-${a.key}`}>{a.label}</Label>
+          <Input
+            id={`${idPrefix}-${a.key}`}
+            type="number"
+            inputMode="numeric"
+            min={0}
+            placeholder="0"
+            value={values[a.key] === 0 ? "" : values[a.key]}
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => {
+              const raw = e.target.value;
+              onChange(a.key, raw === "" ? 0 : Number(raw));
+            }}
+            disabled={disabled}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function EditWeekCard({
   salespersonId,
   refreshKey = 0,
   onSaved,
 }: Props) {
-  const weeks = useMemo(() => recentBusinessWeeks(12), []);
+  const weeks = useMemo(() => recentActivityWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
-  const [values, setValues] = useState<ActivityValues>(ZERO_ACTIVITY);
-  const [hasExisting, setHasExisting] = useState<boolean | null>(null);
-  const [weekendSummary, setWeekendSummary] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [sundayValues, setSundayValues] = useState<ActivityValues>(ZERO_ACTIVITY);
+  const [weekValues, setWeekValues] = useState<ActivityValues>(ZERO_ACTIVITY);
+  const [saturdayValues, setSaturdayValues] =
+    useState<ActivityValues>(ZERO_ACTIVITY);
+  const [saving, setSaving] = useState<SavingSection>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
   const selectedWeek =
     weeks.find((w) => w.weekStart === weekStart) ?? weeks[0];
+  const sunday = selectedWeek.weekStart;
+  const monday = selectedWeek.monday;
   const friday = selectedWeek.friday;
+  const saturday = selectedWeek.weekEnd;
+
+  // On a Sunday the current activity week's Mon-Fri portion is next week's
+  // business days. Those rows must NOT be written before the business week
+  // begins, so the Mon-Fri section is gated until its Monday has arrived.
+  // Sunday/Saturday weekend sections stay editable regardless.
+  const todayStr = format(todayInAppTimezone(), "yyyy-MM-dd");
+  const mondayNotOpen = monday > todayStr;
 
   useEffect(() => {
     let cancelled = false;
+    const cols = ["entry_date", ...ACTIVITIES.map((a) => a.key)].join(",");
     supabase
       .from("activity_entries")
-      .select(ACTIVITIES.map((a) => a.key).join(","))
+      .select(cols)
       .eq("salesperson_id", salespersonId)
-      .gte("entry_date", weekStart)
-      .lte("entry_date", friday)
+      .gte("entry_date", sunday)
+      .lte("entry_date", saturday)
       .then(({ data, error }) => {
         if (cancelled) return;
         if (error) {
           setError(error.message);
-          setHasExisting(null);
           return;
         }
-        const rows = (data ?? []) as unknown as Array<Partial<ActivityValues>>;
-        const next: ActivityValues = { ...ZERO_ACTIVITY };
-        for (const row of rows) {
-          for (const a of ACTIVITIES) {
-            next[a.key] += Number(row[a.key] ?? 0);
-          }
-        }
-        setValues(next);
-        setHasExisting(rows.length > 0);
+        const rows = (data ?? []) as unknown as Array<
+          Partial<ActivityValues> & { entry_date?: string }
+        >;
+        // Bucket each daily row onto its own section by entry_date.
+        const sundayRows = rows.filter((r) => r.entry_date === sunday);
+        const saturdayRows = rows.filter((r) => r.entry_date === saturday);
+        const weekRows = rows.filter(
+          (r) =>
+            typeof r.entry_date === "string" &&
+            r.entry_date >= monday &&
+            r.entry_date <= friday,
+        );
+        setSundayValues(sumRows(sundayRows));
+        setSaturdayValues(sumRows(saturdayRows));
+        setWeekValues(sumRows(weekRows));
         setError(null);
         setSavedMsg(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [salespersonId, weekStart, friday, refreshKey]);
+  }, [salespersonId, sunday, monday, friday, saturday, refreshKey]);
 
-  // Read-only weekend summary for the CURRENT Sun-Sat activity week — Saturday
-  // and Sunday only. Display-only context so the rep can see that weekend
-  // catch-up logged via "Log activity" is captured (it shows on the dashboard
-  // Sun-Sat totals) even though this editor replaces Mon-Fri totals only. We
-  // never write or delete these rows here.
-  useEffect(() => {
-    let cancelled = false;
-    const { since } = activityWeekToDateRange();
-    const sunday = since;
-    const saturday = format(addDays(parseISO(since), 6), "yyyy-MM-dd");
-    supabase
-      .from("activity_entries")
-      .select(ACTIVITIES.map((a) => a.key).join(","))
-      .eq("salesperson_id", salespersonId)
-      .in("entry_date", [sunday, saturday])
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          // Non-critical context line — just hide it on failure.
-          setWeekendSummary(null);
-          return;
-        }
-        const rows = (data ?? []) as unknown as Array<Partial<ActivityValues>>;
-        const totals: ActivityValues = { ...ZERO_ACTIVITY };
-        for (const row of rows) {
-          for (const a of ACTIVITIES) {
-            totals[a.key] += Number(row[a.key] ?? 0);
-          }
-        }
-        const s = ACTIVITIES.filter((a) => totals[a.key] > 0)
-          .map((a) => `${a.label} ${totals[a.key]}`)
-          .join(", ");
-        setWeekendSummary(s || null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [salespersonId, refreshKey]);
-
-  const setKey = (key: ActivityKey, n: number) =>
-    setValues((v) => ({ ...v, [key]: Math.max(0, Math.floor(n) || 0) }));
-
-  const handleSave = async () => {
-    setSaving(true);
+  // Write a single weekend day (Sunday or Saturday) to its OWN entry_date row.
+  // No deletes — a weekend day is one row, and we must never touch weekday rows.
+  const saveDay = async (
+    section: "sunday" | "saturday",
+    entryDate: string,
+    values: ActivityValues,
+    label: string,
+  ) => {
+    setSaving(section);
     setError(null);
     setSavedMsg(null);
-
-    // 1. Write the full weekly total onto the Monday (week-start) row.
     const { error: upsertErr } = await supabase
       .from("activity_entries")
       .upsert(
         {
           salesperson_id: salespersonId,
-          entry_date: weekStart,
+          entry_date: entryDate,
           ...values,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "salesperson_id,entry_date" },
       );
+    setSaving(null);
     if (upsertErr) {
-      setSaving(false);
+      setError(upsertErr.message);
+      return;
+    }
+    setSavedMsg(`Saved ${label} (${shortDate(entryDate)}).`);
+    onSaved?.();
+  };
+
+  // Replace the Mon-Fri BUSINESS-week total: consolidate onto Monday, then
+  // delete Tue-Fri. gt(monday) excludes Monday; lte(friday) stops at Friday —
+  // so Sunday (before Monday) and Saturday (after Friday) rows are untouched.
+  const saveWeek = async () => {
+    // Defense in depth: never write a Mon-Fri row before the business week opens.
+    if (mondayNotOpen) return;
+    setSaving("week");
+    setError(null);
+    setSavedMsg(null);
+
+    const { error: upsertErr } = await supabase
+      .from("activity_entries")
+      .upsert(
+        {
+          salesperson_id: salespersonId,
+          entry_date: monday,
+          ...weekValues,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "salesperson_id,entry_date" },
+      );
+    if (upsertErr) {
+      setSaving(null);
       setError(upsertErr.message);
       return;
     }
 
-    // 2. Remove this week's Tue-Fri rows so the Mon-Fri sum equals the
-    //    weekly total. gt(weekStart) excludes Monday; the salesperson_id
-    //    filter and the date range keep other AEs, other weeks, and the
-    //    Sat/Sun rows untouched.
     const { error: delErr } = await supabase
       .from("activity_entries")
       .delete()
       .eq("salesperson_id", salespersonId)
-      .gt("entry_date", weekStart)
+      .gt("entry_date", monday)
       .lte("entry_date", friday);
-    setSaving(false);
+    setSaving(null);
     if (delErr) {
       setError(delErr.message);
       return;
     }
-
-    setSavedMsg(`Saved weekly totals for ${selectedWeek.label}.`);
-    setHasExisting(true);
+    setSavedMsg(
+      `Saved Mon-Fri business totals (${shortDate(monday)} – ${shortDate(friday)}).`,
+    );
     onSaved?.();
   };
 
-  const summary = ACTIVITIES.filter((a) => values[a.key] > 0)
-    .map((a) => `${a.label} ${values[a.key]}`)
-    .join(", ");
+  const sundaySummary = summarize(sundayValues);
+  const weekSummary = summarize(weekValues);
+  const saturdaySummary = summarize(saturdayValues);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Edit or backfill week</CardTitle>
+        <CardTitle>Edit activity week</CardTitle>
         <CardDescription>
-          Override or fill in a whole Monday-Friday business week. The numbers
-          below are the week&apos;s <strong>totals</strong> and replace whatever
-          is stored for that week (the Log activity form above adds increments,
-          and supports Sun-Sat weekend catch-up).
+          Edit a whole Sunday-Saturday activity week. Sunday starts the new
+          activity week; Saturday closes it. Weekend activity is counted in AE
+          dashboard totals; Mon-Fri business totals remain separate for
+          business-week reporting. (The Log activity form above adds increments.)
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-          Current activity week weekend activity is counted in your AE dashboard
-          totals. This editor replaces Mon-Fri business-week totals only.
-          {weekendSummary
-            ? ` Current activity week's weekend logged activity: ${weekendSummary}.`
-            : ""}
-        </p>
-
+      <CardContent className="space-y-5">
         <div className="space-y-1.5">
-          <Label htmlFor="edit-week">Select week</Label>
-          <Select
-            value={weekStart}
-            onValueChange={setWeekStart}
-          >
+          <Label htmlFor="edit-week">Select activity week</Label>
+          <Select value={weekStart} onValueChange={setWeekStart}>
             <SelectTrigger id="edit-week" className="w-72">
               <SelectValue />
             </SelectTrigger>
@@ -230,60 +285,109 @@ export function EditWeekCard({
               ))}
             </SelectContent>
           </Select>
+          <p className="text-xs text-muted-foreground">
+            Each section saves to its own day(s); weekend days never move into
+            weekday rows.
+          </p>
         </div>
 
-        {hasExisting === true && (
-          <p className="text-sm text-muted-foreground">
-            ✓ Existing weekly entry loaded for {selectedWeek.label}.{" "}
-            {summary ? `Was: ${summary}.` : "All values were zero."} Edit below
-            and save to replace the week&apos;s totals.
-          </p>
-        )}
-        {hasExisting === false && (
-          <p className="text-sm text-muted-foreground">
-            No entries yet for {selectedWeek.label}. Fill in the week&apos;s
-            totals and save to create them.
-          </p>
-        )}
-
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {ACTIVITIES.map((a) => (
-            <div key={a.key} className="space-y-1.5">
-              <Label htmlFor={`edit-${a.key}`}>{a.label}</Label>
-              <Input
-                id={`edit-${a.key}`}
-                type="number"
-                inputMode="numeric"
-                min={0}
-                placeholder="0"
-                value={values[a.key] === 0 ? "" : values[a.key]}
-                onFocus={(e) => e.currentTarget.select()}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  const next = raw === "" ? 0 : Number(raw);
-                  setKey(a.key, next);
-                }}
-                disabled={saving}
-              />
-            </div>
-          ))}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save week"}
+        {/* Sunday — own entry_date row */}
+        <section className="space-y-3 rounded-lg border border-border p-3">
+          <div>
+            <h3 className="text-sm font-medium">Sunday · {shortDate(sunday)}</h3>
+            <p className="text-xs text-muted-foreground">
+              Start of the activity week. Saved to Sunday only.
+              {sundaySummary ? ` Loaded: ${sundaySummary}.` : ""}
+            </p>
+          </div>
+          <ActivityGrid
+            idPrefix="edit-sun"
+            values={sundayValues}
+            onChange={(k, n) =>
+              setSundayValues((v) => ({ ...v, [k]: Math.max(0, Math.floor(n) || 0) }))
+            }
+            disabled={saving !== null}
+          />
+          <Button
+            variant="outline"
+            onClick={() => saveDay("sunday", sunday, sundayValues, "Sunday")}
+            disabled={saving !== null}
+          >
+            {saving === "sunday" ? "Saving…" : "Save Sunday"}
           </Button>
-          {error && (
-            <p className="text-sm text-destructive">
-              Couldn&apos;t save: {error}
+        </section>
+
+        {/* Mon-Fri — business-week replacement (safe) */}
+        <section className="space-y-3 rounded-lg border border-border p-3">
+          <div>
+            <h3 className="text-sm font-medium">
+              Mon-Fri business totals · {shortDate(monday)} – {shortDate(friday)}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              These are the week&apos;s <strong>totals</strong> and replace the
+              stored Mon-Fri business-week totals (leaderboard / scorecard read
+              these). Weekend rows are not affected.
+              {weekSummary ? ` Loaded: ${weekSummary}.` : ""}
             </p>
-          )}
-          {savedMsg && !error && (
-            <p className="text-sm text-green-600 dark:text-green-400">
-              {savedMsg}
+            {mondayNotOpen && (
+              <p className="mt-1 text-xs font-medium text-primary">
+                Mon-Fri business totals open Monday. Sunday activity can be
+                edited above.
+              </p>
+            )}
+          </div>
+          <ActivityGrid
+            idPrefix="edit-week"
+            values={weekValues}
+            onChange={(k, n) =>
+              setWeekValues((v) => ({ ...v, [k]: Math.max(0, Math.floor(n) || 0) }))
+            }
+            disabled={saving !== null || mondayNotOpen}
+          />
+          <Button onClick={saveWeek} disabled={saving !== null || mondayNotOpen}>
+            {saving === "week" ? "Saving…" : "Save Mon-Fri totals"}
+          </Button>
+        </section>
+
+        {/* Saturday — own entry_date row */}
+        <section className="space-y-3 rounded-lg border border-border p-3">
+          <div>
+            <h3 className="text-sm font-medium">
+              Saturday · {shortDate(saturday)}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Close of the activity week. Saved to Saturday only.
+              {saturdaySummary ? ` Loaded: ${saturdaySummary}.` : ""}
             </p>
-          )}
-        </div>
+          </div>
+          <ActivityGrid
+            idPrefix="edit-sat"
+            values={saturdayValues}
+            onChange={(k, n) =>
+              setSaturdayValues((v) => ({
+                ...v,
+                [k]: Math.max(0, Math.floor(n) || 0),
+              }))
+            }
+            disabled={saving !== null}
+          />
+          <Button
+            variant="outline"
+            onClick={() =>
+              saveDay("saturday", saturday, saturdayValues, "Saturday")
+            }
+            disabled={saving !== null}
+          >
+            {saving === "saturday" ? "Saving…" : "Save Saturday"}
+          </Button>
+        </section>
+
+        {error && (
+          <p className="text-sm text-destructive">Couldn&apos;t save: {error}</p>
+        )}
+        {savedMsg && !error && (
+          <p className="text-sm text-green-600 dark:text-green-400">{savedMsg}</p>
+        )}
       </CardContent>
     </Card>
   );
