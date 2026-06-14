@@ -11,8 +11,8 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import {
+  activityWeekToDateRange,
   adjustedTargetsFrom,
-  businessWeekToDateRange,
   fetchActiveGoalFor,
 } from "@/lib/goals";
 import {
@@ -44,7 +44,11 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const { since, through } = businessWeekToDateRange();
+    // Displayed activity totals use the Sun-Sat logging week so weekend
+    // catch-up entries show here, matching DailyEntryForm. Goal targets and
+    // availability below stay on the Mon-Fri business week (adjustedTargetsFrom
+    // / availableDays) — only the raw activity sum is Sun-Sat.
+    const { since, through } = activityWeekToDateRange();
 
     const totalsPromise = supabase
       .from("activity_entries")
@@ -128,8 +132,8 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
         <CardTitle>Weekly tracker</CardTitle>
         <CardDescription>
           {hasGoals
-            ? "Monday-Friday progress toward your weekly goals."
-            : "Monday-Friday totals since Monday."}
+            ? "Sun-Sat logged activity, compared with adjusted weekly targets."
+            : "Sun-Sat logged activity this week."}
         </CardDescription>
         {!loading &&
         !error &&

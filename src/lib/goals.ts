@@ -68,6 +68,38 @@ export function businessWeekToDateRange(
   };
 }
 
+// Sunday-through-Saturday range for the AE *activity logging* week.
+//
+// Distinct from businessWeekToDateRange (Mon-Fri) on purpose: AEs may log or
+// catch up on activity on weekends, so a rep's running "this week" total must
+// include Saturday/Sunday entries — otherwise a weekend save succeeds in the
+// DB but the visible total still reads 0/goal.
+//
+// This is for AE logged-activity DISPLAY surfaces only — currently
+// DailyEntryForm and MyWeekCard. It must NOT be used for goals, PTO/working-day
+// availability, on-pace math, the scorecard, leaderboard fairness, admin
+// scoring, or adjusted-goal math — those all stay anchored to the Monday-Friday
+// business week via businessWeekToDateRange.
+//
+// `through` is capped at today (never future) so a mid-week view doesn't query
+// past the current day. Default `today` is the Denver business calendar date,
+// matching every other week-boundary helper here.
+export function activityWeekToDateRange(
+  today: Date = todayInAppTimezone(),
+): {
+  since: string;
+  through: string;
+} {
+  const sunday = startOfWeek(today, { weekStartsOn: 0 });
+  const saturday = addDays(sunday, 6);
+  const through = today > saturday ? saturday : today;
+
+  return {
+    since: format(sunday, "yyyy-MM-dd"),
+    through: format(through, "yyyy-MM-dd"),
+  };
+}
+
 // Monday (YYYY-MM-DD) of the business week that contains `today`. Single
 // source of truth for the Weekly Focus row's `week_start` so the API,
 // server helpers, and UI all key off the same Monday — picks Monday via

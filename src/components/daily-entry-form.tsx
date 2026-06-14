@@ -12,7 +12,7 @@ import {
 } from "@/lib/activities";
 import { todayInAppTimezone } from "@/lib/dates";
 import {
-  businessWeekToDateRange,
+  activityWeekToDateRange,
   fetchActiveGoalFor,
   weeklyTargetsFrom,
 } from "@/lib/goals";
@@ -40,7 +40,9 @@ export function DailyEntryForm({
 
   useEffect(() => {
     let cancelled = false;
-    const { since, through } = businessWeekToDateRange();
+    // Activity totals use the Sun-Sat logging week (not the Mon-Fri business
+    // week) so weekend catch-up entries show up in the running total here.
+    const { since, through } = activityWeekToDateRange();
 
     Promise.all([
       supabase
@@ -122,11 +124,10 @@ export function DailyEntryForm({
       return false;
     }
     // Optimistic update to local cache; entryVersion refetch will reconcile
-    // with any concurrent writes from EditWeekCard etc.
-    const { isBusinessDay } = businessWeekToDateRange();
-    if (isBusinessDay) {
-      setWeeklyTotals((v) => ({ ...v, [key]: v[key] + delta }));
-    }
+    // with any concurrent writes from EditWeekCard etc. The save always writes
+    // to `today`, which is inside the Sun-Sat activity week the totals cover —
+    // including weekends — so we update unconditionally (no business-day gate).
+    setWeeklyTotals((v) => ({ ...v, [key]: v[key] + delta }));
     onSaved?.();
     return true;
   };
