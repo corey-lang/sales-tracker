@@ -25,6 +25,7 @@ import {
   isContractQuestion,
   isSellerAddonQuestion,
 } from "@/lib/coverage/contract-answer";
+import { answerFromWorkbook } from "@/lib/coverage/workbook-answer";
 import { callSmittyNarrator } from "@/lib/ai/smitty-narrator";
 
 // POST /api/ai/chat
@@ -756,8 +757,13 @@ function summarizeShape(value: unknown, depth = 0): unknown {
   return typeof value;
 }
 
-/** Runs the brochure DB lookup and returns a safe CoverageAnswer.
- *  Wraps answerCoverageQuestion's error handling so call-sites stay clean. */
+/**
+ * Runs the brochure DB lookup with a workbook fallback. When the DB returns
+ * a refusal (e.g., no current brochure published for the state), tries the
+ * hardcoded Utah workbook facts before returning the refusal to the client.
+ * This ensures the core MVP questions always have grounded answers during the
+ * Utah beta even when the brochure hasn't been fully published in the DB.
+ */
 async function runBrochureLookup(
   stateCode: string,
   message: string,
@@ -765,9 +771,20 @@ async function runBrochureLookup(
   step: string | undefined,
 ): Promise<CoverageAnswer> {
   try {
-    return await answerCoverageQuestion(stateCode, message, context, step);
+    const answer = await answerCoverageQuestion(stateCode, message, context, step);
+    // Workbook fallback: if the brochure isn't published, try hardcoded facts.
+    if (answer.kind === "refusal") {
+      const workbookAnswer = answerFromWorkbook(message, stateCode, context, step);
+      if (workbookAnswer) return workbookAnswer;
+    }
+    return answer;
   } catch (err) {
     console.warn(`[ai-chat] coverage brochure lookup failed: ${String(err)}`);
+    // For the Utah MVP, try the hardcoded workbook before surfacing a
+    // connectivity error — the AE still gets a grounded answer when the DB
+    // is unreachable, as long as the question is in the workbook's scope.
+    const workbookFallback = answerFromWorkbook(message, stateCode, context, step);
+    if (workbookFallback) return workbookFallback;
     return {
       kind: "refusal",
       text: "I'm having trouble reaching the plan documents right now. Please try again in a moment.",

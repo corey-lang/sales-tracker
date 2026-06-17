@@ -155,6 +155,11 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
     null,
   );
 
+  // viewportTop tracks visualViewport.offsetTop on iOS Safari — when the
+  // keyboard opens the browser scrolls the layout viewport, and a position:fixed
+  // element must shift down by offsetTop to stay anchored to the visual viewport.
+  const [viewportTop, setViewportTop] = useState(0);
+
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Synchronous in-flight lock. `sending` (React state) updates on the next
@@ -203,10 +208,27 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
 
   // Track the visual viewport so the sheet shrinks above the on-screen
   // keyboard instead of being covered by it (mobile Safari/Chrome).
+  // Also track offsetTop: on iOS Safari, focusing an input causes the browser
+  // to scroll the layout viewport, pushing a position:fixed element above the
+  // visual viewport. Setting top = offsetTop keeps the sheet anchored to the
+  // visible area throughout the keyboard animation.
+  //
+  // This cannot be unit-tested (jsdom has no visualViewport API). Manual
+  // verification steps:
+  //   1. Open Ask Smitty on an iPhone in Safari.
+  //   2. Tap the message input — the keyboard should slide up and the entire
+  //      sheet (header + messages + composer) should remain fully visible above
+  //      the keyboard, with no content hidden behind it.
+  //   3. The composer must be visible and tappable without scrolling.
+  //   4. After typing and sending, the messages list should scroll to show the
+  //      latest reply above the keyboard.
   useEffect(() => {
     const vv = typeof window !== "undefined" ? window.visualViewport : null;
     if (!vv) return;
-    const sync = () => setViewportHeight(vv.height);
+    const sync = () => {
+      setViewportHeight(vv.height);
+      setViewportTop(vv.offsetTop);
+    };
     sync();
     vv.addEventListener("resize", sync);
     vv.addEventListener("scroll", sync);
@@ -420,9 +442,15 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
       className="fixed inset-x-0 top-0 z-50 flex flex-col overflow-hidden bg-background"
       style={{
         height: viewportHeight ? `${viewportHeight}px` : "100dvh",
+        // Shift down with the visual viewport on iOS Safari so the sheet stays
+        // in view when the keyboard opens and scrolls the layout viewport.
+        ...(viewportTop > 0 ? { top: `${viewportTop}px` } : {}),
         maxHeight: "100dvh",
-        paddingTop: "env(safe-area-inset-top)",
-        paddingBottom: "var(--app-safe-bottom, 0px)",
+        // Only apply the status-bar top inset when we're at the screen top.
+        paddingTop: viewportTop === 0 ? "env(safe-area-inset-top)" : "0px",
+        // Use the raw safe area inset; the sheet covers the bottom nav so no
+        // nav-height offset is needed here.
+        paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
       {/* Header */}
@@ -643,6 +671,17 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onTextareaKeyDown}
+            onFocus={() => {
+              // After the keyboard finishes animating in, scroll the latest
+              // message into view so the composer is never hidden by the
+              // keyboard covering the tail of the conversation.
+              setTimeout(() => {
+                scrollRef.current?.scrollTo({
+                  top: scrollRef.current.scrollHeight,
+                  behavior: "smooth",
+                });
+              }, 300);
+            }}
             rows={1}
             placeholder="Type a message…"
             aria-label="Message"

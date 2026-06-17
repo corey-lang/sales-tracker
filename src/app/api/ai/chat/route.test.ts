@@ -2,9 +2,10 @@
  * Route-level tests for POST /api/ai/chat — Ask Smitty Utah MVP.
  *
  * Tests verify the full routing pipeline from request to response shape,
- * covering contract-backed answers, ambiguity chips, Utah gate, and narrator
- * skip behavior. DB-dependent calls (requireTestAccount, answerCoverageQuestion)
- * are mocked; pure contract/ambiguity logic runs real.
+ * covering contract-backed answers, ambiguity chips, Utah gate, narrator
+ * skip behavior, and workbook fallback when the brochure DB is unavailable.
+ * DB-dependent calls (requireTestAccount, answerCoverageQuestion) are mocked;
+ * pure contract/ambiguity/workbook logic runs real.
  *
  * Scenarios:
  *   A. Seller + add-on → contract-backed, never routes to generic add-on catalog
@@ -12,8 +13,11 @@
  *   C. Outside service area → contract-backed, includes $85 Trip Fee
  *   D. Fridge → clarification with 3 options
  *   E. Pool → clarification with 4 options
- *   F. Sprinklers on Totally Elevated → brochure-backed
+ *   F. Sprinklers on Totally Elevated → brochure-backed (DB mock returns data)
  *   G. Non-UT state → Utah beta gate fires before coverage or Cogent routing
+ *   H. Brochure DB returns refusal (no published brochure) → workbook fallback
+ *      covers Epic pricing, sprinklers on TE, Kitchen Refrigerator flow, pool add-on,
+ *      and falls through for unknown items.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -334,8 +338,9 @@ describe("F: sprinklers on Totally Elevated → brochure answer", () => {
       {
         brochure: "Utah Brochure 2025.5",
         version: "2025.5",
-        pages: [3],
-        label: "Utah Brochure 2025.5 2025.5, p. 3",
+        // Reviewed Utah source: plan matrix on p. 7 (not p. 3).
+        pages: [7],
+        label: "Utah Brochure 2025.5 2025.5, p. 7",
       },
     ],
     confidence: "high" as const,
@@ -384,14 +389,14 @@ describe("F: sprinklers on Totally Elevated → brochure answer", () => {
     expect(json.reply).toContain("$500");
   });
 
-  it("sourceType is brochure and source page is 3", async () => {
+  it("sourceType is brochure and source page is 7 (reviewed Utah plan matrix)", async () => {
     const res = await POST(
       makeRequest({ message: "Are sprinklers covered on Totally Elevated?" }),
     );
     const json = await res.json();
     expect(json.sources).toHaveLength(1);
     expect(json.sources[0].sourceType).toBe("brochure");
-    expect(json.sources[0].pages).toContain(3);
+    expect(json.sources[0].pages).toContain(7);
   });
 });
 
@@ -482,5 +487,226 @@ describe("source shape invariants", () => {
     const res = await POST(makeRequest({ message: "Is the fridge covered?" }));
     const json = await res.json();
     expect(json.sources).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario H — brochure DB refusal → workbook fallback
+//
+// answerCoverageQuestion is mocked to return the "no published brochure" refusal
+// (what the service returns when plan_brochures has no current-status row for UT).
+// answerFromWorkbook is NOT mocked — it runs with real hardcoded workbook facts.
+// ---------------------------------------------------------------------------
+
+const NO_BROCHURE_REFUSAL = {
+  kind: "refusal" as const,
+  text: "I couldn't find that in the current Utah brochure. There isn't a current plan brochure on file for your state yet.",
+  citations: [],
+};
+
+describe("H: brochure DB returns refusal → workbook fallback answers", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockResolvedValue(NO_BROCHURE_REFUSAL);
+  });
+
+  // H-1: Epic pricing
+  it("'What does Epic cost?' → workbook returns $950", async () => {
+    const res = await POST(makeRequest({ message: "What does Epic cost?" }));
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$950");
+  });
+
+  it("Epic pricing answer → sourceType is workbook, page 7", async () => {
+    const res = await POST(makeRequest({ message: "What does Epic cost?" }));
+    const json = await res.json();
+    expect(json.sources).toHaveLength(1);
+    expect(json.sources[0].sourceType).toBe("workbook");
+    expect(json.sources[0].pages).toContain(7);
+  });
+
+  it("Epic pricing answer → grounded is true", async () => {
+    const res = await POST(makeRequest({ message: "What does Epic cost?" }));
+    const json = await res.json();
+    expect(json.grounded).toBe(true);
+  });
+
+  it("Epic pricing answer → reply includes Utah Real Estate scope and sq ft threshold", async () => {
+    const res = await POST(makeRequest({ message: "What does Epic cost?" }));
+    const json = await res.json();
+    expect(json.reply.toLowerCase()).toContain("utah real estate");
+    expect(json.reply).toContain("4,000");
+  });
+
+  // H-2: Sprinklers on Totally Elevated
+  it("'Are sprinklers covered on Totally Elevated?' → workbook says not covered", async () => {
+    const res = await POST(
+      makeRequest({ message: "Are sprinklers covered on Totally Elevated?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply.toLowerCase()).toContain("not cover");
+    expect(json.reply.toLowerCase()).toContain("totally elevated");
+  });
+
+  it("sprinklers on TE → reply mentions $80 add-on option", async () => {
+    const res = await POST(
+      makeRequest({ message: "Are sprinklers covered on Totally Elevated?" }),
+    );
+    const json = await res.json();
+    expect(json.reply).toContain("$80");
+  });
+
+  it("sprinklers on TE → sourceType workbook, page includes 7", async () => {
+    const res = await POST(
+      makeRequest({ message: "Are sprinklers covered on Totally Elevated?" }),
+    );
+    const json = await res.json();
+    expect(json.sources[0].sourceType).toBe("workbook");
+    expect(json.sources[0].pages).toContain(7);
+  });
+
+  it("sprinklers on Epic → workbook says covered at $500/request", async () => {
+    const res = await POST(
+      makeRequest({ message: "Are sprinklers covered on Epic?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply.toLowerCase()).toContain("epic");
+    expect(json.reply).toContain("$500");
+  });
+
+  // H-3: Kitchen Refrigerator chip after fridge clarification → asks for plan
+  it("'Kitchen Refrigerator' chip (coverage:item step) → workbook asks for plan", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Kitchen Refrigerator",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: { intent: "coverage" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("clarification");
+    const labels: string[] = json.answerOptions.map((o: { label: string }) => o.label);
+    expect(labels).toContain("Epic");
+    expect(labels).toContain("Elevated");
+    expect(labels).toContain("Essential");
+    expect(labels).toContain("Totally Elevated");
+  });
+
+  it("Kitchen Refrigerator + Elevated plan → workbook returns $2,000/request", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Elevated",
+        localFlow: "coverage",
+        coverageStep: "coverage:plan",
+        coverageContext: { intent: "coverage", coverageItem: "Kitchen Refrigerator" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$2,000");
+    expect(json.sources[0].sourceType).toBe("workbook");
+    expect(json.sources[0].pages).toContain(7);
+  });
+
+  it("Kitchen Refrigerator + Essential plan → workbook says not covered", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Essential",
+        localFlow: "coverage",
+        coverageStep: "coverage:plan",
+        coverageContext: { intent: "coverage", coverageItem: "Kitchen Refrigerator" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply.toLowerCase()).toContain("not cover");
+  });
+
+  // H-4: Pool/spa add-on after pool clarification → returns add-on price directly
+  it("'Built-in Pool/Spa Equipment with Standard Timer' chip → workbook returns $250", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Built-in Pool/Spa Equipment with Standard Timer",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: { intent: "coverage" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$250");
+    expect(json.reply).toContain("$1,000");
+  });
+
+  it("pool/spa standard timer → sourceType workbook, page 9", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Built-in Pool/Spa Equipment with Standard Timer",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: { intent: "coverage" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.sources[0].sourceType).toBe("workbook");
+    expect(json.sources[0].pages).toContain(9);
+  });
+
+  it("pool/spa add-on → no plan clarification asked (add-ons are plan-independent)", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Built-in Pool/Spa Equipment with Standard Timer",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: { intent: "coverage" },
+      }),
+    );
+    const json = await res.json();
+    // Should be an answer, not a clarification asking for plan
+    expect(json.type).toBe("answer");
+  });
+
+  // H-5: Unknown item → workbook returns null → original refusal shown
+  it("unknown item (garage door) → workbook falls through to brochure refusal", async () => {
+    const res = await POST(
+      makeRequest({ message: "Is the garage door covered on Essential?" }),
+    );
+    const json = await res.json();
+    // Original refusal text contains "brochure"
+    expect(json.reply.toLowerCase()).toContain("brochure");
+    expect(json.type).toBe("needs_review");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario H-catch — DB throws (connectivity error) → workbook fallback
+//
+// The catch path in runBrochureLookup must attempt the workbook before
+// returning the "trouble reaching plan documents" message.
+// ---------------------------------------------------------------------------
+
+describe("H-catch: DB throws connectivity error → workbook fallback", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockRejectedValue(new Error("connection timeout"));
+  });
+
+  it("known item (Epic pricing) → workbook answers even when DB throws", async () => {
+    const res = await POST(makeRequest({ message: "What does Epic cost?" }));
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$950");
+    expect(json.sources[0].sourceType).toBe("workbook");
+  });
+
+  it("unknown item (garage door) + DB throws → returns plan-documents message", async () => {
+    const res = await POST(
+      makeRequest({ message: "Is the garage door covered on Elevated?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("needs_review");
+    expect(json.reply.toLowerCase()).toContain("trouble");
   });
 });
