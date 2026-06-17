@@ -74,6 +74,15 @@ export type Citation = {
   label: string;
 };
 
+/** Normalized source reference used in the AskSmittyResponse. Separate from
+ *  Citation so the UI can distinguish brochure vs contract vs workbook sources. */
+export type SmittySource = {
+  title: string;
+  /** Source pages (unique, sorted, positive). Empty only when none recorded. */
+  pages: number[];
+  sourceType: "brochure" | "contract" | "workbook";
+};
+
 /** "<title> <version>" (version omitted when absent). The BrochureRef.citation
  *  form, without page. */
 export function formatBrochureCitation(
@@ -333,8 +342,11 @@ export function classifyCoverageIntent(message: string): CoverageIntent {
 // ---------------------------------------------------------------------------
 
 /** Any of these means the message is unambiguously a coverage/pricing/plan
- *  question (covered/cover, brochure, price, service fee, limit, add-on, …). */
+ *  question (covered/cover, brochure, price, service fee, limit, add-on, …).
+ *  Includes contract-backed terms so service-area, trip-fee, and seller/buyer
+ *  coverage questions don't fall through to the external Cogent agent. */
 const STRONG_COVERAGE_TERMS = [
+  // --- brochure / plan terms ---
   "cover",
   "covers",
   "covered",
@@ -368,6 +380,37 @@ const STRONG_COVERAGE_TERMS = [
   "home warranty",
   "homescription",
   "whats covered",
+  // --- contract / legal terms (must not fall through to Cogent unsourced) ---
+  "seller coverage",
+  "sellers coverage",
+  "seller plan",
+  "sellers plan",
+  "listing coverage",
+  "listing period",
+  "during escrow",
+  "escrow period",
+  "pre-existing",
+  "buyer coverage",
+  "buyer plan",
+  "buyers coverage",
+  "buyers plan",
+  "new construction",
+  "new build",
+  "service area",
+  "normal service area",
+  "outside service area",
+  "counties",
+  "county",
+  "trip fee",
+  "trip charge",
+  "exclusion",
+  "exclusions",
+  "legal interpretation",
+  "contract terms",
+  "after hours",
+  "after-hours",
+  "weekend service",
+  "holiday service",
 ];
 
 /** Naming a plan is itself a coverage signal. */
@@ -445,6 +488,12 @@ export type CoverageAnswer = {
   kind: "grounded" | "refusal" | "clarify";
   text: string;
   citations: Citation[];
+  /** Confidence in the grounded answer. "high" for contract-backed facts,
+   *  "medium" for brochure-extracted facts, "needs_review" for legal/exclusions.
+   *  Absent on clarify/refusal. */
+  confidence?: "high" | "medium" | "needs_review";
+  /** Where the answer's facts came from. Absent for brochure (legacy default). */
+  sourceType?: "brochure" | "contract" | "workbook";
   /** Present only on kind === "clarify". */
   coverageStep?: string;
   answerOptions?: AnswerOption[];

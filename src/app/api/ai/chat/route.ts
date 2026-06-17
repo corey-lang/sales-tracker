@@ -16,7 +16,16 @@ import {
   stateLabel,
   type CoverageAnswer,
   type CoverageNarrowingContext,
+  type SmittySource,
 } from "@/lib/coverage/answer-logic";
+import {
+  answerFromContract,
+  answerSellerAddon,
+  checkAmbiguity,
+  isContractQuestion,
+  isSellerAddonQuestion,
+} from "@/lib/coverage/contract-answer";
+import { callSmittyNarrator } from "@/lib/ai/smitty-narrator";
 
 // POST /api/ai/chat
 //
@@ -747,10 +756,58 @@ function summarizeShape(value: unknown, depth = 0): unknown {
   return typeof value;
 }
 
+/** Runs the brochure DB lookup and returns a safe CoverageAnswer.
+ *  Wraps answerCoverageQuestion's error handling so call-sites stay clean. */
+async function runBrochureLookup(
+  stateCode: string,
+  message: string,
+  context: CoverageNarrowingContext | undefined,
+  step: string | undefined,
+): Promise<CoverageAnswer> {
+  try {
+    return await answerCoverageQuestion(stateCode, message, context, step);
+  } catch (err) {
+    console.warn(`[ai-chat] coverage brochure lookup failed: ${String(err)}`);
+    return {
+      kind: "refusal",
+      text: "I'm having trouble reaching the plan documents right now. Please try again in a moment.",
+      citations: [],
+    };
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const me = await requireTestAccount(req);
     const body = await parseBody(req, ChatSchema);
+
+    // -----------------------------------------------------------------------
+    // Utah-only lock for Ask Smitty Beta — applied BEFORE any routing.
+    // Pin null state to "UT"; block any non-Utah state before coverage or
+    // external-assistant routing so a non-UT test account can never reach the
+    // Cogent path either.
+    // -----------------------------------------------------------------------
+    const effectiveState = me.state_code?.trim().toUpperCase() || "UT";
+    if (effectiveState !== "UT") {
+      return Response.json({
+        reply:
+          "Ask Smitty is currently in beta for Utah only. Your account is set to a different state — check with your admin to enable access.",
+        sessionId: body.sessionId ?? null,
+        answerOptions: [],
+        threadId: null,
+        currentStep: null,
+        department: "coverage",
+        grounded: false,
+        stateContext: null,
+        citations: [],
+        type: "needs_review",
+        sources: [],
+        confidence: "needs_review",
+        localFlow: null,
+        coverageStep: null,
+        coverageContext: null,
+      });
+    }
 
     // -----------------------------------------------------------------------
     // PRIMARY SOURCE: Coverage Intelligence — checked FIRST, before any
@@ -774,51 +831,111 @@ export async function POST(req: Request) {
     // Either way the answer comes ONLY from Coverage Intelligence (grounded,
     // clarify, or refusal) — never Cogent generic prose.
     if (shouldAnswerFromCoverage(body.localFlow, body.message)) {
-      const stateContext = me.state_code
-        ? { code: me.state_code, label: stateLabel(me.state_code) }
-        : null;
+      const stateContext = { code: effectiveState, label: stateLabel(effectiveState) };
 
+      // -----------------------------------------------------------------------
+      // Source routing — contract facts have priority over brochure for coverage
+      // and legal questions; brochure/workbook handles pricing and plan catalogs.
+      //   1. Seller + add-on → contract (blocks generic add-on catalog route)
+      //   2. Contract question → contract facts
+      //   3. Item ambiguity → specific clarification chips (fridge, pool)
+      //   4. Everything else → brochure DB lookup
+      // -----------------------------------------------------------------------
       let answer: CoverageAnswer;
-      try {
-        answer = await answerCoverageQuestion(
-          me.state_code,
+      const hasItemContext = Boolean(body.coverageContext?.coverageItem);
+
+      if (isSellerAddonQuestion(body.message)) {
+        // Seller coverage + add-on → always contract-backed, no DB needed.
+        answer = answerSellerAddon();
+
+      } else if (!body.localFlow && isContractQuestion(body.message)) {
+        // Fresh contract question (not a guided-flow chip echo) → contract facts.
+        const contractAnswer = answerFromContract(body.message, effectiveState);
+        if (contractAnswer) {
+          answer = contractAnswer;
+        } else {
+          // Contract routing matched but no fact found → refusal from docs.
+          answer = {
+            kind: "refusal",
+            text: `I don't have a contract-backed answer for that yet. Ask an admin to add it to Ask Smitty's knowledge base.`,
+            citations: [],
+          };
+        }
+
+      } else if (!hasItemContext && !body.localFlow) {
+        // Pre-DB ambiguity check — only on fresh questions, not guided-flow echoes.
+        const ambiguity = checkAmbiguity(body.message, hasItemContext);
+        if (ambiguity) {
+          answer = ambiguity;
+        } else {
+          answer = await runBrochureLookup(
+            effectiveState,
+            body.message,
+            body.coverageContext as CoverageNarrowingContext | undefined,
+            body.coverageStep,
+          );
+        }
+
+      } else {
+        // In-progress local flow or non-ambiguous fresh question → brochure.
+        answer = await runBrochureLookup(
+          effectiveState,
           body.message,
           body.coverageContext as CoverageNarrowingContext | undefined,
           body.coverageStep,
         );
-      } catch (err) {
-        // No generic fallback for coverage/pricing — surface a safe, sourced-
-        // data-unavailable message instead of an ungrounded guess.
-        console.warn(`[ai-chat] coverage lookup failed err=${String(err)}`);
-        return Response.json({
-          reply:
-            "I'm having trouble reaching the plan documents right now. Please try again in a moment.",
-          sessionId: body.sessionId ?? null,
-          answerOptions: [],
-          threadId: null,
-          currentStep: null,
-          department: "coverage",
-          grounded: false,
-          stateContext,
-          citations: [],
-          localFlow: null,
-          coverageStep: null,
-          coverageContext: null,
-        });
       }
 
       const isClarify = answer.kind === "clarify";
+
+      // Narrator — only for non-contract, non-needs_review grounded answers.
+      // Contract/legal answers must not be softened by Anthropic. The narrator
+      // only contributes an optional AE tip (aeNote); the deterministic reply is
+      // always the primary visible answer. Fails open: null = no aeNote.
+      let aeNote: string | null = null;
+      const shouldNarrate =
+        answer.kind === "grounded" &&
+        answer.confidence !== "needs_review" &&
+        answer.sourceType !== "contract";
+      if (shouldNarrate) {
+        const narrated = await callSmittyNarrator(answer, body.message, effectiveState);
+        aeNote = narrated?.aeNote ?? null;
+      }
+
+      // Build normalized sources — never emit page 0; multiple pages preserved.
+      const sourceType = answer.sourceType ?? "brochure";
+      const sources: SmittySource[] = answer.citations
+        .map((c) => ({
+          title: c.brochure,
+          pages: c.pages.filter((p) => p > 0),
+          sourceType,
+        }))
+        .filter((s) => s.pages.length > 0);
+
+      // Response type for the normalized discriminated union.
+      const responseType: "clarification" | "answer" | "needs_review" = isClarify
+        ? "clarification"
+        : answer.kind === "grounded" && answer.confidence !== "needs_review"
+          ? "answer"
+          : "needs_review";
+
+      const confidence = answer.confidence ?? (answer.kind === "grounded" ? "medium" : "needs_review");
+
       console.log(
-        `[ai-chat] coverage: state=${me.state_code ?? "(none)"} ` +
-          `kind=${answer.kind} citations=${answer.citations.length} ` +
+        `[ai-chat] coverage: state=${effectiveState} ` +
+          `kind=${answer.kind} sourceType=${sourceType} ` +
+          `confidence=${confidence} ` +
+          `citations=${answer.citations.length} ` +
+          `aeNote=${aeNote !== null} ` +
           `localFlow=${isClarify ? "coverage" : "(none)"} ` +
           `coverageStep=${isClarify ? answer.coverageStep ?? "(none)" : "(none)"}`,
       );
+
       return Response.json({
+        // Primary: the deterministic grounded reply. Always the source of truth;
+        // never replaced or softened by Anthropic narration.
         reply: answer.text,
         sessionId: body.sessionId ?? null,
-        // Chips only on a clarify turn. threadId/currentStep stay null — local
-        // coverage NEVER uses the Cogent thread channel.
         answerOptions: isClarify ? answer.answerOptions ?? [] : [],
         threadId: null,
         currentStep: null,
@@ -826,10 +943,15 @@ export async function POST(req: Request) {
         grounded: answer.kind === "grounded",
         stateContext,
         citations: answer.citations,
-        // LOCAL narrowing channel — set only while a clarify is pending.
         localFlow: isClarify ? "coverage" : null,
         coverageStep: isClarify ? answer.coverageStep ?? null : null,
         coverageContext: isClarify ? answer.context ?? null : null,
+        // Optional AE tip from narrator — never replaces the grounded reply.
+        ...(aeNote ? { aeNote } : {}),
+        // Normalized AskSmittyResponse fields.
+        type: responseType,
+        sources,
+        confidence,
       });
     }
 

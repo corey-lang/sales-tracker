@@ -61,20 +61,30 @@ type ChatResponse = {
   grounded?: boolean;
   stateContext?: StateContext | null;
   citations?: Citation[];
+  /** Optional AE tip from Anthropic narrator — never replaces the grounded
+   *  reply. Absent when narrator is skipped (contract answers, needs_review,
+   *  or no API key). */
+  aeNote?: string;
   /** LOCAL coverage-narrowing channel — set only on a clarify turn. */
   localFlow?: "coverage" | null;
   coverageStep?: string | null;
   coverageContext?: CoverageContext | null;
+  /** Normalized AskSmittyResponse fields. */
+  type?: "clarification" | "answer" | "needs_review";
+  sources?: Array<{ title: string; pages: number[]; sourceType: "brochure" | "contract" | "workbook" }>;
+  confidence?: "high" | "medium" | "needs_review";
 };
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  /** Brochure sources shown as chips under a grounded coverage answer. */
-  citations?: Citation[];
   /** State banner shown above a grounded coverage answer. */
   stateContext?: StateContext | null;
+  /** Optional AE tip from narrator — rendered below the grounded reply. */
+  aeNote?: string;
+  /** Normalized source chips — one entry per citation document. */
+  sources?: Array<{ title: string; pages: number[]; sourceType: "brochure" | "contract" | "workbook" }>;
 };
 
 /** Suggested starters for the empty state — coverage/pricing first, ordered
@@ -91,6 +101,15 @@ const SUGGESTED_CHIPS: { label: string; prompt: string }[] = [
   { label: "Seller Plans", prompt: "Tell me about our seller plans and what they cover." },
   { label: "Buyer Plans", prompt: "Tell me about our buyer plans and what they cover." },
   { label: "New Construction", prompt: "What coverage applies to new construction?" },
+];
+
+/** Follow-up chips shown below a narrated grounded coverage answer. Let the AE
+ *  drill into the most common follow-up questions without typing them out. */
+const COVERAGE_FOLLOWUP_CHIPS: { label: string; prompt: string }[] = [
+  { label: "What's excluded?", prompt: "What's excluded from this coverage?" },
+  { label: "Which plan?", prompt: "Which specific plan covers this?" },
+  { label: "What's the limit?", prompt: "What's the coverage limit?" },
+  { label: "Homeowner language", prompt: "How do I explain this to a homeowner?" },
 ];
 
 /** Fallback answer options keyed by currentStep, used when the agent advances
@@ -309,17 +328,17 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
           {
             id: nextId(),
             role: "assistant",
+            // Deterministic grounded reply is always the primary content.
             content: data.reply,
-            // Source chips appear ONLY on a grounded coverage answer — never on
-            // a refusal, clarify, or non-coverage reply, so the chip's presence
-            // is itself the "this came from the document" trust signal. The
-            // state banner may also show on a clarify turn (it's scope context,
-            // not a citation).
-            citations: data.grounded ? data.citations ?? [] : [],
             stateContext:
               data.department === "coverage"
                 ? data.stateContext ?? null
                 : null,
+            // Optional AE tip from narrator — shown below the reply when present.
+            aeNote: data.aeNote,
+            // Source chips: normalized entries with sourceType and page list.
+            // Only grounded answers have sources; clarify/refusal return [].
+            sources: data.sources ?? [],
           },
         ]);
 
@@ -468,13 +487,19 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                     : "flex flex-col items-start"
                 }
               >
-                {/* State banner — makes it obvious which state's documents the
-                    answer is grounded in. */}
+                {/* State banner — Utah badge + makes it obvious which state's
+                    documents the answer is grounded in. */}
                 {m.role === "assistant" && m.stateContext && (
-                  <p className="mb-1 max-w-[85%] text-xs font-medium text-muted-foreground">
-                    Answering using {m.stateContext.label} plan documents.
+                  <p className="mb-1 flex max-w-[85%] items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                      {m.stateContext.label}
+                    </span>
+                    Answering from plan documents.
                   </p>
                 )}
+                {/* Answer bubble — deterministic grounded reply is always the
+                    primary content. AE note (optional, from narrator) is
+                    embedded below the reply when present. */}
                 <div
                   className={
                     m.role === "user"
@@ -483,18 +508,55 @@ export function AiAssistantSheet({ onClose }: { onClose: () => void }) {
                   }
                 >
                   {m.content}
+                  {m.role === "assistant" && m.aeNote && (
+                    <p className="mt-2 border-t border-border/50 pt-2 text-xs italic text-muted-foreground">
+                      AE note: {m.aeNote}
+                    </p>
+                  )}
                 </div>
-                {/* Source chips — one per brochure fact the answer used. */}
-                {m.role === "assistant" && m.citations && m.citations.length > 0 && (
+                {/* Source chips — display source type and page so the AE knows
+                    whether the answer came from the contract, brochure, or
+                    workbook. Never shown on clarify/refusal turns (empty sources). */}
+                {m.role === "assistant" && m.sources && m.sources.length > 0 && (
                   <div className="mt-1.5 flex max-w-[85%] flex-wrap gap-1.5">
-                    {m.citations.map((c, i) => (
-                      <span
-                        key={`${c.label}-${i}`}
-                        className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                    {m.sources.map((s, i) => {
+                      const typeLabel =
+                        s.sourceType === "contract"
+                          ? "Contract"
+                          : s.sourceType === "workbook"
+                            ? "Workbook"
+                            : "Brochure";
+                      const pageLabel =
+                        s.pages.length === 1
+                          ? ` p. ${s.pages[0]}`
+                          : s.pages.length > 1
+                            ? ` pp. ${s.pages.join(", ")}`
+                            : "";
+                      return (
+                        <span
+                          key={`${s.title}-${i}`}
+                          className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                        >
+                          <FileText aria-hidden="true" className="size-3" />
+                          {typeLabel}{pageLabel}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                {/* Follow-up chips — shown after a narrated grounded answer
+                    (aeNote present) so the AE can drill in with one tap. */}
+                {m.role === "assistant" && m.aeNote && !sending && (
+                  <div className="mt-2 flex max-w-[85%] flex-wrap gap-1.5">
+                    {COVERAGE_FOLLOWUP_CHIPS.map((chip) => (
+                      <button
+                        key={chip.label}
+                        type="button"
+                        onClick={() => void send(chip.prompt)}
+                        className="rounded-full border border-border/70 bg-card px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                       >
-                        <FileText aria-hidden="true" className="size-3" />
-                        {c.label}
-                      </span>
+                        {chip.label}
+                      </button>
                     ))}
                   </div>
                 )}

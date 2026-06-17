@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.2",
     "@base-ui/react": "^1.4.1",
     "@hookform/resolvers": "^5.2.2",
     "@supabase/supabase-js": "^2.105.4",
