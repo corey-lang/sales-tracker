@@ -94,6 +94,11 @@ const CATEGORY_KEYWORDS: Record<ContractCategory, string[]> = {
     "service county",
     "on-demand service",
     "on demand service",
+    // "coverage area" is a natural synonym for "service area" in AE speech —
+    // "outside our coverage area" means the same as "outside the service area".
+    "coverage area",
+    "our coverage area",
+    "outside our coverage area",
   ],
   trip_fee: [
     "trip fee",
@@ -107,6 +112,9 @@ const CATEGORY_KEYWORDS: Record<ContractCategory, string[]> = {
     "$85",
     "85 dollar",
     "additional charge for",
+    // Catches "outside our coverage area" so the $85 trip fee fact is bundled
+    // whenever an AE asks what happens outside the service area by that name.
+    "outside our coverage area",
   ],
   expedited_service: [
     "expedited service",
