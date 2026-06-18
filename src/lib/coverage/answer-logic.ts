@@ -238,6 +238,10 @@ export type CoverageNarrowingContext = {
   /** Plans collected so far for a comparison (need two). */
   comparePlans?: string[];
   coverageAudience?: CoverageAudience;
+  /** Canonical pricing target for follow-up turns (e.g. "new_construction").
+   *  When present, a follow-up pricing question resolves directly to workbook
+   *  pricing for this target, bypassing the plan-clarification flow. */
+  pricingTarget?: string;
 };
 
 /** The three coverage-type chips. Phase 1 surfaces them for parity with the
@@ -371,6 +375,12 @@ const STRONG_COVERAGE_TERMS = [
   "deductible",
   "limit",
   "limits",
+  // --- generic pricing/quantity question (too vague for Cogent; ask plan) ---
+  "how much",
+  // --- pool add-on specific terms (ask smitty: pool items in brochure) ---
+  "standard timer",
+  "pool pump",
+  "automation controller",
   "benefit maximum",
   "include",
   "includes",

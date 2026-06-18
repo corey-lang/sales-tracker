@@ -193,4 +193,57 @@ export const WORKBOOK_SYNONYMS: Array<{
     synonym: "totally elevated",
     canonicalValue: "Totally Elevated",
   },
+  // Pool/spa add-on synonyms — let natural language like "standard timer for pool"
+  // or "pool automation" resolve to the canonical add-on name without requiring the
+  // full canonical phrase. canonicalType "coverage_item" so planCoverageTurn's
+  // detectMentions pass picks them up (add-on items are in WORKBOOK_VOCAB_ITEMS).
+  {
+    canonicalType: "coverage_item",
+    synonym: "standard timer",
+    canonicalValue: "Built-in Pool/Spa Equipment with Standard Timer",
+  },
+  {
+    canonicalType: "coverage_item",
+    synonym: "pool standard timer",
+    canonicalValue: "Built-in Pool/Spa Equipment with Standard Timer",
+  },
+  {
+    canonicalType: "coverage_item",
+    synonym: "automation controller",
+    canonicalValue: "Built-in Pool/Spa Equipment with Automation Controller",
+  },
+  {
+    canonicalType: "coverage_item",
+    synonym: "pool automation",
+    canonicalValue: "Built-in Pool/Spa Equipment with Automation Controller",
+  },
 ];
+
+// ---------------------------------------------------------------------------
+// New Construction pricing. Source: Utah Brochure 2025.5, p. 9.
+// ---------------------------------------------------------------------------
+
+export type NewConstructionTierPricing = {
+  plan: WorkbookPlan;
+  priceText: string;
+};
+
+export type NewConstructionPricingData = {
+  /** Starting price for the base 3-year new construction warranty. */
+  basePriceText: string;
+  tierPricing: NewConstructionTierPricing[];
+  page: number;
+};
+
+/** New construction plan pricing (Utah Brochure 2025.5, p. 9).
+ *  Distinct from standard annual plan pricing (WORKBOOK_PRICING, p. 7). */
+export const NEW_CONSTRUCTION_PRICING: NewConstructionPricingData = {
+  basePriceText: "$800 for three years of coverage",
+  tierPricing: [
+    { plan: "Essential", priceText: "$220" },
+    { plan: "Elevated", priceText: "$270" },
+    { plan: "Totally Elevated", priceText: "$330" },
+    { plan: "Epic", priceText: "$400" },
+  ],
+  page: 9,
+};

@@ -23,6 +23,7 @@ import {
   type CoverageNarrowingContext,
 } from "./answer-logic";
 import {
+  NEW_CONSTRUCTION_PRICING,
   UTAH_WORKBOOK_TITLE,
   UTAH_WORKBOOK_VERSION,
   UTAH_WORKBOOK_SOURCE_TYPE,
@@ -59,6 +60,26 @@ function isWorkbookAddonItem(s: string): s is WorkbookAddonItem {
 // ---------------------------------------------------------------------------
 // Answer builders — one per action type
 // ---------------------------------------------------------------------------
+
+function newConstructionPricingAnswer(): CoverageAnswer {
+  const tiers = NEW_CONSTRUCTION_PRICING.tierPricing
+    .map((t) => `• ${t.plan}: ${t.priceText}`)
+    .join("\n");
+  const citation = buildCitation(
+    UTAH_WORKBOOK_TITLE,
+    UTAH_WORKBOOK_VERSION,
+    [NEW_CONSTRUCTION_PRICING.page],
+  );
+  return {
+    kind: "grounded",
+    text:
+      `New Construction starts at ${NEW_CONSTRUCTION_PRICING.basePriceText}. ` +
+      `New Construction tier pricing:\n${tiers}`,
+    citations: [citation],
+    confidence: "high",
+    sourceType: UTAH_WORKBOOK_SOURCE_TYPE,
+  };
+}
 
 function addonAnswer(item: WorkbookAddonItem): CoverageAnswer {
   const data = WORKBOOK_ADDONS[item];
@@ -205,6 +226,37 @@ const WORKBOOK_VOCAB = {
 };
 
 // ---------------------------------------------------------------------------
+// Item resolution helper — used by the route to persist context
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the canonical workbook item name that the message resolves to, or
+ * null if no specific item can be identified. Used by the route to persist
+ * coverageItem context for follow-up turns — e.g. "Standard timer for pool.
+ * What does that mean?" → "Built-in Pool/Spa Equipment with Standard Timer".
+ * Pure: no I/O.
+ */
+export function resolveWorkbookItem(
+  message: string,
+  stateCode: string,
+): string | null {
+  if (stateCode.trim().toUpperCase() !== "UT") return null;
+  const turn = planCoverageTurn({
+    message,
+    vocab: WORKBOOK_VOCAB,
+    synonyms: WORKBOOK_SYNONYMS,
+  });
+  switch (turn.action) {
+    case "coverage_item":
+      return turn.item;
+    case "clarify":
+      return turn.context.coverageItem ?? null;
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -224,6 +276,32 @@ export function answerFromWorkbook(
   step?: string,
 ): CoverageAnswer | null {
   if (stateCode.trim().toUpperCase() !== "UT") return null;
+
+  // New construction pricing shortcut — runs before planCoverageTurn because
+  // "new construction" is not a workbook plan or coverage item and would
+  // otherwise fall through to a plan-clarification clarify or null.
+  //
+  // Two cases:
+  //   1. Follow-up turn: context carries pricingTarget="new_construction"
+  //      (set by route on the prior turn when intent was "pricing").
+  //   2. Fresh turn: message contains NC keywords with pricing intent.
+  const pricingTarget = context?.pricingTarget;
+  if (pricingTarget === "new_construction") {
+    return newConstructionPricingAnswer();
+  }
+  const t = message.toLowerCase();
+  const hasNcKeyword =
+    t.includes("new construction") ||
+    t.includes("new build") ||
+    t.includes("new home");
+  const hasPricingMsg =
+    t.includes("how much") ||
+    t.includes("price") ||
+    t.includes("pricing") ||
+    t.includes("cost");
+  if (hasNcKeyword && hasPricingMsg) {
+    return newConstructionPricingAnswer();
+  }
 
   const turn = planCoverageTurn({
     message,

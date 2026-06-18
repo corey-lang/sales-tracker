@@ -710,3 +710,502 @@ describe("H-catch: DB throws connectivity error → workbook fallback", () => {
     expect(json.reply.toLowerCase()).toContain("trouble");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-source scenarios (I–L) — verify all approved Utah sources are searched
+// for each question and merged according to source-priority rules.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Scenario I — "Standard timer for pool. What does that mean?"
+//
+// - Contract: no pool facts → null.
+// - Workbook: "standard timer" synonym resolves to Built-in Pool/Spa Equipment
+//   with Standard Timer → $250 add-on, $1,000/request limit, p. 9.
+// - Merged: workbook wins (only grounded source).
+// ---------------------------------------------------------------------------
+
+describe("I: pool standard timer → workbook answer (multi-source)", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "I couldn't find that in the current Utah brochure.",
+      citations: [],
+    });
+  });
+
+  it("type is answer", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+  });
+
+  it("reply contains $250 add-on price", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.reply).toContain("$250");
+  });
+
+  it("reply contains $1,000 per-request limit", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.reply).toContain("$1,000");
+  });
+
+  it("sourceType is workbook, page 9", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.sources).toHaveLength(1);
+    expect(json.sources[0].sourceType).toBe("workbook");
+    expect(json.sources[0].pages).toContain(9);
+  });
+
+  it("grounded is true", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.grounded).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario J — "What happens outside our coverage area?"
+//
+// Contract wins for service area / trip fee — these are CONTRACT_ONLY_CATEGORIES.
+// Workbook returns refusal (no service area data). Merged result is contract.
+// Verifies that multi-source architecture still applies source-priority rules.
+// ---------------------------------------------------------------------------
+
+describe("J: outside coverage area → contract wins (multi-source)", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "I couldn't find service area info in the brochure.",
+      citations: [],
+    });
+  });
+
+  it("type is answer", async () => {
+    const res = await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+  });
+
+  it("reply includes five Utah counties from contract", async () => {
+    const res = await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    const json = await res.json();
+    expect(json.reply).toContain("Salt Lake");
+    expect(json.reply).toContain("Davis");
+    expect(json.reply).toContain("Weber");
+    expect(json.reply).toContain("Washington");
+  });
+
+  it("reply includes $85 Trip Fee from contract", async () => {
+    const res = await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    const json = await res.json();
+    expect(json.reply).toContain("$85");
+    expect(json.reply.toLowerCase()).toContain("trip fee");
+  });
+
+  it("sourceType is contract, page 12", async () => {
+    const res = await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    const json = await res.json();
+    expect(json.sources[0]?.sourceType).toBe("contract");
+    expect(json.sources[0]?.pages).toContain(12);
+  });
+
+  it("narrator is NOT called (contract answer)", async () => {
+    await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    expect(mockNarrator).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario K — "How much is new construction?"
+//
+// Contract: new_construction category → buyer only, 1-3 years, p. 12.
+// Workbook/brochure: refusal (no new construction pricing in workbook fallback).
+// Merged: contract wins (only grounded source).
+//
+// K-2 verifies the combined case when the brochure DB has pricing data:
+// both sources merged with brochure leading (pricing intent) + contract appended.
+// ---------------------------------------------------------------------------
+
+describe("K: new construction → multi-source answer", () => {
+  it("K-1: brochure DB refusal → workbook pricing + contract rules returned", async () => {
+    // Workbook now has NC pricing ($800 base + tier prices); even when the DB
+    // returns refusal the workbook fallback provides the pricing data.
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "No new construction plan data in brochure.",
+      citations: [],
+    });
+    const res = await POST(
+      makeRequest({ message: "How much is new construction?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    // Workbook pricing leads (pricing intent)
+    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    // Contract rules also appended
+    expect(json.reply.toLowerCase()).toContain("buyer");
+  });
+
+  it("K-1: combined answer includes workbook (p. 9) and contract (p. 12) sources", async () => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "No new construction plan data in brochure.",
+      citations: [],
+    });
+    const res = await POST(
+      makeRequest({ message: "How much is new construction?" }),
+    );
+    const json = await res.json();
+    const sourceTypes = json.sources.map((s: { sourceType: string }) => s.sourceType);
+    expect(sourceTypes).toContain("workbook");
+    expect(sourceTypes).toContain("contract");
+    const pages = json.sources.flatMap((s: { pages: number[] }) => s.pages);
+    expect(pages).toContain(9);
+    expect(pages).toContain(12);
+  });
+
+  it("K-2: both sources grounded → combined answer with brochure price leading", async () => {
+    // Simulate DB returning new construction pricing.
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "grounded" as const,
+      text: "New Construction Plan: $1,050/year.",
+      citations: [
+        {
+          brochure: "Utah Brochure 2025.5",
+          version: "2025.5",
+          pages: [9],
+          label: "Utah Brochure 2025.5, p. 9",
+        },
+      ],
+      confidence: "high" as const,
+      sourceType: "brochure" as const,
+    });
+    const res = await POST(
+      makeRequest({ message: "How much is new construction?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    // Brochure leads (pricing intent) → price should appear.
+    expect(json.reply).toContain("$1,050");
+    // Contract appended → buyer-only rule should also appear.
+    expect(json.reply.toLowerCase()).toContain("buyer");
+  });
+
+  it("K-2: combined answer sources include both brochure p. 9 and contract p. 12", async () => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "grounded" as const,
+      text: "New Construction Plan: $1,050/year.",
+      citations: [
+        {
+          brochure: "Utah Brochure 2025.5",
+          version: "2025.5",
+          pages: [9],
+          label: "Utah Brochure 2025.5, p. 9",
+        },
+      ],
+      confidence: "high" as const,
+      sourceType: "brochure" as const,
+    });
+    const res = await POST(
+      makeRequest({ message: "How much is new construction?" }),
+    );
+    const json = await res.json();
+    const sourceTypes = json.sources.map((s: { sourceType: string }) => s.sourceType);
+    expect(sourceTypes).toContain("brochure");
+    expect(sourceTypes).toContain("contract");
+    const pages = json.sources.flatMap((s: { pages: number[] }) => s.pages);
+    expect(pages).toContain(9);
+    expect(pages).toContain(12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario L — Follow-up "How much is it?" with item context from prior turn
+//
+// When the previous answer established a coverageItem (via chip-tap or explicit
+// context), the follow-up pricing question should resolve to that item without
+// re-asking. Tests both the pool standard timer and the new construction paths.
+// ---------------------------------------------------------------------------
+
+describe("L: follow-up 'How much is it?' uses prior coverageItem context", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "I couldn't find that in the current Utah brochure.",
+      citations: [],
+    });
+  });
+
+  it("L-1: pool standard timer context → $250 answer (workbook, plan-independent)", async () => {
+    // Simulates a follow-up after the pool standard timer chip was already tapped.
+    const res = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: {
+          intent: "coverage",
+          coverageItem: "Built-in Pool/Spa Equipment with Standard Timer",
+        },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$250");
+    expect(json.reply).toContain("$1,000");
+    expect(json.sources[0]?.sourceType).toBe("workbook");
+  });
+
+  it("L-1: pool standard timer follow-up → no plan clarification (add-ons are plan-independent)", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: {
+          intent: "coverage",
+          coverageItem: "Built-in Pool/Spa Equipment with Standard Timer",
+        },
+      }),
+    );
+    const json = await res.json();
+    // Should be a direct answer, not a plan clarification.
+    expect(json.type).toBe("answer");
+    expect(json.answerOptions).toHaveLength(0);
+  });
+
+  it("L-2: new construction with pricingTarget → workbook pricing answer (canonical follow-up path)", async () => {
+    // Canonical new construction follow-up: context carries pricingTarget set by
+    // the server on the prior turn. The workbook returns pricing, not contract rules.
+    const res = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: {
+          intent: "pricing",
+          coverageItem: "new_construction",
+          pricingTarget: "new_construction",
+        },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.grounded).toBe(true);
+    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(
+      json.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
+    ).toBe(true);
+  });
+
+  it("L-3: Kitchen Refrigerator + Elevated context → $2,000 answer (existing guided flow)", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "Elevated",
+        localFlow: "coverage",
+        coverageStep: "coverage:plan",
+        coverageContext: {
+          intent: "coverage",
+          coverageItem: "Kitchen Refrigerator",
+        },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$2,000");
+    expect(json.sources[0]?.sourceType).toBe("workbook");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario M — True two-turn context propagation
+//
+// Verifies that a resolved answer returns enough context (localFlow +
+// coverageContext.coverageItem) that the follow-up "How much is it?" can
+// resolve the topic without re-asking — even when the first turn was a fresh
+// question with no incoming context.
+// ---------------------------------------------------------------------------
+
+describe("M: two-turn follow-up context propagation", () => {
+  beforeEach(() => {
+    // Default: no published brochure → workbook fallback path.
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "No data in brochure.",
+      citations: [],
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // M-1 — new construction: first turn returns topic context; follow-up resolves
+  // -------------------------------------------------------------------------
+
+  it("M-1: 'How much is new construction?' returns pricingTarget=new_construction context", async () => {
+    const res = await POST(
+      makeRequest({ message: "How much is new construction?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.localFlow).toBe("coverage");
+    expect(json.coverageContext?.coverageItem).toBe("new_construction");
+    expect(json.coverageContext?.pricingTarget).toBe("new_construction");
+  });
+
+  it("M-1: follow-up 'How much is it?' with new_construction context → workbook pricing answer", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: {
+          intent: "pricing",
+          coverageItem: "new_construction",
+          pricingTarget: "new_construction",
+        },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.grounded).toBe(true);
+    // Workbook new construction pricing ($800 base or tier prices)
+    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(
+      json.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
+    ).toBe(true);
+    // Coverage path — never falls through to Cogent quote flow.
+    expect(json.department).toBe("coverage");
+  });
+
+  it("M-1 integrated: real two-turn chain — first response context drives follow-up to pricing", async () => {
+    // Turn 1: fresh new construction pricing question.
+    const res1 = await POST(makeRequest({ message: "How much is new construction?" }));
+    const json1 = await res1.json();
+    expect(json1.localFlow).toBe("coverage");
+    expect(json1.coverageContext?.pricingTarget).toBe("new_construction");
+
+    // Turn 2: "How much is it?" using the EXACT context the server returned.
+    const res2 = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: json1.localFlow,
+        coverageStep: json1.coverageStep,
+        coverageContext: json1.coverageContext,
+      }),
+    );
+    const json2 = await res2.json();
+    expect(json2.type).toBe("answer");
+    expect(json2.grounded).toBe(true);
+    expect(json2.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(
+      json2.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
+    ).toBe(true);
+    expect(json2.department).toBe("coverage");
+  });
+
+  // -------------------------------------------------------------------------
+  // M-2 — pool standard timer: first turn returns item context; follow-up resolves
+  // -------------------------------------------------------------------------
+
+  it("M-2: 'Standard timer for pool' returns localFlow=coverage and resolved add-on coverageItem", async () => {
+    const res = await POST(
+      makeRequest({ message: "Standard timer for pool. What does that mean?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.localFlow).toBe("coverage");
+    expect(json.coverageContext?.coverageItem).toBe(
+      "Built-in Pool/Spa Equipment with Standard Timer",
+    );
+  });
+
+  it("M-2: follow-up 'How much is it?' with standard timer context → $250 add-on, $1,000/request", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "How much is it?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: {
+          intent: "coverage",
+          coverageItem: "Built-in Pool/Spa Equipment with Standard Timer",
+        },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$250");
+    expect(json.reply).toContain("$1,000");
+    expect(json.sources[0]?.sourceType).toBe("workbook");
+  });
+
+  // -------------------------------------------------------------------------
+  // M-3 — outside coverage area: first turn returns service_area context;
+  //       follow-up "What's the fee?" still hits contract (trip fee)
+  // -------------------------------------------------------------------------
+
+  it("M-3: 'What happens outside our coverage area?' returns localFlow=coverage and coverageItem=service_area", async () => {
+    const res = await POST(
+      makeRequest({ message: "What happens outside our coverage area?" }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.localFlow).toBe("coverage");
+    // Primary contract category for the "outside coverage area" question.
+    expect(json.coverageContext?.coverageItem).toBe("service_area");
+  });
+
+  it("M-3: follow-up 'What's the fee?' with service_area context → $85 Trip Fee from contract p.12", async () => {
+    const res = await POST(
+      makeRequest({
+        message: "What's the fee?",
+        localFlow: "coverage",
+        coverageStep: "coverage:item",
+        coverageContext: { intent: "coverage", coverageItem: "service_area" },
+      }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$85");
+    expect(json.reply.toLowerCase()).toContain("trip fee");
+    expect(json.sources[0]?.sourceType).toBe("contract");
+    expect(json.sources[0]?.pages).toContain(12);
+  });
+
+  // -------------------------------------------------------------------------
+  // M-4 — "How much is it?" with no prior context → plan clarification,
+  //       never Cogent quote flow
+  // -------------------------------------------------------------------------
+
+  it("M-4: 'How much is it?' with no context → plan clarification, not Cogent quote flow", async () => {
+    const res = await POST(makeRequest({ message: "How much is it?" }));
+    const json = await res.json();
+    // Coverage path handles it locally (never reaches Cogent).
+    expect(json.department).toBe("coverage");
+    // Workbook asks "Which plan's price would you like?" with plan chips.
+    expect(json.type).toBe("clarification");
+    expect(json.answerOptions.length).toBeGreaterThan(0);
+  });
+});

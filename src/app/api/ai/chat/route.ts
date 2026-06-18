@@ -12,6 +12,7 @@ import {
 } from "@/lib/ai/sales-knowledge";
 import { answerCoverageQuestion } from "@/lib/coverage/service";
 import {
+  classifyCoverageIntent,
   shouldAnswerFromCoverage,
   stateLabel,
   type CoverageAnswer,
@@ -22,10 +23,11 @@ import {
   answerFromContract,
   answerSellerAddon,
   checkAmbiguity,
-  isContractQuestion,
+  detectContractCategories,
   isSellerAddonQuestion,
 } from "@/lib/coverage/contract-answer";
-import { answerFromWorkbook } from "@/lib/coverage/workbook-answer";
+import { answerFromWorkbook, resolveWorkbookItem } from "@/lib/coverage/workbook-answer";
+import { mergeUtahSources } from "@/lib/coverage/multi-source";
 import { callSmittyNarrator } from "@/lib/ai/smitty-narrator";
 
 // POST /api/ai/chat
@@ -192,6 +194,7 @@ const ChatSchema = z.object({
       coverageAudience: z
         .enum(["real_estate", "homeowner", "sellers"])
         .optional(),
+      pricingTarget: z.string().max(200).optional(),
     })
     .optional(),
 });
@@ -758,6 +761,34 @@ function summarizeShape(value: unknown, depth = 0): unknown {
 }
 
 /**
+ * Canonical search phrases for contract topics that may be stored as
+ * `coverageItem` in follow-up context. Each phrase is chosen to trigger the
+ * correct `detectContractCategories` keyword matches, including co-incident
+ * categories (e.g. "service area outside normal" hits both service_area AND
+ * trip_fee so the $85 fee is included alongside the county list).
+ */
+const CONTRACT_TOPIC_PHRASES: Readonly<Record<string, string>> = {
+  new_construction: "new construction",
+  service_area: "service area outside normal service area",
+  trip_fee: "trip fee outside service area",
+  seller_coverage: "seller coverage",
+  buyer_coverage: "buyer coverage",
+  exclusions: "contract exclusions",
+  expedited_service: "expedited service after hours",
+};
+
+/**
+ * When a follow-up turn's coverageContext carries a contract topic as
+ * `coverageItem` (e.g. "new_construction"), return the canonical search phrase
+ * that will hit the right contract-fact categories. Returns null for workbook
+ * items (e.g. "Kitchen Refrigerator") — those don't need a contract search.
+ */
+function deriveContractMessage(ctx: CoverageNarrowingContext | undefined): string | null {
+  if (!ctx?.coverageItem) return null;
+  return CONTRACT_TOPIC_PHRASES[ctx.coverageItem] ?? null;
+}
+
+/**
  * Runs the brochure DB lookup with a workbook fallback. When the DB returns
  * a refusal (e.g., no current brochure published for the state), tries the
  * hardcoded Utah workbook facts before returning the refusal to the client.
@@ -851,56 +882,73 @@ export async function POST(req: Request) {
       const stateContext = { code: effectiveState, label: stateLabel(effectiveState) };
 
       // -----------------------------------------------------------------------
-      // Source routing — contract facts have priority over brochure for coverage
-      // and legal questions; brochure/workbook handles pricing and plan catalogs.
-      //   1. Seller + add-on → contract (blocks generic add-on catalog route)
-      //   2. Contract question → contract facts
-      //   3. Item ambiguity → specific clarification chips (fridge, pool)
-      //   4. Everything else → brochure DB lookup
+      // Multi-source routing — ALL approved Utah sources searched for every
+      // question; relevant matches merged and ranked by intent.
+      //
+      //   1. Seller + add-on → contract only (semantic exception: add-ons are
+      //      explicitly excluded from seller coverage — the add-on catalog must
+      //      never be offered as an alternative here).
+      //   2. Item ambiguity → clarification chips (fridge, pool) — issued before
+      //      any source lookup so the item is specific enough to look up.
+      //   3. Everything else → parallel search: contract facts + brochure/workbook,
+      //      then mergeUtahSources() applies source-priority rules by intent.
+      //
+      // In-progress local flows (chip echoes) skip the contract search because a
+      // chip value like "Elevated" is never a contract question; the brochure
+      // lookup handles it using the flow context.
       // -----------------------------------------------------------------------
       let answer: CoverageAnswer;
       const hasItemContext = Boolean(body.coverageContext?.coverageItem);
 
       if (isSellerAddonQuestion(body.message)) {
-        // Seller coverage + add-on → always contract-backed, no DB needed.
+        // Seller coverage + add-on → contract only, never generic add-on catalog.
         answer = answerSellerAddon();
 
-      } else if (!body.localFlow && isContractQuestion(body.message)) {
-        // Fresh contract question (not a guided-flow chip echo) → contract facts.
-        const contractAnswer = answerFromContract(body.message, effectiveState);
-        if (contractAnswer) {
-          answer = contractAnswer;
-        } else {
-          // Contract routing matched but no fact found → refusal from docs.
-          answer = {
-            kind: "refusal",
-            text: `I don't have a contract-backed answer for that yet. Ask an admin to add it to Ask Smitty's knowledge base.`,
-            citations: [],
-          };
-        }
-
       } else if (!hasItemContext && !body.localFlow) {
-        // Pre-DB ambiguity check — only on fresh questions, not guided-flow echoes.
+        // Fresh question — check item ambiguity before any source lookup.
         const ambiguity = checkAmbiguity(body.message, hasItemContext);
         if (ambiguity) {
           answer = ambiguity;
         } else {
-          answer = await runBrochureLookup(
+          // Multi-source: search contract AND brochure/workbook, then merge.
+          const contractAnswer = answerFromContract(body.message, effectiveState);
+          const brochureAnswer = await runBrochureLookup(
             effectiveState,
             body.message,
             body.coverageContext as CoverageNarrowingContext | undefined,
             body.coverageStep,
           );
+          answer = mergeUtahSources(body.message, contractAnswer, brochureAnswer) ?? {
+            kind: "refusal" as const,
+            text: "I couldn't find that in the Utah contract or brochure.",
+            citations: [],
+          };
         }
 
       } else {
-        // In-progress local flow or non-ambiguous fresh question → brochure.
-        answer = await runBrochureLookup(
+        // In-progress local flow or item context already established.
+        // Multi-source still applies: when the context topic maps to a contract
+        // category (e.g. new_construction, service_area), run the contract search
+        // in addition to the brochure lookup so contract facts remain available for
+        // source-priority merging. Chip-echo turns (coverageItem = workbook item)
+        // get a null contractAnswer, which mergeUtahSources skips cleanly.
+        const effectiveContractMsg = deriveContractMessage(
+          body.coverageContext as CoverageNarrowingContext | undefined,
+        );
+        const contractAnswer = effectiveContractMsg
+          ? answerFromContract(effectiveContractMsg, effectiveState)
+          : null;
+        const brochureAnswer = await runBrochureLookup(
           effectiveState,
           body.message,
           body.coverageContext as CoverageNarrowingContext | undefined,
           body.coverageStep,
         );
+        answer = mergeUtahSources(body.message, contractAnswer, brochureAnswer) ?? {
+          kind: "refusal" as const,
+          text: "I couldn't find that in the Utah contract or brochure.",
+          citations: [],
+        };
       }
 
       const isClarify = answer.kind === "clarify";
@@ -920,13 +968,22 @@ export async function POST(req: Request) {
       }
 
       // Build normalized sources — never emit page 0; multiple pages preserved.
-      const sourceType = answer.sourceType ?? "brochure";
+      // Per-citation sourceType: contract citations are always "contract" (title
+      // contains "contract"); other citations inherit the answer's sourceType tag.
+      // This handles merged answers where citations span multiple sources.
+      const answerSourceType = answer.sourceType ?? "brochure";
       const sources: SmittySource[] = answer.citations
-        .map((c) => ({
-          title: c.brochure,
-          pages: c.pages.filter((p) => p > 0),
-          sourceType,
-        }))
+        .map((c) => {
+          const citSourceType: "brochure" | "contract" | "workbook" =
+            c.brochure.toLowerCase().includes("contract")
+              ? "contract"
+              : answerSourceType;
+          return {
+            title: c.brochure,
+            pages: c.pages.filter((p) => p > 0),
+            sourceType: citSourceType,
+          };
+        })
         .filter((s) => s.pages.length > 0);
 
       // Response type for the normalized discriminated union.
@@ -938,14 +995,77 @@ export async function POST(req: Request) {
 
       const confidence = answer.confidence ?? (answer.kind === "grounded" ? "medium" : "needs_review");
 
+      // Follow-up context propagation.
+      //
+      // The response must carry enough context that the NEXT turn ("How much is
+      // it?") can resolve the topic without re-asking, even when the current turn
+      // is a fresh first-turn question (no prior coverageContext).
+      //
+      // Precedence:
+      //   1. Clarify answer → echo the narrowing context from the answer itself.
+      //   2. Grounded + prior coverageItem → echo prior context (ongoing flow).
+      //   3. Grounded workbook/brochure → resolve item from message via workbook
+      //      synonym detection (e.g. "standard timer" → "Built-in Pool/Spa …").
+      //   4. Grounded contract → map first detected contract category to topic
+      //      (e.g. new_construction → coverageItem: "new_construction").
+      const grounded = answer.kind === "grounded";
+      let responseLocalFlow: "coverage" | null = null;
+      let responseCoverageStep: string | null = null;
+      let responseCoverageContext: CoverageNarrowingContext | null = null;
+
+      if (isClarify) {
+        responseLocalFlow = "coverage";
+        responseCoverageStep = answer.coverageStep ?? null;
+        responseCoverageContext = answer.context ?? null;
+      } else if (grounded) {
+        const priorCtx = body.coverageContext as CoverageNarrowingContext | undefined;
+        let resolvedCtx: CoverageNarrowingContext | null = null;
+
+        if (priorCtx?.coverageItem) {
+          // Ongoing flow — echo prior context unchanged.
+          resolvedCtx = priorCtx;
+        } else {
+          // Fresh question — derive topic from the resolved answer.
+          // Contract categories take priority (they come from message keywords);
+          // if none match, fall through to workbook item resolution.
+          const cats = detectContractCategories(body.message);
+          if (cats.length > 0) {
+            const primaryCat = cats[0];
+            const msgIntent = classifyCoverageIntent(body.message);
+            // For pricing-capable topics, persist pricing context so follow-up
+            // turns ("How much is it?") resolve to workbook pricing, not rules.
+            if (primaryCat === "new_construction" && msgIntent === "pricing") {
+              resolvedCtx = {
+                intent: "pricing",
+                coverageItem: primaryCat,
+                pricingTarget: primaryCat,
+              };
+            } else {
+              resolvedCtx = { intent: "coverage", coverageItem: primaryCat };
+            }
+          } else {
+            const resolvedItem = resolveWorkbookItem(body.message, effectiveState);
+            if (resolvedItem) {
+              resolvedCtx = { intent: "coverage", coverageItem: resolvedItem };
+            }
+          }
+        }
+
+        if (resolvedCtx) {
+          responseLocalFlow = "coverage";
+          responseCoverageStep = "coverage:item";
+          responseCoverageContext = resolvedCtx;
+        }
+      }
+
       console.log(
         `[ai-chat] coverage: state=${effectiveState} ` +
-          `kind=${answer.kind} sourceType=${sourceType} ` +
+          `kind=${answer.kind} sourceType=${answerSourceType} ` +
           `confidence=${confidence} ` +
           `citations=${answer.citations.length} ` +
           `aeNote=${aeNote !== null} ` +
-          `localFlow=${isClarify ? "coverage" : "(none)"} ` +
-          `coverageStep=${isClarify ? answer.coverageStep ?? "(none)" : "(none)"}`,
+          `localFlow=${responseLocalFlow ?? "(none)"} ` +
+          `coverageStep=${responseCoverageStep ?? "(none)"}`,
       );
 
       return Response.json({
@@ -960,9 +1080,9 @@ export async function POST(req: Request) {
         grounded: answer.kind === "grounded",
         stateContext,
         citations: answer.citations,
-        localFlow: isClarify ? "coverage" : null,
-        coverageStep: isClarify ? answer.coverageStep ?? null : null,
-        coverageContext: isClarify ? answer.context ?? null : null,
+        localFlow: responseLocalFlow,
+        coverageStep: responseCoverageStep,
+        coverageContext: responseCoverageContext,
         // Optional AE tip from narrator — never replaces the grounded reply.
         ...(aeNote ? { aeNote } : {}),
         // Normalized AskSmittyResponse fields.

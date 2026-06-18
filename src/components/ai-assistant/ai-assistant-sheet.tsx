@@ -45,6 +45,7 @@ type CoverageContext = {
   planName?: string;
   comparePlans?: string[];
   coverageAudience?: string;
+  pricingTarget?: string;
 };
 
 /** Server contract for POST /api/ai/chat. */
