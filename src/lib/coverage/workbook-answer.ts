@@ -23,6 +23,7 @@ import {
   type CoverageNarrowingContext,
 } from "./answer-logic";
 import {
+  GUEST_HOUSE_ADU_PRICING,
   NEW_CONSTRUCTION_PRICING,
   UTAH_WORKBOOK_TITLE,
   UTAH_WORKBOOK_VERSION,
@@ -62,9 +63,6 @@ function isWorkbookAddonItem(s: string): s is WorkbookAddonItem {
 // ---------------------------------------------------------------------------
 
 function newConstructionPricingAnswer(): CoverageAnswer {
-  const tiers = NEW_CONSTRUCTION_PRICING.tierPricing
-    .map((t) => `• ${t.plan}: ${t.priceText}`)
-    .join("\n");
   const citation = buildCitation(
     UTAH_WORKBOOK_TITLE,
     UTAH_WORKBOOK_VERSION,
@@ -72,9 +70,25 @@ function newConstructionPricingAnswer(): CoverageAnswer {
   );
   return {
     kind: "grounded",
-    text:
-      `New Construction starts at ${NEW_CONSTRUCTION_PRICING.basePriceText}. ` +
-      `New Construction tier pricing:\n${tiers}`,
+    text: `New Construction provides three years of coverage starting at ${NEW_CONSTRUCTION_PRICING.basePriceText}.`,
+    citations: [citation],
+    confidence: "high",
+    sourceType: UTAH_WORKBOOK_SOURCE_TYPE,
+  };
+}
+
+function guestHouseAduPricingAnswer(): CoverageAnswer {
+  const tiers = GUEST_HOUSE_ADU_PRICING.tierPricing
+    .map((t) => `• ${t.plan}: ${t.priceText}`)
+    .join("\n");
+  const citation = buildCitation(
+    UTAH_WORKBOOK_TITLE,
+    UTAH_WORKBOOK_VERSION,
+    [GUEST_HOUSE_ADU_PRICING.page],
+  );
+  return {
+    kind: "grounded",
+    text: `Guest House/ADU add-on pricing:\n${tiers}`,
     citations: [citation],
     confidence: "high",
     sourceType: UTAH_WORKBOOK_SOURCE_TYPE,
@@ -289,18 +303,33 @@ export function answerFromWorkbook(
   if (pricingTarget === "new_construction") {
     return newConstructionPricingAnswer();
   }
+  if (pricingTarget === "guest_house_adu") {
+    return guestHouseAduPricingAnswer();
+  }
+
   const t = message.toLowerCase();
-  const hasNcKeyword =
-    t.includes("new construction") ||
-    t.includes("new build") ||
-    t.includes("new home");
   const hasPricingMsg =
     t.includes("how much") ||
     t.includes("price") ||
     t.includes("pricing") ||
     t.includes("cost");
+
+  const hasNcKeyword =
+    t.includes("new construction") ||
+    t.includes("new build") ||
+    t.includes("new home");
   if (hasNcKeyword && hasPricingMsg) {
     return newConstructionPricingAnswer();
+  }
+
+  const hasAduKeyword =
+    t.includes("guest house") ||
+    t.includes(" adu") ||
+    t.startsWith("adu") ||
+    t.includes("duplex") ||
+    t.includes("accessory dwelling");
+  if (hasAduKeyword && hasPricingMsg) {
+    return guestHouseAduPricingAnswer();
   }
 
   const turn = planCoverageTurn({

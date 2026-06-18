@@ -761,6 +761,88 @@ function summarizeShape(value: unknown, depth = 0): unknown {
 }
 
 /**
+ * Known topic terms that signal a NEW coverage question when they appear in a
+ * message that already has a stored coverageItem context. Used by
+ * isFollowUpMessage to prevent stale context from bleeding into new questions.
+ * Entries are lowercase; matched via String.prototype.includes.
+ */
+const COVERAGE_TOPIC_TERMS = [
+  "pool", "spa", "standard timer", "automation controller",
+  "new construction", "new build",
+  "guest house", "adu", "duplex", "accessory dwelling",
+  "sprinkler", "sprinklers",
+  "kitchen refrigerator", "refrigerator", "fridge", "freezer",
+  "hvac", "heating", "cooling", "air condition",
+  "seller coverage", "seller",
+  "service area", "coverage area",
+  "trip fee",
+  "add-on", "addon",
+  "maintenance",
+  "exclusion",
+] as const;
+
+/**
+ * Returns true when the message is a clear follow-up or clarification tap for
+ * the active coverageContext, false when it introduces a new explicit topic
+ * that should be treated as a fresh question.
+ *
+ * Prevents stale context from bleeding into unrelated questions. Examples:
+ *   - Kitchen Refrigerator context + "How much is pool coverage?" → false (new topic)
+ *   - Kitchen Refrigerator context + "How much is it?" → true (follow-up)
+ *   - Kitchen Refrigerator context + "Elevated" (plan chip) → true (clarification tap)
+ */
+function isFollowUpMessage(
+  message: string,
+  context: CoverageNarrowingContext | undefined,
+  step: string | undefined,
+): boolean {
+  if (!context?.coverageItem && !context?.pricingTarget) return false;
+
+  const t = message.toLowerCase().trim();
+
+  // Negation patterns → always reset context regardless of topic match.
+  if (
+    t.includes("not asking about") ||
+    t.includes("don't ask about") ||
+    t.includes("wrong item") ||
+    t.includes("i meant") ||
+    t.includes("different topic")
+  ) {
+    return false;
+  }
+
+  // Pure follow-up shorthand — no entity or new topic mentioned.
+  const FOLLOW_UP_FRAGMENTS = [
+    "how much is it",
+    "what does it cost",
+    "what's the cost",
+    "what's the price",
+    "is it covered",
+    "what's the limit",
+    "tell me more",
+    "what about it",
+  ];
+  if (FOLLOW_UP_FRAGMENTS.some((f) => t.includes(f))) return true;
+
+  // Clarification chip taps: user is picking a plan in an active plan step.
+  if (step === "coverage:plan" || step === "pricing:plan") {
+    const PLANS = ["essential", "elevated", "totally elevated", "epic"];
+    if (PLANS.some((p) => t === p || t.startsWith(p + " "))) return true;
+  }
+
+  // Message introduces a new explicit topic different from the stored item →
+  // treat as fresh so the new question gets an uncontaminated lookup.
+  const storedItem = (context?.coverageItem ?? context?.pricingTarget ?? "").toLowerCase();
+  for (const topic of COVERAGE_TOPIC_TERMS) {
+    if (t.includes(topic) && !storedItem.includes(topic)) {
+      return false;
+    }
+  }
+
+  return true; // default: treat as follow-up (safe for chip taps, short answers)
+}
+
+/**
  * Canonical search phrases for contract topics that may be stored as
  * `coverageItem` in follow-up context. Each phrase is chosen to trigger the
  * correct `detectContractCategories` keyword matches, including co-incident
@@ -899,24 +981,47 @@ export async function POST(req: Request) {
       // -----------------------------------------------------------------------
       let answer: CoverageAnswer;
       const hasItemContext = Boolean(body.coverageContext?.coverageItem);
+      const hasPricingContext = Boolean(body.coverageContext?.pricingTarget);
+
+      // isMidClarification: localFlow is active but no specific item/target has
+      // been established yet (e.g., we asked "which fridge?" and are waiting for
+      // the chip tap). Always continue the flow in this case.
+      const isMidClarification =
+        Boolean(body.localFlow) && !hasItemContext && !hasPricingContext;
+
+      // useStoredContext: decides whether this message continues an active flow or
+      // starts fresh. Mid-clarification chip taps always continue; once an item is
+      // known, only genuine follow-ups ("how much is it?", plan chip) continue —
+      // new topics like "pool coverage" after a fridge answer always start fresh.
+      const useStoredContext =
+        isMidClarification ||
+        ((hasItemContext || hasPricingContext) &&
+          isFollowUpMessage(
+            body.message,
+            body.coverageContext as CoverageNarrowingContext | undefined,
+            body.coverageStep,
+          ));
 
       if (isSellerAddonQuestion(body.message)) {
         // Seller coverage + add-on → contract only, never generic add-on catalog.
         answer = answerSellerAddon();
 
-      } else if (!hasItemContext && !body.localFlow) {
-        // Fresh question — check item ambiguity before any source lookup.
-        const ambiguity = checkAmbiguity(body.message, hasItemContext);
+      } else if (!useStoredContext) {
+        // Fresh question (or context reset). Always check ambiguity as if there
+        // is no prior item — stale context is intentionally ignored here.
+        const ambiguity = checkAmbiguity(body.message, false);
         if (ambiguity) {
           answer = ambiguity;
         } else {
           // Multi-source: search contract AND brochure/workbook, then merge.
+          // Context is intentionally not forwarded here — stale coverageContext
+          // and coverageStep must not influence the fresh lookup.
           const contractAnswer = answerFromContract(body.message, effectiveState);
           const brochureAnswer = await runBrochureLookup(
             effectiveState,
             body.message,
-            body.coverageContext as CoverageNarrowingContext | undefined,
-            body.coverageStep,
+            undefined,
+            undefined,
           );
           answer = mergeUtahSources(body.message, contractAnswer, brochureAnswer) ?? {
             kind: "refusal" as const,
@@ -1027,7 +1132,7 @@ export async function POST(req: Request) {
         } else {
           // Fresh question — derive topic from the resolved answer.
           // Contract categories take priority (they come from message keywords);
-          // if none match, fall through to workbook item resolution.
+          // if none match, fall through to workbook item / pricing-target resolution.
           const cats = detectContractCategories(body.message);
           if (cats.length > 0) {
             const primaryCat = cats[0];
@@ -1047,6 +1152,25 @@ export async function POST(req: Request) {
             const resolvedItem = resolveWorkbookItem(body.message, effectiveState);
             if (resolvedItem) {
               resolvedCtx = { intent: "coverage", coverageItem: resolvedItem };
+            } else {
+              // Guest House/ADU pricing context — workbook add-on, no contract
+              // category. Persist pricingTarget so follow-up "how much is it?"
+              // resolves to ADU pricing without re-entering plan-clarification.
+              const msgLower = body.message.toLowerCase();
+              const isAdu =
+                msgLower.includes("guest house") ||
+                msgLower.includes(" adu") ||
+                msgLower.startsWith("adu") ||
+                msgLower.includes("duplex") ||
+                msgLower.includes("accessory dwelling");
+              const isPricing =
+                msgLower.includes("how much") ||
+                msgLower.includes("price") ||
+                msgLower.includes("pricing") ||
+                msgLower.includes("cost");
+              if (isAdu && isPricing) {
+                resolvedCtx = { intent: "pricing", pricingTarget: "guest_house_adu" };
+              }
             }
           }
         }

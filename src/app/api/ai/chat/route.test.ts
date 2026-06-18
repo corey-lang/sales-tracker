@@ -851,9 +851,7 @@ describe("J: outside coverage area → contract wins (multi-source)", () => {
 // ---------------------------------------------------------------------------
 
 describe("K: new construction → multi-source answer", () => {
-  it("K-1: brochure DB refusal → workbook pricing + contract rules returned", async () => {
-    // Workbook now has NC pricing ($800 base + tier prices); even when the DB
-    // returns refusal the workbook fallback provides the pricing data.
+  it("K-1: brochure DB refusal → workbook NC pricing ($800) + contract rules returned", async () => {
     mockAnswerCoverageQuestion.mockResolvedValue({
       kind: "refusal" as const,
       text: "No new construction plan data in brochure.",
@@ -864,9 +862,11 @@ describe("K: new construction → multi-source answer", () => {
     );
     const json = await res.json();
     expect(json.type).toBe("answer");
-    // Workbook pricing leads (pricing intent)
-    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
-    // Contract rules also appended
+    // Workbook pricing leads: $800 for three years.
+    expect(json.reply).toContain("$800");
+    // Must NOT include Guest House/ADU tier prices ($220/$270/$330/$400).
+    expect(json.reply).not.toMatch(/\$220|\$270|\$330|\$400/);
+    // Contract rules also appended.
     expect(json.reply.toLowerCase()).toContain("buyer");
   });
 
@@ -1016,7 +1016,8 @@ describe("L: follow-up 'How much is it?' uses prior coverageItem context", () =>
     const json = await res.json();
     expect(json.type).toBe("answer");
     expect(json.grounded).toBe(true);
-    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(json.reply).toContain("$800");
+    expect(json.reply).not.toMatch(/\$220|\$270|\$330|\$400/);
     expect(
       json.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
     ).toBe(true);
@@ -1075,7 +1076,7 @@ describe("M: two-turn follow-up context propagation", () => {
     expect(json.coverageContext?.pricingTarget).toBe("new_construction");
   });
 
-  it("M-1: follow-up 'How much is it?' with new_construction context → workbook pricing answer", async () => {
+  it("M-1: follow-up 'How much is it?' with new_construction context → workbook $800 pricing", async () => {
     const res = await POST(
       makeRequest({
         message: "How much is it?",
@@ -1091,16 +1092,16 @@ describe("M: two-turn follow-up context propagation", () => {
     const json = await res.json();
     expect(json.type).toBe("answer");
     expect(json.grounded).toBe(true);
-    // Workbook new construction pricing ($800 base or tier prices)
-    expect(json.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(json.reply).toContain("$800");
+    // Must NOT include Guest House/ADU tier prices.
+    expect(json.reply).not.toMatch(/\$220|\$270|\$330|\$400/);
     expect(
       json.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
     ).toBe(true);
-    // Coverage path — never falls through to Cogent quote flow.
     expect(json.department).toBe("coverage");
   });
 
-  it("M-1 integrated: real two-turn chain — first response context drives follow-up to pricing", async () => {
+  it("M-1 integrated: real two-turn chain — follow-up returns $800, not Guest House/ADU tiers", async () => {
     // Turn 1: fresh new construction pricing question.
     const res1 = await POST(makeRequest({ message: "How much is new construction?" }));
     const json1 = await res1.json();
@@ -1119,7 +1120,9 @@ describe("M: two-turn follow-up context propagation", () => {
     const json2 = await res2.json();
     expect(json2.type).toBe("answer");
     expect(json2.grounded).toBe(true);
-    expect(json2.reply).toMatch(/\$800|\$220|\$270|\$330|\$400/);
+    expect(json2.reply).toContain("$800");
+    // Must NOT bleed Guest House/ADU tier pricing into the NC follow-up.
+    expect(json2.reply).not.toMatch(/\$220|\$270|\$330|\$400/);
     expect(
       json2.sources.some((s: { sourceType: string }) => s.sourceType === "workbook"),
     ).toBe(true);
@@ -1207,5 +1210,88 @@ describe("M: two-turn follow-up context propagation", () => {
     // Workbook asks "Which plan's price would you like?" with plan chips.
     expect(json.type).toBe("clarification");
     expect(json.answerOptions.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario N — Context stickiness / reset
+//
+// Once an item is answered (e.g. Kitchen Refrigerator), a new explicit topic
+// in the next message must start fresh. Stale coverageContext must NOT be
+// carried into unrelated questions.
+// ---------------------------------------------------------------------------
+
+describe("N: stale context reset — new topic starts fresh", () => {
+  beforeEach(() => {
+    mockAnswerCoverageQuestion.mockResolvedValue({
+      kind: "refusal" as const,
+      text: "No data in brochure.",
+      citations: [],
+    });
+  });
+
+  // Simulates the state after a Kitchen Refrigerator answer:
+  // server returned localFlow=coverage, coverageStep=coverage:item,
+  // coverageContext={ intent:"coverage", coverageItem:"Kitchen Refrigerator" }.
+  const fridgeContext = {
+    localFlow: "coverage" as const,
+    coverageStep: "coverage:item",
+    coverageContext: { intent: "coverage", coverageItem: "Kitchen Refrigerator" },
+  };
+
+  it("N-1: 'How much is pool coverage?' after fridge answer → pool clarification, not fridge plan", async () => {
+    const res = await POST(
+      makeRequest({ message: "How much is pool coverage?", ...fridgeContext }),
+    );
+    const json = await res.json();
+    // Pool question is fresh: should ask which pool add-on.
+    expect(json.type).toBe("clarification");
+    expect(json.reply.toLowerCase()).toContain("pool");
+    // Must NOT be asking which plan for Kitchen Refrigerator.
+    expect(json.reply.toLowerCase()).not.toContain("kitchen refrigerator");
+    // Stale coverageItem should not persist.
+    expect(json.coverageContext?.coverageItem).not.toBe("Kitchen Refrigerator");
+  });
+
+  it("N-2: 'How much is a duplex?' after fridge answer → Guest House/ADU pricing", async () => {
+    const res = await POST(
+      makeRequest({ message: "How much is a duplex?", ...fridgeContext }),
+    );
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.grounded).toBe(true);
+    // Guest House/ADU tier prices.
+    expect(json.reply).toMatch(/\$220|\$270|\$330|\$400/);
+    expect(json.reply.toLowerCase()).toContain("guest house");
+    // Not the Kitchen Refrigerator plan flow.
+    expect(json.reply.toLowerCase()).not.toContain("kitchen refrigerator");
+  });
+
+  it("N-3: 'I'm not asking about a fridge' after fridge answer → context cleared, no plan selection", async () => {
+    const res = await POST(
+      makeRequest({ message: "I'm not asking about a fridge", ...fridgeContext }),
+    );
+    const json = await res.json();
+    // Must NOT continue the Kitchen Refrigerator plan selection.
+    expect(json.reply.toLowerCase()).not.toMatch(/which plan.*kitchen|kitchen.*which plan/);
+    // Stale coverageItem is gone from the new response context.
+    expect(json.coverageContext?.coverageItem).not.toBe("Kitchen Refrigerator");
+  });
+
+  it("N-4: New Construction price answer includes $800 but NOT Guest House/ADU tier prices", async () => {
+    const res = await POST(makeRequest({ message: "How much is new construction?" }));
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toContain("$800");
+    expect(json.reply).not.toMatch(/\$220|\$270|\$330|\$400/);
+  });
+
+  it("N-5: Guest House/ADU answer returns tier prices, not NC $800 price", async () => {
+    const res = await POST(makeRequest({ message: "How much is a guest house?" }));
+    const json = await res.json();
+    expect(json.type).toBe("answer");
+    expect(json.reply).toMatch(/\$220|\$270|\$330|\$400/);
+    expect(json.reply.toLowerCase()).toContain("guest house");
+    expect(json.reply).not.toContain("$800");
   });
 });

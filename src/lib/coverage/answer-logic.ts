@@ -381,6 +381,11 @@ const STRONG_COVERAGE_TERMS = [
   "standard timer",
   "pool pump",
   "automation controller",
+  // --- add-on items that require coverage routing ---
+  "guest house",
+  "adu",
+  "duplex",
+  "accessory dwelling",
   "benefit maximum",
   "include",
   "includes",

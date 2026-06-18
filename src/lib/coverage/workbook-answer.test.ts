@@ -352,3 +352,89 @@ describe("unknown items → null", () => {
     ).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// New Construction pricing
+// ---------------------------------------------------------------------------
+
+describe("New Construction pricing", () => {
+  it("'How much is new construction?' → grounded answer with $800", () => {
+    const r = answerFromWorkbook("How much is new construction?", "UT");
+    expect(r?.kind).toBe("grounded");
+    expect(r?.text).toContain("$800");
+  });
+
+  it("answer does NOT include Guest House/ADU tier prices ($220/$270/$330/$400)", () => {
+    const r = answerFromWorkbook("How much is new construction?", "UT");
+    expect(r?.text).not.toMatch(/\$220|\$270|\$330|\$400/);
+  });
+
+  it("answer mentions three years", () => {
+    const r = answerFromWorkbook("How much is new construction?", "UT");
+    expect(r?.text.toLowerCase()).toContain("three years");
+  });
+
+  it("source is workbook, page 9", () => {
+    const r = answerFromWorkbook("How much is new construction?", "UT");
+    expect(r?.sourceType).toBe("workbook");
+    expect(r?.citations[0]?.pages).toContain(9);
+  });
+
+  it("pricingTarget='new_construction' in context returns $800 (follow-up path)", () => {
+    const r = answerFromWorkbook(
+      "How much is it?",
+      "UT",
+      { intent: "pricing", pricingTarget: "new_construction" },
+    );
+    expect(r?.kind).toBe("grounded");
+    expect(r?.text).toContain("$800");
+    expect(r?.text).not.toMatch(/\$220|\$270|\$330|\$400/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guest House / ADU pricing
+// ---------------------------------------------------------------------------
+
+describe("Guest House/ADU pricing", () => {
+  it("'How much is a guest house?' → grounded answer with tier prices", () => {
+    const r = answerFromWorkbook("How much is a guest house?", "UT");
+    expect(r?.kind).toBe("grounded");
+    expect(r?.text).toMatch(/\$220|\$270|\$330|\$400/);
+  });
+
+  it("answer contains all four plan tiers", () => {
+    const r = answerFromWorkbook("How much is a guest house?", "UT");
+    expect(r?.text).toContain("$220");
+    expect(r?.text).toContain("$270");
+    expect(r?.text).toContain("$330");
+    expect(r?.text).toContain("$400");
+  });
+
+  it("'How much is a duplex?' → Guest House/ADU pricing", () => {
+    const r = answerFromWorkbook("How much is a duplex?", "UT");
+    expect(r?.kind).toBe("grounded");
+    expect(r?.text).toMatch(/\$220|\$270|\$330|\$400/);
+  });
+
+  it("source is workbook, page 9", () => {
+    const r = answerFromWorkbook("How much is a guest house?", "UT");
+    expect(r?.sourceType).toBe("workbook");
+    expect(r?.citations[0]?.pages).toContain(9);
+  });
+
+  it("pricingTarget='guest_house_adu' in context returns tier prices (follow-up path)", () => {
+    const r = answerFromWorkbook(
+      "How much is it?",
+      "UT",
+      { intent: "pricing", pricingTarget: "guest_house_adu" },
+    );
+    expect(r?.kind).toBe("grounded");
+    expect(r?.text).toMatch(/\$220|\$270|\$330|\$400/);
+  });
+
+  it("ADU answer does NOT contain $800 (New Construction price)", () => {
+    const r = answerFromWorkbook("How much is a guest house?", "UT");
+    expect(r?.text).not.toContain("$800");
+  });
+});

@@ -223,22 +223,37 @@ export const WORKBOOK_SYNONYMS: Array<{
 // New Construction pricing. Source: Utah Brochure 2025.5, p. 9.
 // ---------------------------------------------------------------------------
 
-export type NewConstructionTierPricing = {
+export type NewConstructionPricingData = {
+  /** 3-year base price for a new construction home warranty. */
+  basePriceText: string;
+  page: number;
+};
+
+/** New construction pricing (Utah Brochure 2025.5, p. 9).
+ *  Three years of coverage starting at $800. No per-plan tier pricing —
+ *  the adjacent tier pricing on p. 9 belongs to Guest House/ADU, not NC. */
+export const NEW_CONSTRUCTION_PRICING: NewConstructionPricingData = {
+  basePriceText: "$800",
+  page: 9,
+};
+
+// ---------------------------------------------------------------------------
+// Guest House / ADU pricing. Source: Utah Brochure 2025.5, p. 9.
+// These are the tier prices adjacent to New Construction on the brochure;
+// they apply to Guest House/ADU coverage, NOT to New Construction.
+// ---------------------------------------------------------------------------
+
+export type GuestHouseAduTierPricing = {
   plan: WorkbookPlan;
   priceText: string;
 };
 
-export type NewConstructionPricingData = {
-  /** Starting price for the base 3-year new construction warranty. */
-  basePriceText: string;
-  tierPricing: NewConstructionTierPricing[];
+export type GuestHouseAduPricingData = {
+  tierPricing: GuestHouseAduTierPricing[];
   page: number;
 };
 
-/** New construction plan pricing (Utah Brochure 2025.5, p. 9).
- *  Distinct from standard annual plan pricing (WORKBOOK_PRICING, p. 7). */
-export const NEW_CONSTRUCTION_PRICING: NewConstructionPricingData = {
-  basePriceText: "$800 for three years of coverage",
+export const GUEST_HOUSE_ADU_PRICING: GuestHouseAduPricingData = {
   tierPricing: [
     { plan: "Essential", priceText: "$220" },
     { plan: "Elevated", priceText: "$270" },
