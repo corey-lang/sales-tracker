@@ -474,6 +474,11 @@ function OfficesPageContent() {
   const [addOfficeOpen, setAddOfficeOpen] = useState(false);
   const [listRefreshKey, setListRefreshKey] = useState(0);
 
+  // Incremented after every successful visit log (quick-log or note-modal).
+  // CheckinsViewSection adds this to its useEffect deps so it re-fetches
+  // the check-ins feed immediately when a visit is recorded from any tab.
+  const [checkinsRefreshKey, setCheckinsRefreshKey] = useState(0);
+
   /** Submit handler the OfficeFormModal calls in add mode. POSTs
    *  /api/offices with the form payload, handles dedupe 409s, and
    *  on success navigates to the new office detail page. Returns
@@ -720,8 +725,11 @@ function OfficesPageContent() {
         };
       });
       flashLogNotice(officeId);
+      // Trigger a check-ins refetch so the new visit appears in the
+      // Check-ins tab immediately without requiring a manual filter change.
+      setCheckinsRefreshKey((n) => n + 1);
     },
-    [flashLogNotice],
+    [flashLogNotice, setCheckinsRefreshKey],
   );
 
   const handleLogVisit = useCallback(
@@ -773,6 +781,9 @@ function OfficesPageContent() {
           next.set(officeId, "Visit logged.");
           return next;
         });
+        // Trigger a check-ins refetch so the new visit appears in the
+        // Check-ins tab immediately without requiring a manual filter change.
+        setCheckinsRefreshKey((n) => n + 1);
         const prevTimer = noticeTimersRef.current.get(officeId);
         if (prevTimer) clearTimeout(prevTimer);
         const t = setTimeout(() => {
@@ -1011,7 +1022,10 @@ function OfficesPageContent() {
             countLabel={listCountLabel}
           />
         ) : (
-          <CheckinsViewSection isAdmin={salesperson.role === "admin"} />
+          <CheckinsViewSection
+            isAdmin={salesperson.role === "admin"}
+            refreshKey={checkinsRefreshKey}
+          />
         )}
       </main>
       <BottomNav salesperson={salesperson} />
@@ -1927,7 +1941,17 @@ const CHECKIN_RANGES: { key: CheckinRange; label: string }[] = [
   { key: "custom", label: "Custom" },
 ];
 
-function CheckinsViewSection({ isAdmin }: { isAdmin: boolean }) {
+function CheckinsViewSection({
+  isAdmin,
+  refreshKey = 0,
+}: {
+  isAdmin: boolean;
+  /** Incrementing this causes an immediate re-fetch of the check-ins feed.
+   *  The parent page bumps it after every successful visit log so a newly
+   *  recorded visit appears in this tab without requiring a manual filter
+   *  change or page reload. */
+  refreshKey?: number;
+}) {
   const [range, setRange] = useState<CheckinRange>("today");
   const [scope, setScope] = useState<CheckinScope>("mine");
   const [from, setFrom] = useState("");
@@ -1984,7 +2008,12 @@ function CheckinsViewSection({ isAdmin }: { isAdmin: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [range, scope, from, to, customReady]);
+  // refreshKey is intentionally included: incrementing it from the parent
+  // re-runs this effect (and therefore re-fetches) without changing the
+  // visible filter state. The AE sees the updated feed immediately after
+  // logging a visit, with their current date range and scope preserved.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, scope, from, to, customReady, refreshKey]);
 
   const datesInverted =
     range === "custom" && from !== "" && to !== "" && from > to;
