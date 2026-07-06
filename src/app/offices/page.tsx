@@ -36,8 +36,8 @@ import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { formatActivityStamp } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import {
+  DEFAULT_OFFICE_MAP_SCOPE,
   MAX_ROUTE_STOPS,
-  NEARBY_DEFAULT_RADIUS,
   NEARBY_RADIUS_OPTIONS,
   OFFICE_VISIT_FILTERS,
   buildOfficeRouteUrl,
@@ -50,9 +50,12 @@ import {
   type NearbyOfficeItem,
   type NearbyRadius,
   type OfficeListItem,
+  type OfficeMapPinItem,
+  type OfficeMapScope,
   type OfficeRow,
   type OfficeVisitFilter,
 } from "@/lib/offices";
+import { centroid } from "@/lib/geo";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -83,26 +86,32 @@ import {
 //   2. Sandbox banner — test account only
 //   3. Title "Offices"
 //   4. View toggle [📍 Map | List] — defaults to Map
-//   5a. (Map) — auto-locate on entry, radius pills, the Leaflet map
-//        with branded pins; pin popups carry Directions / Log Visit /
-//        Open.
+//   5a. (Map) — scope pills (All / 5 / 10 / 25 mi), auto-locate on
+//        entry, the Leaflet map with branded pins; pin popups carry
+//        Directions / Log Visit / Open.
 //   5b. (List) — search input, full per-AE office list sorted
 //        visited-first.
 //   6. BottomNav (kept visible so the office workflow doesn't feel
 //      like a separate mini-app)
 //
+// MAP SCOPE
+//   "All My Offices" is the default: every mapped office assigned to
+//   the AE loads regardless of geolocation. 5/10/25-mile radius pills
+//   are an OPTIONAL narrower filter — picking one still requires a
+//   location fix (unchanged), same as before this scope existed.
+//
 // AUTO-LOCATE
 //   The Map view requests the user's location automatically on mount
-//   when the location state is "idle." No "I'm Here" tap needed for
-//   the common case (AE opens the app, taps Offices, expects to see
-//   the map populate). The button is preserved as "Refresh Location"
-//   so the user can re-fetch their fix (or retry after a permission
-//   denial / unavailability).
+//   when the location state is "idle." This now exists purely to
+//   center the map / power the optional radius filter — it is NOT a
+//   gate on the default "All" pin set. The button is preserved as
+//   "Refresh Location" so the user can re-fetch their fix (or retry
+//   after a permission denial / unavailability).
 //
 // ACCESS
 //   Every AE passes (real AEs operate in environment="production";
 //   the test account operates in environment="test"). juice_box_only
-//   is redirected. Server routes (`/api/offices`,
+//   is redirected. Server routes (`/api/offices`, `/api/offices/map`,
 //   `/api/offices/nearby`, `/api/offices/[id]`) enforce ownership
 //   (`salesperson_id = me.id`) and per-caller env independently.
 //
@@ -253,6 +262,11 @@ type NearbyResponse = {
   radius_miles: NearbyRadius;
   searched_at: { lat: number; lng: number };
 };
+type OfficeMapApiResponse = {
+  offices: OfficeMapPinItem[];
+  total: number;
+  truncated: boolean;
+};
 type VisitResponse = {
   visit: { id: string; office_id: string; visited_at: string };
 };
@@ -281,10 +295,10 @@ type MapFetchState =
   | { kind: "error"; error: string }
   | {
       kind: "ready";
-      results: NearbyOfficeItem[];
-      totalInRange: number;
+      results: OfficeMapPinItem[];
+      totalCount: number;
       truncated: boolean;
-      radius: NearbyRadius;
+      scope: OfficeMapScope;
     };
 
 // ---- List data -------------------------------------------------------------
@@ -555,7 +569,12 @@ function OfficesPageContent() {
   // ===========================================================================
   // MAP VIEW state
   // ===========================================================================
-  const [radius, setRadius] = useState<NearbyRadius>(NEARBY_DEFAULT_RADIUS);
+  // `scope` decides what the Map tab loads. "all" (the default) is every
+  // mapped office assigned to this AE, unbounded by distance — location
+  // must never gate that default set. A NearbyRadius value (5/10/25) is an
+  // OPTIONAL narrower filter the AE can opt into, which (unchanged from
+  // before this existed) does require a location fix to compute distance.
+  const [scope, setScope] = useState<OfficeMapScope>(DEFAULT_OFFICE_MAP_SCOPE);
   const [location, setLocation] = useState<LocationState>({ kind: "idle" });
   const [mapFetchState, setMapFetchState] = useState<MapFetchState>({
     kind: "idle",
@@ -600,10 +619,12 @@ function OfficesPageContent() {
 
   // Auto-locate when entering the Map view with no fix yet. Trigger
   // also fires on first mount (Map is the default view) and on a
-  // List → Map toggle if the user has never granted location.
-  // Errors / denials / unsupported all preserve their state and
-  // surface the "Refresh Location" button so the user can retry
-  // without leaving the page.
+  // List → Map toggle if the user has never granted location. This is
+  // purely for centering the map / powering the optional radius filter
+  // now — NOT a gate on the default "All My Offices" data load (see the
+  // fetch effects below). Errors / denials / unsupported all preserve
+  // their state and surface the "Refresh Location" button so the user
+  // can retry without leaving the page.
   useEffect(() => {
     if (!accessReady || !canView) return;
     if (viewMode !== "map") return;
@@ -611,6 +632,38 @@ function OfficesPageContent() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     requestLocation();
   }, [accessReady, canView, viewMode, location.kind, requestLocation]);
+
+  // Loads every office assigned to this AE, unbounded by distance. No
+  // lat/lng required — this is the default "All My Offices" data source
+  // and must never depend on geolocation succeeding.
+  const fetchAllMapped = useCallback(async (): Promise<void> => {
+    setMapFetchState({ kind: "loading" });
+    try {
+      const res = await apiFetch("/api/offices/map");
+      const data = (await res.json().catch(() => null)) as
+        | (OfficeMapApiResponse & ApiErrorShape)
+        | null;
+      if (!res.ok || !data?.offices) {
+        setMapFetchState({
+          kind: "error",
+          error: data?.error ?? `Could not load your offices (${res.status}).`,
+        });
+        return;
+      }
+      setMapFetchState({
+        kind: "ready",
+        results: data.offices,
+        totalCount: data.total,
+        truncated: data.truncated,
+        scope: "all",
+      });
+    } catch {
+      setMapFetchState({
+        kind: "error",
+        error: "Network error while loading your offices.",
+      });
+    }
+  }, []);
 
   const fetchNearby = useCallback(
     async (lat: number, lng: number, r: NearbyRadius): Promise<void> => {
@@ -632,9 +685,9 @@ function OfficesPageContent() {
         setMapFetchState({
           kind: "ready",
           results: data.nearby,
-          totalInRange: data.total_in_range,
+          totalCount: data.total_in_range,
           truncated: data.truncated,
-          radius: data.radius_miles,
+          scope: data.radius_miles,
         });
       } catch {
         setMapFetchState({
@@ -646,13 +699,26 @@ function OfficesPageContent() {
     [],
   );
 
-  // Re-fetch when location or radius changes (while on Map view).
+  // Loads the default "All My Offices" set whenever the Map tab is open in
+  // "all" scope. Deliberately independent of `location` — this fetch must
+  // never depend on geolocation resolving.
   useEffect(() => {
     if (viewMode !== "map") return;
+    if (scope !== "all") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchAllMapped();
+  }, [viewMode, scope, fetchAllMapped]);
+
+  // Loads a radius-filtered set once a location fix is ready. This is an
+  // OPTIONAL narrower filter, never the default data source — unchanged
+  // from the original nearby-only behavior.
+  useEffect(() => {
+    if (viewMode !== "map") return;
+    if (scope === "all") return;
     if (location.kind !== "ready") return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchNearby(location.lat, location.lng, radius);
-  }, [viewMode, location, radius, fetchNearby]);
+    void fetchNearby(location.lat, location.lng, scope);
+  }, [viewMode, scope, location, fetchNearby]);
 
   // ---- Per-card Log Visit state (shared with map popups) ----------------
   const [loggingId, setLoggingId] = useState<string | null>(null);
@@ -950,9 +1016,10 @@ function OfficesPageContent() {
           >
             <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
             <p className="leading-snug">
-              Map uses your device location to find offices in your sandbox.
-              Your location stays on your device — only lat/lng + radius
-              are sent to the server.
+              Map shows every office assigned to your sandbox account.
+              Your device location, when available, is used only to center
+              the map or apply an optional radius filter — it stays on your
+              device otherwise.
             </p>
           </div>
         )}
@@ -1002,8 +1069,8 @@ function OfficesPageContent() {
             // mounted state carrying over.
             key={salesperson.id}
             salespersonId={salesperson.id}
-            radius={radius}
-            setRadius={setRadius}
+            scope={scope}
+            setScope={setScope}
             location={location}
             mapFetchState={mapFetchState}
             onRequestLocation={requestLocation}
@@ -1052,12 +1119,12 @@ function OfficesPageContent() {
 }
 
 // ---------------------------------------------------------------------------
-// MapViewSection — radius + location + map
+// MapViewSection — scope + location + map
 // ---------------------------------------------------------------------------
 function MapViewSection({
   salespersonId,
-  radius,
-  setRadius,
+  scope,
+  setScope,
   location,
   mapFetchState,
   onRequestLocation,
@@ -1069,8 +1136,8 @@ function MapViewSection({
 }: {
   /** Scopes the persisted visit-age filter to this AE's localStorage key. */
   salespersonId: string;
-  radius: NearbyRadius;
-  setRadius: (r: NearbyRadius) => void;
+  scope: OfficeMapScope;
+  setScope: (s: OfficeMapScope) => void;
   location: LocationState;
   mapFetchState: MapFetchState;
   onRequestLocation: () => void;
@@ -1234,32 +1301,70 @@ function MapViewSection({
     window.open(res.url, "_blank", "noopener,noreferrer");
   }, [visibleSelected]);
 
-  const hasResults =
-    location.kind === "ready" &&
-    mapFetchState.kind === "ready" &&
-    results.length > 0;
+  // Map center + whether it's a real "you are here" fix. A geolocation fix
+  // always wins when available. Otherwise, in "all" scope, fall back to the
+  // centroid of the currently-visible pins — territories can be large, but a
+  // rough center of the AE's own offices is a far better default viewport
+  // than an arbitrary fixed coordinate. Radius scope has no fallback: it
+  // already requires a location fix to have fetched anything at all.
+  const centerPoint = useMemo(() => {
+    if (location.kind === "ready") {
+      return { point: { lat: location.lat, lng: location.lng }, isUserLocation: true };
+    }
+    if (scope === "all") {
+      const c = centroid(
+        filtered.map((o) => ({ latitude: o.latitude, longitude: o.longitude })),
+      );
+      if (c) return { point: c, isUserLocation: false };
+    }
+    return null;
+  }, [location, scope, filtered]);
+
+  // No longer gated on `location` — the default "All" scope must render its
+  // pins whether or not geolocation ever resolves. (Radius scope can only
+  // ever reach mapFetchState "ready" after a location fix succeeded, so this
+  // stays correct for that path too.)
+  const hasResults = mapFetchState.kind === "ready" && results.length > 0;
 
   return (
     <>
-      {/* Radius pills — closed set, server enforces the same list. */}
+      {/* Scope pills — "All" (default) shows every office assigned to this
+          AE, unbounded by distance. 5/10/25 mi are optional radius filters
+          that require a location fix. Closed set — server enforces the same
+          radius options for that branch. */}
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Radius
+          Show
         </span>
         <div
           role="radiogroup"
-          aria-label="Search radius in miles"
+          aria-label="Offices shown on map"
           className="inline-flex rounded-full border border-border bg-muted/30 p-0.5"
         >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={scope === "all"}
+            onClick={() => setScope("all")}
+            disabled={mapFetchState.kind === "loading"}
+            className={cn(
+              "rounded-full px-3 py-1 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-60",
+              scope === "all"
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            All
+          </button>
           {NEARBY_RADIUS_OPTIONS.map((opt) => {
-            const active = radius === opt;
+            const active = scope === opt;
             return (
               <button
                 key={opt}
                 type="button"
                 role="radio"
                 aria-checked={active}
-                onClick={() => setRadius(opt)}
+                onClick={() => setScope(opt)}
                 disabled={mapFetchState.kind === "loading"}
                 className={cn(
                   "rounded-full px-3 py-1 text-xs font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-60",
@@ -1368,13 +1473,15 @@ function MapViewSection({
           including the auto-locate path's "Locating…" transition. */}
       <LocationBanner location={location} onRequest={onRequestLocation} />
 
-      {location.kind === "ready" && mapFetchState.kind === "loading" && (
+      {mapFetchState.kind === "loading" && (
         <p className="px-1 text-sm text-muted-foreground">
-          Looking for offices within {radius} miles…
+          {scope === "all"
+            ? "Loading your offices…"
+            : `Looking for offices within ${scope} miles…`}
         </p>
       )}
 
-      {location.kind === "ready" && mapFetchState.kind === "error" && (
+      {mapFetchState.kind === "error" && (
         <Card>
           <CardContent>
             <p
@@ -1387,20 +1494,34 @@ function MapViewSection({
         </Card>
       )}
 
-      {location.kind === "ready" &&
-        mapFetchState.kind === "ready" &&
-        mapFetchState.results.length === 0 && (
-          <Card>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                No offices within {mapFetchState.radius} miles. Try a wider
-                radius, switch to the List view, or import more offices
-                from /office-imports. Offices without coordinates
-                aren&apos;t included on the map.
-              </p>
-            </CardContent>
-          </Card>
-        )}
+      {mapFetchState.kind === "ready" && mapFetchState.results.length === 0 && (
+        <Card>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              {mapFetchState.scope === "all" ? (
+                // /api/offices/map only knows about MAPPED offices (has
+                // coordinates). Zero results here does NOT mean zero
+                // assigned offices — an AE could have plenty of assigned
+                // offices that just lack coordinates/geocoding. Don't claim
+                // "no offices assigned"; we have no reliable count of that
+                // in this response to distinguish the two cases.
+                <>
+                  No mapped offices to display. Offices without coordinates
+                  are excluded from the map — check the List view to see
+                  assigned offices that may need addresses/geocoding, or ask
+                  an admin to import them from /office-imports.
+                </>
+              ) : (
+                <>
+                  No offices within {mapFetchState.scope} miles. Try a wider
+                  radius, or switch to &quot;All&quot;. Offices without
+                  coordinates aren&apos;t included on the map.
+                </>
+              )}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {hasResults && (
         <>
@@ -1410,7 +1531,10 @@ function MapViewSection({
               {mapFetchState.kind === "ready" && mapFetchState.truncated && (
                 <span className="text-amber-700 dark:text-amber-400">
                   {" "}
-                  · closest {results.length} of {mapFetchState.totalInRange}
+                  ·{" "}
+                  {mapFetchState.scope === "all"
+                    ? `showing ${results.length} of ${mapFetchState.totalCount} assigned offices`
+                    : `closest ${results.length} of ${mapFetchState.totalCount}`}
                 </span>
               )}
             </p>
@@ -1440,16 +1564,17 @@ function MapViewSection({
             <Card>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  No offices match this filter in range. Try “All” or a wider
-                  radius.
+                  No offices match this filter. Try the “All” visit filter
+                  above, or widen the radius.
                 </p>
               </CardContent>
             </Card>
-          ) : (
+          ) : centerPoint ? (
             <NearbyOfficesMap
-              center={{ lat: location.lat, lng: location.lng }}
+              center={centerPoint.point}
+              isUserLocation={centerPoint.isUserLocation}
               items={filtered}
-              radius={mapFetchState.kind === "ready" ? mapFetchState.radius : radius}
+              scope={mapFetchState.kind === "ready" ? mapFetchState.scope : scope}
               loggingId={loggingId}
               logNoticeById={logNoticeById}
               logErrorById={logErrorById}
@@ -1463,6 +1588,15 @@ function MapViewSection({
               onLassoSelect={lassoSelect}
               onToggleSelect={toggleSelect}
             />
+          ) : (
+            <Card>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  Couldn&apos;t determine a map center yet. Try Refresh
+                  Location above.
+                </p>
+              </CardContent>
+            </Card>
           )}
         </>
       )}
@@ -1589,7 +1723,7 @@ function MapViewSection({
 
 /** Stable empty array so `results` keeps a constant identity while the map
  *  is loading — avoids re-running the visit filter every render. */
-const EMPTY_RESULTS: NearbyOfficeItem[] = [];
+const EMPTY_RESULTS: OfficeMapPinItem[] = [];
 
 /** Above this many selected offices the list (max-h-28 ≈ 5 rows) scrolls, so
  *  we show the "scroll to review" hint + bottom fade. */
@@ -2012,7 +2146,6 @@ function CheckinsViewSection({
   // re-runs this effect (and therefore re-fetches) without changing the
   // visible filter state. The AE sees the updated feed immediately after
   // logging a visit, with their current date range and scope preserved.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, scope, from, to, customReady, refreshKey]);
 
   const datesInverted =

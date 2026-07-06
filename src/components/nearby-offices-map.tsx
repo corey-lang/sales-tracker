@@ -17,7 +17,7 @@ import "leaflet/dist/leaflet.css";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { formatActivityStamp } from "@/lib/dates";
-import type { NearbyOfficeItem, NearbyRadius } from "@/lib/offices";
+import type { OfficeMapPinItem, OfficeMapScope } from "@/lib/offices";
 
 // ---------------------------------------------------------------------------
 // NearbyOfficesMap — client-only Leaflet map for /offices/nearby.
@@ -54,7 +54,7 @@ type PinVariant = "default" | "selected";
 /** Given an office + the current route selection, return the variant its pin
  *  should render as. Selected offices turn green so the lassoed set is
  *  obvious against the orange defaults. */
-function pinVariantFor(item: NearbyOfficeItem, selected: boolean): PinVariant {
+function pinVariantFor(item: OfficeMapPinItem, selected: boolean): PinVariant {
   return selected ? "selected" : "default";
 }
 
@@ -122,7 +122,7 @@ function LassoOverlay({
   onSelect,
 }: {
   map: L.Map;
-  items: NearbyOfficeItem[];
+  items: OfficeMapPinItem[];
   onSelect: (ids: string[]) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -206,40 +206,46 @@ function buildPinIcon(variant: PinVariant): L.DivIcon {
 }
 
 /**
- * Picks an initial zoom level that comfortably frames the radius
- * around the user's location. Tuned against the OSM zoom table —
- * higher zoom = more zoomed-in. These values place the requested
- * radius roughly in the middle third of a phone-width map.
+ * Picks an initial zoom level for the current scope.
+ *
+ *   * "all" — a deliberately broad zoom. Territories can be geographically
+ *     large, and the product requirement is that the map must NOT force-fit
+ *     every assigned pin into view on open; the AE is expected to zoom/pan
+ *     from here. 8 comfortably shows a multi-county area without being so
+ *     far out the map reads as "the whole state."
+ *   * a radius (5/10/25) — unchanged: tuned against the OSM zoom table so
+ *     the requested radius sits roughly in the middle third of a
+ *     phone-width map.
  */
-function initialZoomFor(radius: NearbyRadius): number {
-  if (radius <= 5) return 12;
-  if (radius <= 10) return 11;
+function initialZoomFor(scope: OfficeMapScope): number {
+  if (scope === "all") return 8;
+  if (scope <= 5) return 12;
+  if (scope <= 10) return 11;
   return 10;
 }
 
 /**
- * Re-centers the map whenever the user's location OR the radius
- * changes so a fresh fix / radius swap doesn't leave the viewport
- * pointed at the old position. Lives inside `<MapContainer>` so it
- * can call `useMap()`.
+ * Re-centers the map whenever the center point OR the scope changes so a
+ * fresh location fix / scope swap doesn't leave the viewport pointed at the
+ * old position. Lives inside `<MapContainer>` so it can call `useMap()`.
  */
 function MapRecenter({
   center,
-  radius,
+  scope,
 }: {
   center: [number, number];
-  radius: NearbyRadius;
+  scope: OfficeMapScope;
 }) {
   const map = useMap();
   const lastKeyRef = useRef<string>("");
   useEffect(() => {
     // Cheap key so we re-fly only when the user actually moves
     // (avoid a re-fly on every parent re-render).
-    const key = `${center[0]},${center[1]},${radius}`;
+    const key = `${center[0]},${center[1]},${scope}`;
     if (lastKeyRef.current === key) return;
     lastKeyRef.current = key;
-    map.setView(center, initialZoomFor(radius));
-  }, [center, radius, map]);
+    map.setView(center, initialZoomFor(scope));
+  }, [center, scope, map]);
   return null;
 }
 
@@ -297,7 +303,7 @@ function formatDistance(miles: number): string {
 
 /** Builds a Google Maps URL for an office row. Mirrors the page
  *  helper so the Map view's Directions button behaves identically. */
-function mapsUrlFor(item: NearbyOfficeItem): string | null {
+function mapsUrlFor(item: OfficeMapPinItem): string | null {
   const address = [
     item.street,
     [item.city, item.state].filter(Boolean).join(", "),
@@ -318,12 +324,20 @@ function mapsUrlFor(item: NearbyOfficeItem): string | null {
 }
 
 export type NearbyOfficesMapProps = {
-  /** Searched-from location (user's geolocation fix). */
+  /** Map center. A real geolocation fix when available; otherwise a
+   *  caller-computed fallback (e.g. the centroid of `items`) — see
+   *  `isUserLocation`. */
   center: { lat: number; lng: number };
+  /** True when `center` is a real geolocation fix — renders the "you are
+   *  here" blue dot + popup. False for a fallback center (e.g. a
+   *  centroid), where labeling it as the user's location would be wrong. */
+  isUserLocation: boolean;
   /** Same array the list view renders, in the same order. */
-  items: NearbyOfficeItem[];
-  /** Current radius — drives initial zoom + re-fly behavior. */
-  radius: NearbyRadius;
+  items: OfficeMapPinItem[];
+  /** Current scope — drives initial zoom + re-fly behavior. "all" uses a
+   *  broad default zoom (assigned pins may be spread across a large
+   *  territory); a radius value keeps the prior distance-tuned zoom. */
+  scope: OfficeMapScope;
   /** Id of an office whose Log Visit POST is in flight, if any. */
   loggingId: string | null;
   /** Id-keyed result message for the per-card success pill. */
@@ -354,8 +368,9 @@ export type NearbyOfficesMapProps = {
 
 export default function NearbyOfficesMap({
   center,
+  isUserLocation,
   items,
-  radius,
+  scope,
   loggingId,
   logNoticeById,
   logErrorById,
@@ -434,7 +449,7 @@ export default function NearbyOfficesMap({
     >
       <MapContainer
         center={[center.lat, center.lng]}
-        zoom={initialZoomFor(radius)}
+        zoom={initialZoomFor(scope)}
         scrollWheelZoom={true}
         // Drag is on by default; double-tap zoom + pinch zoom work
         // out of the box on iOS Safari. `tap` is the unified handler
@@ -452,19 +467,23 @@ export default function NearbyOfficesMap({
 
         {/* User location — blue dot with white ring. CircleMarker
             stays a constant pixel size as the user zooms, which is
-            what you want for a "you are here" indicator. */}
-        <CircleMarker
-          center={[center.lat, center.lng]}
-          radius={8}
-          pathOptions={{
-            color: "#ffffff",
-            weight: 2,
-            fillColor: "#2563eb",
-            fillOpacity: 1,
-          }}
-        >
-          <Popup>You are here</Popup>
-        </CircleMarker>
+            what you want for a "you are here" indicator. Only shown
+            when `center` is a real geolocation fix — a fallback
+            centroid center (no location available) is not "here". */}
+        {isUserLocation && (
+          <CircleMarker
+            center={[center.lat, center.lng]}
+            radius={8}
+            pathOptions={{
+              color: "#ffffff",
+              weight: 2,
+              fillColor: "#2563eb",
+              fillOpacity: 1,
+            }}
+          >
+            <Popup>You are here</Popup>
+          </CircleMarker>
+        )}
 
         {/* Office pins. Tap a pin → branded popup with the same
             actions the List view's card row carries. */}
@@ -489,9 +508,11 @@ export default function NearbyOfficesMap({
                     <p className="text-sm font-semibold leading-snug">
                       {item.name}
                     </p>
-                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
-                      {formatDistance(item.distance_miles)}
-                    </span>
+                    {item.distance_miles !== null && (
+                      <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+                        {formatDistance(item.distance_miles)}
+                      </span>
+                    )}
                   </div>
                   {item.last_visit_at ? (
                     <p className="text-[11px] text-muted-foreground">
@@ -613,7 +634,7 @@ export default function NearbyOfficesMap({
 
         <MapRecenter
           center={[center.lat, center.lng]}
-          radius={radius}
+          scope={scope}
         />
         <MapResizer />
         <MapReady onReady={setMapInstance} />

@@ -73,3 +73,25 @@ export function boundingBox(
     maxLng: lng + lngDelta,
   };
 }
+
+/**
+ * Simple arithmetic-mean center of a set of points. Used as the Map view's
+ * fallback center for "All My Offices" scope when no geolocation fix is
+ * available — the AE's assigned territory is a much better default viewport
+ * than an arbitrary hardcoded coordinate.
+ *
+ * Not a true geographic centroid (that would need a spherical mean); a plain
+ * lat/lng average is fine here since it's only choosing an initial map
+ * viewport, not doing distance math. Returns null for an empty input so
+ * callers can fall back further (e.g. skip rendering the map).
+ */
+export function centroid(
+  points: { latitude: number; longitude: number }[],
+): { lat: number; lng: number } | null {
+  if (points.length === 0) return null;
+  const sum = points.reduce(
+    (acc, p) => ({ lat: acc.lat + p.latitude, lng: acc.lng + p.longitude }),
+    { lat: 0, lng: 0 },
+  );
+  return { lat: sum.lat / points.length, lng: sum.lng / points.length };
+}

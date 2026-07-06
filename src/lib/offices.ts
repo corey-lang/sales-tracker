@@ -261,6 +261,76 @@ export type NearbyOfficeItem = {
   next_action_due_date: string | null;
 };
 
+// ---------------------------------------------------------------------------
+// Map scope — "All My Offices" (default) vs. an optional radius filter
+// ---------------------------------------------------------------------------
+
+/**
+ * What the office Map tab loads.
+ *
+ *   "all" — every mapped office assigned to the AE, unbounded by distance.
+ *     This is the DEFAULT: territories can be geographically large, and the
+ *     product requirement is that geolocation must never gate which office
+ *     pins load. Served by /api/offices/map.
+ *   NearbyRadius (5/10/25) — an OPTIONAL narrower filter the AE can opt into,
+ *     which (unchanged from before) requires a location fix to compute
+ *     distance. Served by /api/offices/nearby.
+ */
+export type OfficeMapScope = "all" | NearbyRadius;
+
+/** Default Map-tab scope. Product requirement: AEs see every office
+ *  assigned to them by default, not just what's nearby. */
+export const DEFAULT_OFFICE_MAP_SCOPE: OfficeMapScope = "all";
+
+export function isOfficeMapScope(value: unknown): value is OfficeMapScope {
+  return (
+    value === "all" ||
+    (NEARBY_RADIUS_OPTIONS as readonly unknown[]).includes(value)
+  );
+}
+
+/**
+ * Shape shared by every item the Map tab can render as a pin — the "all"
+ * scope's /api/offices/map response and the radius scope's
+ * /api/offices/nearby response both satisfy this. The only structural
+ * difference is `distance_miles`: nearby always computes it (that's the
+ * point of a radius search); the all-scope response only computes it when
+ * the caller optionally supplied a center point, and never uses it to filter.
+ */
+export type OfficeMapPinItem = {
+  id: string;
+  name: string;
+  street: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  latitude: number;
+  longitude: number;
+  distance_miles: number | null;
+  /** Most-recent visit by the calling AE against this office, or
+   *  null when never visited. */
+  last_visit_at: string | null;
+  next_action: string | null;
+  next_action_due_date: string | null;
+};
+
+/**
+ * One row of the /api/offices/map response. Distance from a supplied center
+ * point is optional and display-only — see OfficeMapPinItem above. Offices
+ * without coordinates are EXCLUDED, same rule as NearbyOfficeItem.
+ */
+export type OfficeMapItem = OfficeMapPinItem;
+
+/**
+ * Hard cap on rows returned by /api/offices/map. Generous relative to any
+ * realistic per-AE territory (a team this size tops out at a few thousand
+ * offices) — this endpoint's whole point is "load everything assigned," so
+ * the cap is an anomaly backstop, not a working limit. Matches the
+ * OFFICE_LIST_QUERY_LIMIT order of magnitude used elsewhere for the same
+ * reason.
+ */
+export const MAP_ALL_RESULT_LIMIT = 2_000;
+
 /**
  * Hard cap on rows returned to the office-list UI. The DB query fetches
  * a wider window (see OFFICE_LIST_QUERY_LIMIT) so the JS-side sort can
