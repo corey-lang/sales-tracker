@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { supabase } from "@/lib/supabase/client";
+import {
+  activityValuesFrom,
+  fetchMyActivityWeek,
+  saveMyActivityWeek,
+} from "@/lib/api-activity";
 import {
   ACTIVITIES,
   ZERO_ACTIVITY,
@@ -43,18 +47,21 @@ import {
 // report numerators), so a saved week shows identically everywhere. Working-day
 // targets, PTO, available days, and pace stay Mon-Fri and are unaffected by
 // where the activity rows sit.
+//
+// IDENTITY: no `salespersonId` prop. The read and the replacement both go
+// through /api/me/activity/week, which takes the AE from the signed session,
+// re-reads their `salespeople` row, and derives the Sun-Sat bounds itself —
+// so this card can only ever edit the caller's OWN week. It previously read
+// `activity_entries` and called the `replace_activity_week` RPC straight from
+// the browser with an id that came from localStorage, which let any signed-in
+// user (including a Juice Box guest) overwrite any AE's week.
 
 type Props = {
-  salespersonId: string;
   refreshKey?: number;
   onSaved?: () => void;
 };
 
-export function EditWeekCard({
-  salespersonId,
-  refreshKey = 0,
-  onSaved,
-}: Props) {
+export function EditWeekCard({ refreshKey = 0, onSaved }: Props) {
   const weeks = useMemo(() => recentActivityWeeks(12), []);
   const [weekStart, setWeekStart] = useState(weeks[0].weekStart);
   const [values, setValues] = useState<ActivityValues>(ZERO_ACTIVITY);
@@ -65,39 +72,32 @@ export function EditWeekCard({
 
   const selectedWeek =
     weeks.find((w) => w.weekStart === weekStart) ?? weeks[0];
-  const weekEnd = selectedWeek.weekEnd; // Saturday
+  // The Saturday end of the selected week is derived SERVER-side from
+  // week_start (see parseActivityWeekStart), so the card no longer sends it.
 
   useEffect(() => {
     let cancelled = false;
-    supabase
-      .from("activity_entries")
-      .select(ACTIVITIES.map((a) => a.key).join(","))
-      .eq("salesperson_id", salespersonId)
-      .gte("entry_date", weekStart)
-      .lte("entry_date", weekEnd)
-      .then(({ data, error }) => {
+    // The server validates `week_start` (must be a past-or-current Sunday) and
+    // returns the caller's own totals for that Sun-Sat window.
+    fetchMyActivityWeek(weekStart)
+      .then((week) => {
         if (cancelled) return;
-        if (error) {
-          setError(error.message);
-          setHasExisting(null);
-          return;
-        }
-        const rows = (data ?? []) as unknown as Array<Partial<ActivityValues>>;
-        const next: ActivityValues = { ...ZERO_ACTIVITY };
-        for (const row of rows) {
-          for (const a of ACTIVITIES) {
-            next[a.key] += Number(row[a.key] ?? 0);
-          }
-        }
-        setValues(next);
-        setHasExisting(rows.length > 0);
+        setValues(activityValuesFrom(week.totals));
+        setHasExisting(week.entry_count > 0);
         setError(null);
         setSavedMsg(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(
+          err instanceof Error ? err.message : "Could not load that week.",
+        );
+        setHasExisting(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [salespersonId, weekStart, weekEnd, refreshKey]);
+  }, [weekStart, refreshKey]);
 
   const setKey = (key: ActivityKey, n: number) =>
     setValues((v) => ({ ...v, [key]: Math.max(0, Math.floor(n) || 0) }));
@@ -111,25 +111,22 @@ export function EditWeekCard({
     // Sunday row, then clear the rest of the Sun-Sat week — and they MUST be
     // atomic: a failure between them would leave the week double-counted. So the
     // whole replacement runs in a single Postgres transaction via the
-    // `replace_activity_week` RPC (see supabase/replace_activity_week.sql)
-    // instead of separate upsert + delete client calls. The RPC validates the
-    // Sun-Sat window, writes Sunday, and deletes Mon..Sat — scoped to this AE
-    // and this week — all-or-nothing.
-    const { error: rpcErr } = await supabase.rpc("replace_activity_week", {
-      p_salesperson_id: salespersonId,
-      p_week_start: weekStart, // Sunday
-      p_week_end: weekEnd, // Saturday
-      p_values: values,
-    });
-    setSaving(false);
-    if (rpcErr) {
-      setError(rpcErr.message);
-      return;
+    // `replace_activity_week` RPC (see supabase/replace_activity_week.sql).
+    // The RPC is now invoked SERVER-SIDE by PUT /api/me/activity/week with the
+    // session's salesperson id and server-derived Sun-Sat bounds — the browser
+    // supplies only the week and the numbers.
+    try {
+      const saved = await saveMyActivityWeek(weekStart, values);
+      setSaving(false);
+      // Render the re-read server totals so the card can't disagree with the DB.
+      setValues(activityValuesFrom(saved.totals));
+      setSavedMsg(`Saved activity totals for ${selectedWeek.label}.`);
+      setHasExisting(true);
+      onSaved?.();
+    } catch (err: unknown) {
+      setSaving(false);
+      setError(err instanceof Error ? err.message : "Could not save that week.");
     }
-
-    setSavedMsg(`Saved activity totals for ${selectedWeek.label}.`);
-    setHasExisting(true);
-    onSaved?.();
   };
 
   const summary = ACTIVITIES.filter((a) => values[a.key] > 0)

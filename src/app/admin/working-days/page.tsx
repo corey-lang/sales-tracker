@@ -83,12 +83,14 @@ export default function AdminWorkingDaysPage() {
 
   useEffect(() => {
     let cancelled = false;
-    // AEs only, for the individual-adjustment picker.
+    // Active AEs only, for the individual-adjustment picker — you can't
+    // book PTO for someone who has left (`deactivated_at IS NULL`).
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("role", "ae")
       .eq("is_test", false)
+      .is("deactivated_at", null)
       .order("first_name", { ascending: true })
       .then(({ data }) => {
         if (cancelled || !data) return;

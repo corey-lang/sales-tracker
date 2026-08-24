@@ -53,11 +53,14 @@ export async function GET(req: Request) {
       throw new ApiError(502, error);
     }
 
+    // Active AEs only (`deactivated_at IS NULL`) — a departed AE has no
+    // working days to compute.
     const peopleRes = await supabase
       .from("salespeople")
       .select("id")
       .eq("role", "ae")
-      .eq("is_test", false);
+      .eq("is_test", false)
+      .is("deactivated_at", null);
     if (peopleRes.error) {
       console.error(
         `[working-days] availability roster read failed code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,

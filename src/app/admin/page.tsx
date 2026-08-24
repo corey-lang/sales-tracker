@@ -51,10 +51,13 @@ export default function AdminDashboardPage() {
     // so the previous belt-and-suspenders is_admin filter is gone. The test
     // account is the lone AE-role exception we still want visible — kept
     // and pushed to the bottom of the list via the is_test ordering.
+    // `deactivated_at IS NULL` keeps departed AEs out of the selector,
+    // filters, totals, and goal scope — their rows (and history) stay.
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("role", "ae")
+      .is("deactivated_at", null)
       .order("is_test", { ascending: true })
       .order("first_name", { ascending: true })
       .then(({ data }) => {

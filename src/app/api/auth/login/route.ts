@@ -40,7 +40,7 @@ export async function POST(req: Request) {
     const res = await supabase
       .from("salespeople")
       .select(
-        "id, first_name, admin_pin, role, is_test, can_import_offices",
+        "id, first_name, admin_pin, role, is_test, can_import_offices, deactivated_at",
       )
       .eq("first_name", name)
       .maybeSingle();
@@ -59,7 +59,21 @@ export async function POST(req: Request) {
       role: unknown;
       is_test: boolean | null;
       can_import_offices: boolean | null;
+      deactivated_at: string | null;
     };
+
+    // Deactivated people (they no longer work here) cannot sign in. Checked
+    // BEFORE the PIN so a departed admin can't even probe the PIN path. The
+    // row is kept for history — see supabase/salespeople_deactivated_at.sql —
+    // so this is the gate that turns "row still exists" into "no access".
+    // `requireSalesperson` re-checks the same column on every API request,
+    // which is what actually kills a session token issued before deactivation.
+    if (row.deactivated_at != null) {
+      throw unauthorized(
+        "This account is no longer active. Ask an admin if you think that's wrong.",
+      );
+    }
+
     const role: UserRole = isUserRole(row.role) ? row.role : "ae";
 
     // Admins must present the correct PIN. `role === "admin"` is the single

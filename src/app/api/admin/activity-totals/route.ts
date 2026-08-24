@@ -56,11 +56,14 @@ export async function GET(req: Request) {
     }
 
     const [peopleRes, entriesRes, goalsRes, adj] = await Promise.all([
+      // Active AEs only — `deactivated_at IS NULL` drops people who have
+      // left the company from current totals (their entries stay in the DB).
       supabase
         .from("salespeople")
         .select("id, first_name")
         .eq("role", "ae")
         .eq("is_test", false)
+        .is("deactivated_at", null)
         .order("first_name", { ascending: true }),
       entriesQuery,
       supabase.from("weekly_goals").select("*"),

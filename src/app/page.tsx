@@ -59,9 +59,16 @@ export default function Home() {
     // role (not the legacy is_admin column) drives the PIN gate so the form
     // agrees with the server's `requireAdmin` and `/api/auth/login` PIN
     // check, which also key on role === 'admin'.
+    //
+    // `deactivated_at IS NULL` is the active-roster predicate: someone who
+    // has left the company keeps their row (their history hangs off it) but
+    // must not appear in the name list. This is presentation only — the
+    // authoritative refusal is in /api/auth/login, which rejects a
+    // deactivated row even if the name is typed in by hand.
     supabase
       .from("salespeople")
       .select("id, first_name, role")
+      .is("deactivated_at", null)
       .order("first_name", { ascending: true })
       .then(({ data, error }) => {
         if (error) {

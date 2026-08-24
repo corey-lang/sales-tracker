@@ -223,7 +223,9 @@ export async function requireSalesperson(
   const supabase = getServerSupabase();
   const res = await supabase
     .from("salespeople")
-    .select("id, first_name, role, is_test, can_import_offices, state_code")
+    .select(
+      "id, first_name, role, is_test, can_import_offices, state_code, deactivated_at",
+    )
     .eq("id", payload.sub)
     .maybeSingle();
 
@@ -249,7 +251,26 @@ export async function requireSalesperson(
     is_test: boolean | null;
     can_import_offices: boolean | null;
     state_code: string | null;
+    deactivated_at: string | null;
   };
+
+  // Deactivated accounts (the person left the company) lose access here, at
+  // the one chokepoint every other guard funnels through — requireAdmin,
+  // requireAeToolAccess, requireReviewer, requireOfficeImporter,
+  // requireScanAccess, requireTestAccount. Their `salespeople` row is kept so
+  // their history survives (see supabase/salespeople_deactivated_at.sql), so
+  // "row exists" is no longer sufficient to authorize a request.
+  //
+  // This is also the only revocation the bearer-token session model has: a
+  // token minted before deactivation stays cryptographically valid, and this
+  // per-request re-read is what makes it useless. Same 401 shape as the
+  // deleted-row case, so the client's existing "sign in again" path applies.
+  if (row.deactivated_at != null) {
+    throw unauthorized(
+      "This account is no longer active. Please sign in again.",
+    );
+  }
+
   const role: UserRole = isUserRole(row.role) ? row.role : "ae";
   // Normalize to UPPER so it matches plan_brochures.state_code / the
   // authoritative_* views; an empty/whitespace value reads as "unset".

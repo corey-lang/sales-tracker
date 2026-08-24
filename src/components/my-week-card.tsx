@@ -3,19 +3,13 @@
 import { useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api-client";
-import { supabase } from "@/lib/supabase/client";
+import { activityValuesFrom, fetchMyActivityWeek } from "@/lib/api-activity";
 import {
   ACTIVITIES,
   ZERO_ACTIVITY,
-  type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import {
-  activityWeekToDateRange,
-  adjustedTargetsFrom,
-  fetchActiveGoalFor,
-  pairedBusinessMonday,
-} from "@/lib/goals";
+import { adjustedTargetsFrom } from "@/lib/goals";
 import {
   DEFAULT_WORKING_DAYS,
   formatAvailableDays,
@@ -30,12 +24,18 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+// Weekly tracker.
+//
+// IDENTITY: no `salespersonId` prop — the week comes from
+// GET /api/me/activity/week, which resolves the AE from the signed session and
+// re-reads their `salespeople` row (403 for juice_box_only, 401 for a
+// deactivated account). It used to read `activity_entries` and `weekly_goals`
+// in the browser, scoped by an id sourced from localStorage.
 type Props = {
-  salespersonId: string;
   refreshKey: number;
 };
 
-export function MyWeekCard({ salespersonId, refreshKey }: Props) {
+export function MyWeekCard({ refreshKey }: Props) {
   const [totals, setTotals] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [targets, setTargets] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [hasGoals, setHasGoals] = useState(false);
@@ -48,15 +48,10 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
     // Displayed activity totals use the Sun-Sat logging week so weekend
     // catch-up entries show here, matching DailyEntryForm. Goal targets and
     // availability below stay on the Mon-Fri business week (adjustedTargetsFrom
-    // / availableDays) — only the raw activity sum is Sun-Sat.
-    const { since, through } = activityWeekToDateRange();
-
-    const totalsPromise = supabase
-      .from("activity_entries")
-      .select(ACTIVITIES.map((a) => a.key).join(","))
-      .eq("salesperson_id", salespersonId)
-      .gte("entry_date", since)
-      .lte("entry_date", through);
+    // / availableDays) — only the raw activity sum is Sun-Sat. Both the totals
+    // and the caller's own goal arrive from one authenticated read; resolves to
+    // null on ANY failure so the render path can fail closed below.
+    const weekPromise = fetchMyActivityWeek().catch(() => null);
 
     // The AE's own available days come from the server (working_day_adjustments
     // is server-only). Resolves to the available-day count on success, or null
@@ -76,30 +71,21 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
       })
       .catch(() => null);
 
-    Promise.all([
-      totalsPromise,
-      // Goal for the Mon-Fri week paired with the current Sun-Sat activity week,
-      // so it aligns with the availPromise window (/api/me/working-days).
-      fetchActiveGoalFor(salespersonId, pairedBusinessMonday()),
-      availPromise,
-    ]).then(([totalsResult, goalResult, availableDaysOrNull]) => {
+    Promise.all([weekPromise, availPromise]).then(
+      ([week, availableDaysOrNull]) => {
       if (cancelled) return;
-      if (totalsResult.error ?? goalResult.error) {
+      if (!week) {
         // Raw provider text isn't shown — a generic message keeps it safe.
         setError("Couldn't load your weekly tracker.");
         setLoading(false);
         return;
       }
 
-      const nextTotals = { ...ZERO_ACTIVITY };
-      for (const row of (totalsResult.data ??
-        []) as unknown as Partial<ActivityValues>[]) {
-        for (const a of ACTIVITIES) {
-          nextTotals[a.key] += Number(row[a.key as ActivityKey] ?? 0);
-        }
-      }
+      const nextTotals = activityValuesFrom(week.totals);
 
-      const goal = goalResult.data;
+      // The goal is the caller's own, resolved server-side for the Mon-Fri week
+      // paired with this activity week — the same window availPromise uses.
+      const goal = week.goal ?? null;
       const goalsPresent = !!goal;
 
       // FAIL CLOSED: when this AE has goals, we need their available days to
@@ -122,12 +108,13 @@ export function MyWeekCard({ salespersonId, refreshKey }: Props) {
       setTargets(adjustedTargetsFrom(goal, days));
       setError(null);
       setLoading(false);
-    });
+      },
+    );
 
     return () => {
       cancelled = true;
     };
-  }, [salespersonId, refreshKey]);
+  }, [refreshKey]);
 
   return (
     <Card>

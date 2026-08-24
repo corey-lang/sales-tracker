@@ -1,0 +1,181 @@
+-- ===========================================================================
+-- Deactivate Chanel — she no longer works for the company.
+-- ===========================================================================
+-- WHAT THIS IS
+--   The personnel half of the offboarding. Three statements:
+--     1. Stamp `salespeople.deactivated_at` on her row (soft-disable).
+--     2. Soft-disable her Cogent territory assignment ("Austin").
+--     3. Delete her Web Push subscriptions (device tokens, not history).
+--
+--   The `deactivated_at` column and every app-side filter that honours it
+--   ship in migration #43 (`salespeople_deactivated_at.sql`) — this file
+--   only marks the person, so the who-left-when history stays legible on
+--   its own, the same way each juice_box_only seat got its own tiny seed.
+--
+-- WHAT THIS DOES *NOT* DO — nothing of hers is deleted
+--   Her `salespeople` row STAYS, so every FK child stays with it:
+--   `activity_entries` (her logged activity + metrics), `gold_list_targets`
+--   / `gold_list_touches_log`, `offices` + `office_visits` (her territory
+--   history), `ae_tasks`, `business_card_scans` + `business_card_contacts`,
+--   `team_messages` + reactions + reads (her Juice Box posts stay in the
+--   feed), `one_on_ones` / commitments / `weekly_focus_private_notes`
+--   (her coaching record), and `working_day_adjustments`. Admin history
+--   surfaces that read by id or by explicit `ae_id` — check-in name
+--   enrichment, office-owner labels, `requireCoachableAe` — keep resolving
+--   her name and record.
+--
+--   Her offices are NOT reassigned. Re-homing a territory is a business
+--   decision, not an offboarding step; the rows keep her `salesperson_id`
+--   until someone decides where they go.
+--
+-- WHY THE PUSH SUBSCRIPTIONS ARE DELETED (statement 3)
+--   `push_subscriptions` rows are live device credentials, not history.
+--   `fanOutJuiceBoxPush` (src/lib/server/push.ts) sends to every
+--   subscription except the sender's with no roster check, so leaving her
+--   rows in place would keep pushing team-chat content to her phone after
+--   her access is gone. Deleting them cuts that off, and she cannot
+--   re-register: `POST /api/juice-box/push/subscribe` runs through
+--   `requireSalesperson`, which now rejects a deactivated account. The
+--   route already treats subscriptions as disposable (it garbage-collects
+--   410/404 endpoints), so this loses nothing recoverable.
+--
+-- WHAT SHE LOSES (enforced by migration #43's app code, not by this file)
+--   Sign-in (`/api/auth/login` refuses her name), every authenticated API
+--   route (`requireSalesperson` 401s her — including any session token
+--   already sitting in her browser's localStorage), the login name list,
+--   the admin AE selector / totals / availability / activity report, the
+--   leaderboard, the coaching list, the admin goals + message target
+--   pickers, the office-import AE picker and its server-side resolver, and
+--   Cogent order attribution.
+--
+-- HISTORICAL AUTHORSHIP vs TRANSFERABLE OPERATIONAL OWNERSHIP
+--   Chanel's row is kept partly because a future Austin AE will be hired, and
+--   the two kinds of record must not be confused when that happens.
+--
+--   1) AUTHORSHIP / PERFORMANCE — permanently hers. Never re-point these at
+--      the replacement; doing so would rewrite history and corrupt every past
+--      report:
+--        activity_entries.salesperson_id       (logged activity, metrics)
+--        office_visits.salesperson_id          (check-ins she performed)
+--        team_messages.salesperson_id          (Juice Box posts)
+--        team_message_reactions/_reads.salesperson_id
+--        business_card_scans/_contacts.salesperson_id
+--        one_on_ones.ae_id, one_on_one_commitments, weekly_focus_private_notes
+--        weekly_goals.salesperson_id           (the goals SHE was scored on)
+--        working_day_adjustments.salesperson_id (her PTO/holiday history)
+--        ae_tasks.salesperson_id for CLOSED tasks (status 'done'/'cancelled')
+--      Read surfaces resolve these by id, unfiltered by `deactivated_at`, so
+--      her name still renders on historical rows (check-in feeds, office-owner
+--      labels, goal/message audit lines, `requireCoachableAe`). The admin
+--      Activity Report additionally keeps her on any week that overlaps her
+--      final active day — see src/lib/server/activity-report.ts.
+--
+--   2) OPERATIONAL OWNERSHIP — transferable, but deliberately NOT transferred
+--      now. Austin stays unassigned until a replacement is hired:
+--        cogent_territory_mappings.salesperson_id  ('Austin' → set inactive
+--                                                   above; territory now shows
+--                                                   as unmapped)
+--        offices.salesperson_id                    (her Austin office list)
+--        offices.next_action / next_action_due_date (unfinished follow-ups)
+--        ae_tasks.salesperson_id for OPEN tasks     (status = 'open')
+--        coaching_relationships.salesperson_id      (active relationships)
+--
+--   WHEN THE REPLACEMENT IS HIRED (future migration, not written yet)
+--     Insert them as a normal AE row, then move ONLY category 2, e.g.:
+--       UPDATE cogent_territory_mappings SET salesperson_id = <new>,
+--              active = TRUE, updated_at = NOW()
+--        WHERE sales_territory_name = 'Austin';
+--       UPDATE offices  SET salesperson_id = <new>
+--        WHERE salesperson_id = <chanel> AND archived_at IS NULL;
+--       UPDATE ae_tasks SET salesperson_id = <new>
+--        WHERE salesperson_id = <chanel> AND status = 'open';
+--     Category 1 must not appear in that migration at all.
+--
+--     Two schema notes for whoever writes it:
+--       * `offices` has a partial UNIQUE on (salesperson_id, environment,
+--         dedupe_key). Re-pointing offices can therefore collide if the new AE
+--         already imported the same office — reconcile duplicates rather than
+--         letting the UPDATE fail mid-way.
+--       * There is no `original_salesperson_id` / provenance column on
+--         `offices` or `ae_tasks` today, so a transfer LOSES the record of who
+--         owned them before. `office_visits` keeps that history independently
+--         (each visit stores its own salesperson_id), which is why visits must
+--         never be re-pointed. If provenance on the office row itself is ever
+--         needed, add a nullable `transferred_from_salesperson_id UUID
+--         REFERENCES salespeople(id)` in its own additive migration BEFORE the
+--         first transfer — backfilling it afterwards is guesswork.
+--
+-- REACTIVATION (if she ever returns)
+--   UPDATE salespeople SET deactivated_at = NULL WHERE first_name = 'Chanel';
+--   UPDATE cogent_territory_mappings SET active = TRUE, updated_at = NOW()
+--     WHERE sales_territory_name = 'Austin';
+--   (She would re-register push on her next Juice Box visit.)
+--
+-- Idempotent: the person UPDATE is COALESCE-guarded so a re-run keeps the
+-- ORIGINAL deactivation timestamp, the mapping UPDATE is a no-op once
+-- `active = FALSE`, and the DELETE is a no-op once the rows are gone.
+-- See supabase/README.md for migration order. Depends on migration #43
+-- (`deactivated_at` must exist) and #34 (`cogent_territory_mappings`).
+-- ===========================================================================
+
+-- 1) Soft-disable the person. first_name is CITEXT → case-insensitive match.
+--    COALESCE keeps the first deactivation timestamp on a re-run.
+UPDATE salespeople
+   SET deactivated_at = COALESCE(deactivated_at, NOW())
+ WHERE first_name = 'Chanel';
+
+-- 2) Release her Cogent territory assignment. `active = FALSE` is the
+--    table's own soft-disable (see migration #34): the aggregator only
+--    honours active rows, and "Austin" then surfaces under
+--    `unmappedTerritories` — visible and re-assignable, never silently
+--    attributed to a departed AE. The mapping row is kept so the
+--    historical territory→AE link is not lost.
+UPDATE cogent_territory_mappings AS m
+   SET active = FALSE,
+       updated_at = NOW()
+  FROM salespeople AS s
+ WHERE m.salesperson_id = s.id
+   AND s.first_name = 'Chanel'
+   AND m.active;
+
+-- 3) Revoke her push devices. salesperson_id is TEXT on this table (see
+--    migration #17), so the id is cast for the comparison.
+DELETE FROM push_subscriptions
+ WHERE salesperson_id IN (
+   SELECT id::text FROM salespeople WHERE first_name = 'Chanel'
+ );
+
+-- ===========================================================================
+-- VERIFICATION (run after the migration)
+-- ===========================================================================
+-- -- Deactivated, not deleted:
+-- SELECT first_name, role, deactivated_at FROM salespeople
+-- WHERE first_name = 'Chanel';
+--   -- expect one row with a non-null deactivated_at
+--
+-- -- Gone from the active roster:
+-- SELECT COUNT(*) FROM salespeople
+-- WHERE deactivated_at IS NULL AND first_name = 'Chanel';
+--   -- expect 0
+--
+-- -- Territory released, mapping preserved:
+-- SELECT m.sales_territory_name, s.first_name, m.active
+-- FROM cogent_territory_mappings m
+-- JOIN salespeople s ON s.id = m.salesperson_id
+-- WHERE s.first_name = 'Chanel';
+--   -- expect 'Austin' → Chanel, active = false
+--
+-- -- Push devices revoked:
+-- SELECT COUNT(*) FROM push_subscriptions
+-- WHERE salesperson_id IN (SELECT id::text FROM salespeople WHERE first_name = 'Chanel');
+--   -- expect 0
+--
+-- -- History preserved (each count should match what it was before):
+-- SELECT
+--   (SELECT COUNT(*) FROM activity_entries  WHERE salesperson_id = s.id) AS activity_entries,
+--   (SELECT COUNT(*) FROM offices           WHERE salesperson_id = s.id) AS offices,
+--   (SELECT COUNT(*) FROM office_visits     WHERE salesperson_id = s.id) AS office_visits,
+--   (SELECT COUNT(*) FROM ae_tasks          WHERE salesperson_id = s.id) AS ae_tasks,
+--   (SELECT COUNT(*) FROM team_messages     WHERE salesperson_id = s.id::text) AS team_messages,
+--   (SELECT COUNT(*) FROM one_on_ones       WHERE ae_id = s.id)          AS one_on_ones
+-- FROM salespeople s WHERE s.first_name = 'Chanel';

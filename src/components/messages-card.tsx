@@ -51,10 +51,14 @@ export function MessagesCard({ salespersonId }: Props) {
         .order("updated_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
+      // Live "who to ask" list, so it honours the active-roster predicate
+      // (`deactivated_at IS NULL`) — never point an AE at someone who has
+      // left the company.
       supabase
         .from("salespeople")
         .select("first_name")
         .eq("role", "admin")
+        .is("deactivated_at", null)
         .order("first_name"),
     ]).then(([p, g, admins]) => {
       if (cancelled) return;

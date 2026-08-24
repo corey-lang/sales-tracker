@@ -1,0 +1,70 @@
+-- ===========================================================================
+-- Seed Leah as a juice_box_only user.
+-- ===========================================================================
+-- WHAT THIS IS
+--   A single-row seed migration that adds Leah to `salespeople` with
+--   role='juice_box_only', mirroring how Travis and Rizz were added in
+--   `add_juice_box_only_role.sql` (migration #18) and Faith in
+--   `add_faith_juice_box_only.sql` (migration #23). The juice_box_only role
+--   itself is already on the role CHECK constraint by migration #18; this
+--   file only inserts the new row.
+--
+-- WHY A SEPARATE FILE
+--   `add_juice_box_only_role.sql` is the historical record of when the role
+--   was introduced. New juice_box_only seats are layered on top as their own
+--   tiny migration so the history of who-was-added-when stays legible.
+--
+-- IDENTITY
+--   `id` comes from the table's own `gen_random_uuid()` default — the same
+--   source of truth and format as every other salesperson. Nothing else is
+--   supplied: sign-in is name-only (no PIN, no email, no auth.users row —
+--   the app has no Supabase Auth), so there is no other identity value to
+--   set. `location`, `state_code`, `cogent_territory_mappings`, and
+--   `can_import_offices` are deliberately left at their defaults
+--   (NULL / none / FALSE) — a Juice Box guest has no territory and no
+--   AE surface.
+--
+-- ACCESS POSTURE (inherited entirely from the role — no new code)
+--   * Juice Box only. `landingPathFor` (src/lib/role-routing.ts) sends her to
+--     /juice-box, and `buildNavItems` (src/components/bottom-nav.tsx) renders
+--     the single Juice Box tab — no Home / Leaderboard / Map / To-Dos / Scan.
+--   * Every AE route rejects her server-side: `requireAeToolAccess`
+--     (src/lib/server/auth.ts) 403s `juice_box_only` before any DB read, so
+--     activity logging, office visits, To-Dos, and business-card scanning are
+--     closed even to a hand-crafted fetch. `requireOfficeImporter` rejects
+--     the role outright, and `requireAdmin` / `requireReviewer` never match it.
+--   * Excluded from leaderboards, coaching, admin selectors/totals, the
+--     activity report, and Cogent order attribution — all of those filter
+--     positively on `role = 'ae'`.
+--   * No admin tools and no other salesperson's data: the only surface she
+--     can reach is the shared team feed, which is team-wide by design.
+--   * Sign-in: name-only (no PIN). first_name is CITEXT, so 'Leah' / 'leah' /
+--     'LEAH' all resolve to the same row.
+--   * Client state stays keyed to her own id: the Juice Box feed cache
+--     (`juice-box:feed:<salesperson_id>`, src/lib/juice-box-cache.ts) and the
+--     Map visit-age filter (`sales-tracker:map-visit-filter:<salesperson_id>`,
+--     src/app/offices/page.tsx) both scope by salesperson id with no shared
+--     fallback key, so her new UUID cannot collide with anyone else's state.
+--
+-- Idempotent: ON CONFLICT DO UPDATE re-asserts the role for an existing row,
+-- so re-runs (or applying this on top of a hand-inserted row) are safe.
+-- ===========================================================================
+
+INSERT INTO salespeople (first_name, role)
+VALUES ('Leah', 'juice_box_only')
+ON CONFLICT (first_name) DO UPDATE
+  SET role = EXCLUDED.role;
+
+-- ===========================================================================
+-- VERIFICATION (run after the migration)
+-- ===========================================================================
+-- SELECT id, first_name, role, is_admin, is_test, can_import_offices
+-- FROM salespeople
+-- WHERE first_name = 'Leah';
+--   -- expect one row: role='juice_box_only', is_admin=false, is_test=false,
+--   --                 can_import_offices=false, and a fresh UUID id.
+--
+-- SELECT COUNT(*) FROM cogent_territory_mappings m
+-- JOIN salespeople s ON s.id = m.salesperson_id
+-- WHERE s.first_name = 'Leah';
+--   -- expect 0 — a Juice Box guest owns no sales territory.

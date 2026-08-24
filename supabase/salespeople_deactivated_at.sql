@@ -1,0 +1,90 @@
+-- ===========================================================================
+-- salespeople.deactivated_at — soft-disable a person who has left the team.
+-- ===========================================================================
+-- WHAT THIS IS
+--   Adds `salespeople.deactivated_at TIMESTAMPTZ NULL` — the roster's
+--   active-row predicate becomes `deactivated_at IS NULL`.
+--
+-- WHY (the gap this closes)
+--   Before this column there was NO way to remove someone's access without
+--   DELETEing their `salespeople` row, and that row is the FK parent of
+--   everything they ever did: `activity_entries`, `gold_list_targets`,
+--   `offices` / `office_visits`, `ae_tasks`, `business_card_scans` /
+--   `business_card_contacts`, `team_messages` / reactions / reads,
+--   `one_on_ones` + commitments, `working_day_adjustments`,
+--   `cogent_territory_mappings`. Several of those cascade on delete, so a
+--   DELETE would silently destroy history the team still reports on. A
+--   nullable timestamp keeps every historical row intact while taking the
+--   person out of the live roster.
+--
+-- WHY A NULLABLE TIMESTAMP (not a boolean)
+--   Same pattern and same rationale as `offices.archived_at` (migration #33)
+--   and `coaching_relationships.archived_at` (migration #21): one column
+--   carries BOTH the state and the when, so no separate `is_active` +
+--   `deactivated_on` pair can drift out of sync. Named `deactivated_at`
+--   rather than `archived_at` because a person is deactivated, not archived —
+--   the semantics (they no longer work here) are not the office/relationship
+--   soft-delete semantics.
+--
+-- WHAT ENFORCES IT (app code shipping with this migration)
+--   * `POST /api/auth/login` refuses to issue a session token for a row with
+--     `deactivated_at IS NOT NULL`.
+--   * `requireSalesperson` (src/lib/server/auth.ts) re-reads the column on
+--     EVERY authenticated API request and 401s a deactivated caller. Because
+--     every other guard (`requireAdmin`, `requireAeToolAccess`,
+--     `requireReviewer`, `requireOfficeImporter`, `requireScanAccess`,
+--     `requireTestAccount`) funnels through it, one check closes all API
+--     access — including for an already-issued bearer token, which the app
+--     otherwise cannot revoke (see the session-limitation note in
+--     supabase/README.md).
+--   * Active-roster reads filter `deactivated_at IS NULL`: the login name
+--     list, the admin AE selector + working-days picker, admin activity
+--     totals / availability / activity report, leaderboard standings, the
+--     coaching list, the admin goals + messages target pickers, the
+--     office-import AE picker and its server-side AE resolver, and Cogent
+--     territory attribution.
+--   * By-id / by-name lookups that render HISTORY are deliberately NOT
+--     filtered — team check-in name enrichment, office-owner labels, and
+--     `requireCoachableAe` (so an admin can still open a departed AE's past
+--     Weekly Focus). Their rows stay readable; only the person's own access
+--     and their presence on live rosters go away.
+--
+-- NO INDEX
+--   The roster is ~a dozen rows and every read above is a full-table scan
+--   already; a partial index would cost more to maintain than it saves.
+--
+-- GRANTS
+--   None changed. `anon` keeps table-level SELECT (which covers new columns),
+--   because the login screen filters the name list on this column client-side.
+--   Nothing sensitive is exposed — it is a boolean-ish timestamp.
+--
+-- APPLY THIS BEFORE DEPLOYING THE MATCHING APP CODE.
+--   `/api/auth/login`, `requireSalesperson`, and every roster read listed
+--   above now name this column, so until it exists they all fail with
+--   `column salespeople.deactivated_at does not exist` (42703) — i.e. nobody
+--   can sign in. Applying it early is harmless: with no row deactivated the
+--   app behaves exactly as it did before.
+--
+-- Additive and idempotent (`ADD COLUMN IF NOT EXISTS`); no backfill — NULL
+-- (active) is the correct default for every existing row. Deactivating a
+-- specific person is a separate, layered migration (see
+-- `deactivate_chanel.sql`) so the history of who-left-when stays legible.
+-- See supabase/README.md for migration order.
+-- ===========================================================================
+
+ALTER TABLE salespeople
+  ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+
+-- ===========================================================================
+-- VERIFICATION (run after the migration)
+-- ===========================================================================
+-- SELECT column_name, data_type, is_nullable
+-- FROM information_schema.columns
+-- WHERE table_name = 'salespeople' AND column_name = 'deactivated_at';
+--   -- expect: timestamp with time zone, YES
+--
+-- SELECT
+--   COUNT(*) FILTER (WHERE deactivated_at IS NULL)     AS active,
+--   COUNT(*) FILTER (WHERE deactivated_at IS NOT NULL) AS deactivated
+-- FROM salespeople;
+--   -- expect every row active immediately after this migration

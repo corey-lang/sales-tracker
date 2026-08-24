@@ -18,5 +18,12 @@ export type Salesperson = {
   admin_pin: string | null;
   // Source of truth for permission checks.
   role: UserRole;
+  // Soft-disable for someone who has left the company. `null` = on the
+  // active roster; a timestamp = deactivated then. The row itself is never
+  // deleted (every historical record FKs to it), so the active-roster
+  // predicate everywhere is `deactivated_at IS NULL`. Login refuses a
+  // deactivated row and `requireSalesperson` 401s every API request from
+  // one. See supabase/salespeople_deactivated_at.sql.
+  deactivated_at: string | null;
   created_at: string;
 };

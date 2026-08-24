@@ -55,6 +55,9 @@ Run these in the Supabase SQL editor, top to bottom:
 | 39 | `salespeople_state_code.sql` | Adds `salespeople.state_code TEXT NULL` (CHECK: NULL or a normalized UPPER 2-letter USPS code) — the AE's assigned state, used as **Ask Smitty's** default state context for Coverage Intelligence lookups. `salespeople.location` is free text and `cogent_territory` is a sales-territory label, so neither matches `plan_brochures.state_code` / the `authoritative_*` views; this column does. NULL = no assigned state → Ask Smitty declines coverage questions (never guesses a state). Seeds the Test AE to `'UT'` (change to whichever state's brochure goes `current`+`approved` first); real AEs are assigned later. Read server-side by `requireSalesperson` and the `/api/ai/chat` coverage path. Depends on `schema.sql` (`salespeople`) and migration #4 (`is_test`, for the seed). No app dependency before deploy — safe to apply anytime. Additive and idempotent. |
 | 40 | `plan_brochures_trusted.sql` | Adds `plan_brochures.trusted BOOLEAN NOT NULL DEFAULT FALSE` for **Trusted Brochure Mode**. When `TRUE` (opt-in at registration, for official company brochures), the Coverage Intelligence publish flow lowers ONLY the extraction-confidence gate to a 0.50 floor so obvious high/medium-confidence rows auto-approve; every structural gate still applies (must have `source_text`/citation, a `source_page`, pass the citation-consistency check, not be a duplicate, have required plan/price). Non-trusted brochures keep the 0.85 default. The floor is server-owned — a caller-supplied threshold can only RAISE the gate, never lower it below the floor. No new statuses; no backfill (FALSE is the safe default). Read by `analyzeBrochure`/`approveAndPublishBrochure` via `effectiveThreshold`. Depends on migration #36 (`coverage_intelligence.sql`). Additive and idempotent. |
 | 41 | `replace_activity_week.sql` | Atomic Sun-Sat activity-week replacement for the AE "Edit activity week" card. Reconciles the drifted `activity_entries.presentations` column (`ADD COLUMN IF NOT EXISTS`), then adds the `replace_activity_week(p_salesperson_id uuid, p_week_start date, p_week_end date, p_values jsonb)` RPC: in ONE transaction it upserts the week total onto the activity week's **Sunday** row and deletes that AE's rows in `(Sunday, Saturday]` (Mon..Sat), so the prior two-call upsert+delete can no longer leave a week double-counted on a partial failure. Validates the window is exactly Sun..Sun+6 and that `p_week_start` is a Sunday. `SECURITY INVOKER` — runs with the caller's privileges (the card calls it with the browser anon key, which already holds the table writes the prior path used); `EXECUTE` granted to `anon`/`authenticated`/`service_role`. Does NOT change activity-week logic, readers, or Mon-Fri target/availability math. **Must be applied before the matching app code ships** — `edit-week-card.tsx` now calls `supabase.rpc("replace_activity_week", …)` and saving will 404 until the function exists. Depends on `schema.sql` (`activity_entries`). Idempotent. |
+| 42 | `add_leah_juice_box_only.sql` | Seeds Leah as `role='juice_box_only'`, mirroring how Travis and Rizz were seeded in migration #18 and Faith in #23. Single-row INSERT ... ON CONFLICT; no schema changes. Her `id` is the table's own `gen_random_uuid()` default — same identity format/source as everyone else — and nothing else is set (name-only sign-in, no PIN, no territory, `can_import_offices` FALSE). Access posture is inherited entirely from the role: `/juice-box` only via `landingPathFor`, a single Juice Box bottom-nav tab, `requireAeToolAccess` 403s her from every AE route, and the `role = 'ae'` allow-lists keep her off leaderboards, coaching, admin selectors/totals, the activity report, and Cogent order attribution. Depends on migration #18 (the `juice_box_only` value must already be on `salespeople.role`'s CHECK constraint). Idempotent. |
+| 43 | `salespeople_deactivated_at.sql` | Adds `salespeople.deactivated_at TIMESTAMPTZ NULL` — the roster's active-row predicate becomes `deactivated_at IS NULL`. Offboarding mechanism for someone who leaves the company: their row is the FK parent of every historical record they produced (`activity_entries`, `offices`/`office_visits`, `ae_tasks`, business-card scans/contacts, `team_messages`, `one_on_ones`, `working_day_adjustments`, `cogent_territory_mappings`), several with `ON DELETE CASCADE`, so a DELETE would destroy history — this soft-disables instead. Nullable timestamp (state + when in one column) follows `offices.archived_at` (#33) and `coaching_relationships.archived_at` (#21). **Enforcement ships with the matching app code:** `/api/auth/login` refuses a deactivated row, and `requireSalesperson` re-reads the column on every authenticated request and 401s — the single chokepoint every other guard funnels through, and the only revocation the bearer-token session model has. Active-roster reads (login name list, admin AE selector + working-days picker, activity totals/availability, leaderboard, coaching list, office-import picker + server resolver, Cogent attribution, admin-name hint list) filter `deactivated_at IS NULL`; the admin activity report is the exception because it can render prior weeks, so it keeps a departed AE on any selected week that overlaps their final active day. History lookups by id/`ae_id` (check-in names, office-owner labels, goals/messages name resolution, `requireCoachableAe`) deliberately do NOT filter either, so past records still render names. No backfill (NULL = active), no index (roster is ~a dozen rows), no grant changes (`anon` keeps table-level SELECT — the login screen filters on this column). **Must be applied BEFORE the matching app code ships** — login, `requireSalesperson`, and the roster reads all reference the column, so until it exists every one of them fails with `column salespeople.deactivated_at does not exist` (42703). Applying it early is harmless: with no row deactivated, behaviour is identical to before. Additive and idempotent. |
+| 44 | `deactivate_chanel.sql` | Personnel: deactivates Chanel (no longer with the company). Three statements — stamps `salespeople.deactivated_at` (COALESCE-guarded so a re-run keeps the original timestamp), sets her `cogent_territory_mappings` row for "Austin" to `active = FALSE` (that table's own soft-disable, so the territory surfaces under `unmappedTerritories` for re-assignment instead of being attributed to a departed AE), and DELETEs her `push_subscriptions` rows (live device tokens, not history — `fanOutJuiceBoxPush` has no roster check, so leaving them would keep pushing team-chat content to her phone; she cannot re-register because the subscribe route runs through `requireSalesperson`). **Deletes nothing of hers otherwise** — the `salespeople` row stays, so activity entries, offices/visits, tasks, business cards, Juice Box messages/reactions, coaching records, and working-day adjustments all survive, and her offices are NOT reassigned (a business decision, not an offboarding step). Reactivation SQL is in the file header. Depends on migrations #43 (`deactivated_at`) and #34 (`cogent_territory_mappings`). Idempotent. |
 
 > **Coaching migration order is strict.** `manager_one_on_ones.sql` → `weekly_focus.sql` → `weekly_focus_v2.sql`. Each later file extends/renames structure the earlier one creates. Skipping or reordering will leave `one_on_ones` / commitments in a half-migrated state that the API code expects to be fully migrated. All three are idempotent and re-runnable.
 >
@@ -115,6 +118,57 @@ together (none done yet):
 
 Until then the bucket stays public — an accepted gap for the closed team.
 
+## Offboarding & reassignment — authorship vs. operational ownership
+
+When someone leaves, set `salespeople.deactivated_at` (migration #43) — never
+DELETE the row. Their row is the FK parent of everything they produced, several
+edges with `ON DELETE CASCADE`, so a delete destroys history the team still
+reports on. Two categories must stay separate:
+
+| | Records | Rule |
+|---|---|---|
+| **Historical authorship / performance** | `activity_entries`, `office_visits`, `team_messages` (+ reactions/reads), `business_card_scans` / `_contacts`, `one_on_ones` / commitments / `weekly_focus_private_notes`, `weekly_goals` rows scoped to them, `working_day_adjustments`, CLOSED `ae_tasks` | **Permanently theirs.** Never re-point `salesperson_id` / `ae_id`. Read surfaces resolve these by id without filtering `deactivated_at`, so their name keeps rendering on past rows; the admin Activity Report also keeps them on any week overlapping their final active day. |
+| **Transferable operational ownership** | `cogent_territory_mappings.salesperson_id`, `offices.salesperson_id` (+ `next_action`, `next_action_due_date`), OPEN `ae_tasks`, `coaching_relationships` | **May move to a replacement**, in its own additive migration, when one is hired. Until then the territory stays soft-disabled (`active = FALSE`) and surfaces as `unmappedTerritories` — visible and unassigned, never silently credited to whoever left. |
+
+Chanel (migration #44) is the worked example: deactivated, Austin released,
+nothing of hers deleted or moved. A future Austin hire is a normal AE insert
+plus an UPDATE of the **second** category only — see the header of
+`deactivate_chanel.sql` for the exact statements and two schema caveats (the
+partial UNIQUE on `offices(salesperson_id, environment, dedupe_key)`, and the
+absence of any provenance column on `offices` / `ae_tasks`, which a transfer
+would therefore lose unless a nullable `transferred_from_salesperson_id` is
+added first).
+
+## Client trust boundary — `activity_entries` (read before touching RLS)
+
+`activity_entries` has **no RLS**, so the anon key can read and write any row.
+That used to be reachable from the browser: the dashboard's Log activity,
+Weekly tracker, and Edit activity week cards queried and upserted the table
+directly with a `salespersonId` prop taken from `localStorage`, and called the
+`replace_activity_week` RPC the same way. Since the stored session is
+user-editable, that made the AE boundary advisory — a `juice_box_only` guest
+could edit their role, load `/dashboard`, and read or overwrite any AE's week.
+
+Those operations now run server-side behind `requireAeToolAccess`:
+
+- `GET /api/me/activity/week[?week_start=]` — the caller's own Sun-Sat totals
+  plus their own resolved goal.
+- `PUT /api/me/activity/week` — replaces the caller's week via the RPC, called
+  with the session's salesperson id and server-derived Sun-Sat bounds.
+- `POST /api/me/activity/increment` — adds to the caller's row for the server's
+  Denver date.
+
+No route accepts a salesperson id; the strict zod schemas reject one outright.
+
+**Remaining browser writers of `activity_entries`** (why RLS is not enabled
+yet): the admin Maintenance card's test-data purge
+(`src/components/admin/maintenance-card.tsx`, anon DELETE) and the unused
+`src/components/today-totals-card.tsx`. A future `activity_entries` RLS
+lockdown must move the maintenance purge behind an admin route first (and note
+that `replace_activity_week` is `SECURITY INVOKER` with `EXECUTE` granted to
+`anon`, so that grant would need revisiting too). Not staged as a migration
+here — no SQL file exists for it yet.
+
 ## Maintenance scripts (NOT migrations)
 
 | File | When to run |
@@ -151,9 +205,17 @@ PIN. As of Phase 0:
 
 **Known limitation — the session token is bearer-only.** It proves the client
 completed a login, but with no real auth backing it, anyone who copies a
-token holds that session until it expires (30 days). There is no server-side
-revocation. This is intentionally accepted for the closed 11-person internal
-team and is strictly stronger than the pre-Phase-0 state (routes had no
-identity check at all). **Durable fix:** real per-user Supabase Auth, which
-would also let RLS — rather than route handlers — enforce row-level ownership.
-Deferred beyond Phase 0.
+token holds that session until it expires (30 days). There is no per-token
+revocation. This is intentionally accepted for the closed internal team and
+is strictly stronger than the pre-Phase-0 state (routes had no identity check
+at all). **Durable fix:** real per-user Supabase Auth, which would also let
+RLS — rather than route handlers — enforce row-level ownership. Deferred
+beyond Phase 0.
+
+**Per-PERSON revocation does exist** (migration #43): setting
+`salespeople.deactivated_at` kills every token that person holds. Because
+`requireSalesperson` re-reads the row on every authenticated request, the
+next API call from an already-issued token 401s, and `/api/auth/login` will
+not mint a new one. That is the supported way to cut off access when someone
+leaves — never DELETE the `salespeople` row, which would cascade away their
+history.

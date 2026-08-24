@@ -83,11 +83,14 @@ export async function computeStandings(
     // Rizz, …) off every leaderboard surface and means any future role
     // can't accidentally leak in. is_test stays as belt-and-suspenders
     // against the seeded test account leaking into team standings.
+    // `deactivated_at IS NULL` drops people who have left the company —
+    // they no longer compete, but their historical entries are untouched.
     supabase
       .from("salespeople")
       .select("id, first_name")
       .eq("role", "ae")
-      .eq("is_test", false),
+      .eq("is_test", false)
+      .is("deactivated_at", null),
     // Activity numerator: Sun-Sat window (weekend entries included), NOT the
     // Mon-Fri [since, through]. Targets/availability below stay Mon-Fri.
     supabase

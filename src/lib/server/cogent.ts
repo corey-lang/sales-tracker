@@ -271,20 +271,49 @@ type Mapping = {
   first_name: string;
 };
 
+/** The AE side of a `cogent_territory_mappings` row as PostgREST returns it
+ *  (the embedded 1:1 relation may arrive as an object or a 1-element array). */
+type MappedAeRelation = {
+  first_name?: unknown;
+  role?: unknown;
+  is_test?: unknown;
+  deactivated_at?: unknown;
+} | null;
+
+/**
+ * Positive allow-list for order attribution: only a PRODUCTION AE who is still
+ * on the roster may have a territory's orders credited to them.
+ *
+ * Rejects admins/assistants/juice_box_only guests (`role !== 'ae'`), the seeded
+ * test account, and anyone deactivated (they left the company). A rejected
+ * mapping's territory surfaces under `unmappedTerritories` — flagged and
+ * re-assignable — rather than being silently credited to the wrong person, which
+ * is what keeps a departed AE's territory (e.g. Austin) available for their
+ * replacement without touching any historical row. Exported for tests.
+ */
+export function isAttributableAe(rel: MappedAeRelation): boolean {
+  if (!rel) return false;
+  if (rel.role !== "ae") return false;
+  if (rel.is_test === true) return false;
+  if (rel.deactivated_at != null) return false;
+  return true;
+}
+
 /**
  * Loads active territory→AE mappings, joined to the AE, restricted to PRODUCTION
  * AEs only. Mirrors the positive allow-list in leaderboard-standings.ts:
- * `role = 'ae'` AND `is_test = false`. A mapping that points to an admin,
- * assistant, juice_box_only guest, or the seeded test account is dropped — its
- * territory then surfaces as UNMAPPED (flagged, never silently attributed),
- * so non-AE/test users can't leak into production order reporting.
+ * `role = 'ae'` AND `is_test = false` AND `deactivated_at IS NULL`. A mapping
+ * that points to an admin, assistant, juice_box_only guest, the seeded test
+ * account, or someone who has left the company is dropped — its territory then
+ * surfaces as UNMAPPED (flagged, never silently attributed), so non-AE/test/
+ * departed users can't leak into production order reporting.
  */
 async function loadActiveMappings(): Promise<Mapping[]> {
   const supabase = getServerSupabase();
   const res = await supabase
     .from("cogent_territory_mappings")
     .select(
-      "sales_territory_name, salesperson_id, salespeople(first_name, role, is_test)",
+      "sales_territory_name, salesperson_id, salespeople(first_name, role, is_test, deactivated_at)",
     )
     .eq("active", true);
 
@@ -302,15 +331,26 @@ async function loadActiveMappings(): Promise<Mapping[]> {
       salesperson_id: string;
       // supabase-js types the embedded relation as an array; it's 1:1 here.
       salespeople?:
-        | { first_name?: unknown; role?: unknown; is_test?: unknown }
-        | { first_name?: unknown; role?: unknown; is_test?: unknown }[]
+        | {
+            first_name?: unknown;
+            role?: unknown;
+            is_test?: unknown;
+            deactivated_at?: unknown;
+          }
+        | {
+            first_name?: unknown;
+            role?: unknown;
+            is_test?: unknown;
+            deactivated_at?: unknown;
+          }[]
         | null;
     };
     const rel = Array.isArray(r.salespeople) ? r.salespeople[0] : r.salespeople;
-    const role = rel?.role;
-    const isTest = rel?.is_test;
-    // Positive allow-list: production AEs only.
-    if (role !== "ae" || isTest === true) continue;
+    // Positive allow-list: production AEs who are still on the roster.
+    // A departed AE's mapping is normally soft-disabled with active=false
+    // (see supabase/deactivate_chanel.sql); this is the belt-and-braces
+    // check for a mapping that was missed or later re-activated by hand.
+    if (!isAttributableAe(rel ?? null)) continue;
     const first = rel?.first_name;
     mappings.push({
       sales_territory_name: r.sales_territory_name,

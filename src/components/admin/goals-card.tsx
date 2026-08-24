@@ -51,9 +51,12 @@ type Props = {
 };
 
 export function GoalsCard({ people }: Props) {
-  // Full salespeople list (including admins) — used only for resolving
-  // created_by IDs in the audit line, since the `people` prop intentionally
-  // excludes admins from the scope dropdown.
+  // Full salespeople list (including admins, and deliberately including
+  // deactivated people) — used only for resolving IDs on HISTORICAL rows:
+  // created_by in the audit line and the per-AE override labels. The `people`
+  // prop is the live-roster list that feeds the scope dropdown; it already
+  // excludes admins and deactivated AEs. Filtering this lookup would turn a
+  // past goal set by someone who has since left into "Unknown".
   const [allPeople, setAllPeople] = useState<Salesperson[]>([]);
   const [goals, setGoals] = useState<GoalRow[]>([]);
   // Unfiltered copy of goals for computing active overrides + global, so the

@@ -54,6 +54,18 @@ export type ActivityReportRow = {
  *  messages are logged server-side, never returned. */
 const REPORT_READ_ERROR = "Could not load the activity report.";
 
+function appDateOnly(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Denver",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(iso));
+  const get = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "01";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 /**
  * Builds the per-AE activity report for one week. `since` is the week's Monday
  * (the weekStart for available-day math AND goal resolution), `through` its
@@ -76,9 +88,13 @@ export async function buildActivityReport(
   // Numerator window = Sun-Sat activity week (weekend entries included).
   const activity = activityWindowForBusinessWeek(since, today);
   const [peopleRes, entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
+    // This report can render prior weeks, so unlike the live roster cards we
+    // keep deactivated AEs in the base query and filter by the selected week's
+    // date window below. That preserves historical rows without putting former
+    // AEs back on current-only selectors elsewhere.
     supabase
       .from("salespeople")
-      .select("id, first_name")
+      .select("id, first_name, deactivated_at")
       .eq("role", "ae")
       .eq("is_test", false)
       .order("first_name", { ascending: true }),
@@ -107,6 +123,7 @@ export async function buildActivityReport(
   const people = (peopleRes.data ?? []) as Array<{
     id: string;
     first_name: string;
+    deactivated_at: string | null;
   }>;
   const entries = (entriesRes.data ?? []) as unknown as Array<
     Partial<ActivityValues> & { salesperson_id: string }
@@ -121,44 +138,52 @@ export async function buildActivityReport(
     for (const k of ACTIVITY_KEYS) bucket[k] += Number(e[k] ?? 0);
   }
 
-  const rows: ActivityReportRow[] = people.map((p) => {
-    const actual = totals.get(p.id) ?? { ...ZERO_ACTIVITY };
-    const resolvedGoal = resolveActiveGoal(p.id, goals, goalAsOf);
-    const avail = weekAvailability({
-      weekStart: since,
-      salespersonId: p.id,
-      adjustments,
-      today,
-    });
-    // Score + adjusted targets from the SHARED helper — the same call the
-    // leaderboard makes, so the report % and leaderboard % are identical.
-    const { percent, adjustedTargets } = adjustedWeekScore(
-      actual,
-      resolvedGoal,
-      avail.availableDays,
-    );
-    // Original targets (DB, never mutated) for the "16 / 20" context.
-    const originalTargets = weeklyTargetsFrom(resolvedGoal);
-    const cells = {} as Record<ActivityKey, ActivityReportCell>;
-    for (const k of ACTIVITY_KEYS) {
-      const goal = adjustedTargets[k];
-      cells[k] = {
-        actual: actual[k],
-        goal,
-        original_goal: originalTargets[k],
-        percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
+  const rows: ActivityReportRow[] = people
+    .filter((p) => {
+      if (p.deactivated_at == null) return true;
+      // Live-roster filters should not erase HISTORY: if the selected
+      // activity week overlaps the AE's final active day, keep their row so
+      // past reports still render correctly after offboarding.
+      return appDateOnly(p.deactivated_at) >= activity.since;
+    })
+    .map((p) => {
+      const actual = totals.get(p.id) ?? { ...ZERO_ACTIVITY };
+      const resolvedGoal = resolveActiveGoal(p.id, goals, goalAsOf);
+      const avail = weekAvailability({
+        weekStart: since,
+        salespersonId: p.id,
+        adjustments,
+        today,
+      });
+      // Score + adjusted targets from the SHARED helper — the same call the
+      // leaderboard makes, so the report % and leaderboard % are identical.
+      const { percent, adjustedTargets } = adjustedWeekScore(
+        actual,
+        resolvedGoal,
+        avail.availableDays,
+      );
+      // Original targets (DB, never mutated) for the "16 / 20" context.
+      const originalTargets = weeklyTargetsFrom(resolvedGoal);
+      const cells = {} as Record<ActivityKey, ActivityReportCell>;
+      for (const k of ACTIVITY_KEYS) {
+        const goal = adjustedTargets[k];
+        cells[k] = {
+          actual: actual[k],
+          goal,
+          original_goal: originalTargets[k],
+          percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
+        };
+      }
+      return {
+        id: p.id,
+        first_name: p.first_name,
+        cells,
+        score: percent,
+        available_days: avail.availableDays,
+        expected_percent: avail.expectedPercent,
+        is_holiday_week: avail.isHolidayWeek,
       };
-    }
-    return {
-      id: p.id,
-      first_name: p.first_name,
-      cells,
-      score: percent,
-      available_days: avail.availableDays,
-      expected_percent: avail.expectedPercent,
-      is_holiday_week: avail.isHolidayWeek,
-    };
-  });
+    });
 
   return { rows, error: null };
 }

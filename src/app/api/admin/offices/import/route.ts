@@ -265,6 +265,13 @@ async function resolveSalespeople(
   // (including the Test account). The admin gate already restricts who
   // can call this route. `is_test` is selected so the upsert path can
   // derive each row's env slice via `officeEnvironmentFor(resolved)`.
+  //
+  // We DO filter on `deactivated_at IS NULL`: an import is a NEW assignment,
+  // and nothing should be assigned to someone who has left the company. A
+  // deactivated AE simply doesn't resolve, so those rows land in `skipped`
+  // with the existing "Salesperson … not found." reason instead of being
+  // silently attached to a departed AE. Existing offices already owned by
+  // that person are untouched.
   const idArr = Array.from(wantedIds);
   const nameArr = Array.from(wantedNames);
 
@@ -273,12 +280,14 @@ async function resolveSalespeople(
       ? supabase
           .from("salespeople")
           .select("id, first_name, is_test")
+          .is("deactivated_at", null)
           .in("id", idArr)
       : Promise.resolve({ data: [], error: null } as const),
     nameArr.length > 0
       ? supabase
           .from("salespeople")
           .select("id, first_name, is_test")
+          .is("deactivated_at", null)
           .in("first_name", nameArr)
       : Promise.resolve({ data: [], error: null } as const),
   ]);

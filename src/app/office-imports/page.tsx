@@ -664,12 +664,16 @@ export default function OfficeImportsPage() {
   // Pull the AE roster for the picker. The anon key has SELECT on
   // salespeople by default (no RLS on that table), so we can read it
   // directly from the browser — matches the pattern in src/app/page.tsx
-  // (the name-picker login screen).
+  // (the name-picker login screen), including its active-roster predicate:
+  // `deactivated_at IS NULL`, so offices are never assigned to someone who
+  // has left. The server-side resolver in /api/admin/offices/import applies
+  // the same filter, so a hand-edited request can't do it either.
   useEffect(() => {
     let cancelled = false;
     supabase
       .from("salespeople")
       .select("id, first_name, is_test")
+      .is("deactivated_at", null)
       .order("first_name", { ascending: true })
       .then(({ data, error }) => {
         if (cancelled) return;

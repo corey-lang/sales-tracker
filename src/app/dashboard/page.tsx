@@ -7,6 +7,7 @@ import { format } from "date-fns";
 import { Settings } from "lucide-react";
 
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
+import { useLivePermissions } from "@/lib/use-live-permissions";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
@@ -44,6 +45,14 @@ import { OrdersCard } from "@/components/orders-card";
 export default function DashboardPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
+  // The role this page renders from comes from the SERVER
+  // (GET /api/me/permissions re-reads the `salespeople` row), not from the
+  // stored session — the stored copy is user-editable, so it can decide chrome
+  // but never what a page shows. Every card below also fetches through
+  // authenticated routes that re-check the role, so this gate is UX
+  // (don't paint a dashboard the caller can't use), not the security boundary.
+  const { permissions, loaded: permissionsLoaded } = useLivePermissions();
+  const verifiedRole = permissions?.role ?? null;
   const [entryVersion, setEntryVersion] = useState(0);
 
   useEffect(() => {
@@ -52,17 +61,19 @@ export default function DashboardPage() {
       router.replace("/");
       return;
     }
-    // juice_box_only accounts (Travis, Rizz, …) only have access to
-    // /juice-box; bounce them away from Home so the URL bar can't be
-    // used to peek at the full dashboard.
-    if (salesperson.role === "juice_box_only") {
+    // juice_box_only accounts (Travis, Rizz, Leah, …) only have access to
+    // /juice-box; bounce them away from Home so the URL bar can't be used to
+    // peek at the full dashboard. Keyed on the SERVER-verified role, so
+    // editing the role in localStorage no longer skips this redirect (and the
+    // AE data routes 403 them regardless).
+    if (permissionsLoaded && verifiedRole === "juice_box_only") {
       router.replace("/juice-box");
     }
-  }, [loaded, salesperson, router]);
+  }, [loaded, salesperson, permissionsLoaded, verifiedRole, router]);
 
   useScrollToTop();
 
-  if (!loaded || !salesperson) {
+  if (!loaded || !salesperson || !permissionsLoaded) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -70,7 +81,32 @@ export default function DashboardPage() {
     );
   }
 
-  if (salesperson.role === "assistant") {
+  // FAIL CLOSED: the permission read resolved without an answer (expired
+  // session, or the request failed). Render nothing role-shaped rather than
+  // trusting the stored role — the AE cards would only 401/403 anyway.
+  if (!permissions) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-4">
+        <p className="text-sm text-muted-foreground">
+          Couldn&apos;t verify your access.
+        </p>
+        <Link href="/" className={buttonVariants({ variant: "outline" })}>
+          Sign in again
+        </Link>
+      </main>
+    );
+  }
+
+  // Bounce in progress — don't paint the AE dashboard for a Juice Box guest.
+  if (verifiedRole === "juice_box_only") {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-4">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </main>
+    );
+  }
+
+  if (verifiedRole === "assistant") {
     return (
       <>
         <main
@@ -139,7 +175,7 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {salesperson.role === "admin" && (
+            {verifiedRole === "admin" && (
               <Link
                 href="/admin"
                 className={buttonVariants({ variant: "outline", size: "sm" })}
@@ -191,7 +227,6 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <DailyEntryForm
-              salespersonId={salesperson.id}
               refreshKey={entryVersion}
               onSaved={() => setEntryVersion((n) => n + 1)}
             />
@@ -200,10 +235,9 @@ export default function DashboardPage() {
 
         <RecentActivityCard refreshKey={entryVersion} />
 
-        <MyWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
+        <MyWeekCard refreshKey={entryVersion} />
 
         <EditWeekCard
-          salespersonId={salesperson.id}
           refreshKey={entryVersion}
           onSaved={() => setEntryVersion((n) => n + 1)}
         />

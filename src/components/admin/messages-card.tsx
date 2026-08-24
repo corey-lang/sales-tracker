@@ -55,6 +55,11 @@ export function MessagesCard({ people }: Props) {
 
   const refresh = () => setRefreshTick((n) => n + 1);
 
+  // Name-resolution lookup for EXISTING message rows only — deliberately
+  // unfiltered, so a message addressed to (or written by) someone who has
+  // since left still renders their name instead of "Unknown". The recipient
+  // dropdown uses the `people` prop, which is the live roster (admins and
+  // deactivated AEs already excluded upstream in src/app/admin/page.tsx).
   useEffect(() => {
     let cancelled = false;
     supabase

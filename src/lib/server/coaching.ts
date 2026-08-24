@@ -447,11 +447,15 @@ export async function buildAeSummaries(
   // (rather than excluding known non-AE roles) means a future role
   // can't accidentally leak in. is_test stays as belt-and-suspenders
   // against the seeded test account leaking into coaching summaries.
+  // `deactivated_at IS NULL` keeps departed AEs off the coaching list.
+  // requireCoachableAe (by explicit ae_id) deliberately does NOT filter on
+  // it, so an admin can still open a former AE's past Weekly Focus record.
   const peopleRes = await supabase
     .from("salespeople")
     .select("id, first_name")
     .eq("role", COACHABLE_ROLE)
     .eq("is_test", false)
+    .is("deactivated_at", null)
     .order("first_name", { ascending: true });
   if (peopleRes.error) return { summaries: [], error: peopleRes.error.message };
   const people = (peopleRes.data ?? []) as Array<{

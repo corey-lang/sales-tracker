@@ -1,36 +1,36 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { format } from "date-fns";
 
-import { supabase } from "@/lib/supabase/client";
+import {
+  activityValuesFrom,
+  fetchMyActivityWeek,
+  incrementMyActivity,
+} from "@/lib/api-activity";
 import {
   ACTIVITIES,
   ZERO_ACTIVITY,
   type ActivityKey,
   type ActivityValues,
 } from "@/lib/activities";
-import { todayInAppTimezone } from "@/lib/dates";
-import {
-  activityWeekToDateRange,
-  fetchActiveGoalFor,
-  pairedBusinessMonday,
-  weeklyTargetsFrom,
-} from "@/lib/goals";
+import { weeklyTargetsFrom } from "@/lib/goals";
 
 import { ActivityCounter } from "@/components/activity-counter";
 
+// Log-activity counters.
+//
+// IDENTITY: this card has no `salespersonId` prop by design. Reads and writes
+// go through /api/me/activity/*, which takes the AE from the signed session
+// token and re-reads their `salespeople` row — so the browser cannot name whose
+// activity it is logging. It previously read and upserted `activity_entries`
+// directly with the anon key, scoped by an id that came from localStorage.
+
 type Props = {
-  salespersonId: string;
   refreshKey?: number;
   onSaved?: () => void;
 };
 
-export function DailyEntryForm({
-  salespersonId,
-  refreshKey = 0,
-  onSaved,
-}: Props) {
+export function DailyEntryForm({ refreshKey = 0, onSaved }: Props) {
   const [inputs, setInputs] = useState<ActivityValues>(ZERO_ACTIVITY);
   const [weeklyTotals, setWeeklyTotals] =
     useState<ActivityValues>(ZERO_ACTIVITY);
@@ -41,97 +41,56 @@ export function DailyEntryForm({
 
   useEffect(() => {
     let cancelled = false;
-    // Activity totals use the Sun-Sat logging week (not the Mon-Fri business
-    // week) so weekend catch-up entries show up in the running total here.
-    const { since, through } = activityWeekToDateRange();
-
-    Promise.all([
-      supabase
-        .from("activity_entries")
-        .select(ACTIVITIES.map((a) => a.key).join(","))
-        .eq("salesperson_id", salespersonId)
-        .gte("entry_date", since)
-        .lte("entry_date", through),
-      // Goal for the Mon-Fri week paired with the current Sun-Sat activity week.
-      fetchActiveGoalFor(salespersonId, pairedBusinessMonday()),
-    ]).then(([totalsRes, goalRes]) => {
-      if (cancelled) return;
-      const firstErr = totalsRes.error ?? goalRes.error;
-      if (firstErr) {
-        setError(firstErr.message);
-        return;
-      }
-      const nextTotals = { ...ZERO_ACTIVITY };
-      for (const row of (totalsRes.data ??
-        []) as unknown as Partial<ActivityValues>[]) {
-        for (const a of ACTIVITIES) {
-          nextTotals[a.key] += Number(row[a.key] ?? 0);
-        }
-      }
-      setWeeklyTotals(nextTotals);
-
-      const goal = goalRes.data;
-      setHasGoals(!!goal);
-      setTargets(weeklyTargetsFrom(goal));
-      setError(null);
-    });
+    // One authenticated read returns this Sun-Sat activity week's totals
+    // (weekend catch-up entries included) plus the caller's own goal for the
+    // paired Mon-Fri week — the same pairing the client used to compute.
+    fetchMyActivityWeek()
+      .then((week) => {
+        if (cancelled) return;
+        setWeeklyTotals(activityValuesFrom(week.totals));
+        const goal = week.goal ?? null;
+        setHasGoals(!!goal);
+        setTargets(weeklyTargetsFrom(goal));
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        // Server messages are author-written and safe to show (401/403 read
+        // as "sign in again" / "not available for your account").
+        setError(err instanceof Error ? err.message : "Could not load your week.");
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [salespersonId, refreshKey]);
+  }, [refreshKey]);
 
   const setKey = (key: ActivityKey, next: number) =>
     setInputs((v) => ({ ...v, [key]: next }));
 
   const saveDelta = async (key: ActivityKey, delta: number) => {
     if (delta <= 0) return false;
-    // `today` is the Denver business day so a rep tapping just past
-    // midnight local-time logs to the right `entry_date` regardless of
-    // where their phone is. Matches the leaderboard/Weekly Focus window.
-    const today = format(todayInAppTimezone(), "yyyy-MM-dd");
 
     setSavingKey(key);
     setError(null);
 
-    const currentToday = await supabase
-      .from("activity_entries")
-      .select(key)
-      .eq("salesperson_id", salespersonId)
-      .eq("entry_date", today)
-      .maybeSingle();
-
-    if (currentToday.error) {
+    // The server owns both halves of the write: the `entry_date` (the Denver
+    // business day, so a rep tapping just past midnight local time still lands
+    // on the right day) and the salesperson (the session's AE). The read-add-
+    // upsert that used to run here now runs behind requireAeToolAccess.
+    try {
+      const res = await incrementMyActivity(key, delta);
       setSavingKey(null);
-      setError(currentToday.error.message);
+      // Server truth, not an optimistic guess — reconciles with any concurrent
+      // write (e.g. from EditWeekCard) in the same response.
+      setWeeklyTotals(activityValuesFrom(res.totals));
+      onSaved?.();
+      return true;
+    } catch (err: unknown) {
+      setSavingKey(null);
+      setError(err instanceof Error ? err.message : "Could not save that.");
       return false;
     }
-
-    const row = currentToday.data as Partial<ActivityValues> | null;
-    const next = Number(row?.[key] ?? 0) + delta;
-
-    const { error: upsertErr } = await supabase.from("activity_entries").upsert(
-      {
-        salesperson_id: salespersonId,
-        entry_date: today,
-        [key]: next,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "salesperson_id,entry_date" },
-    );
-
-    setSavingKey(null);
-    if (upsertErr) {
-      setError(upsertErr.message);
-      return false;
-    }
-    // Optimistic update to local cache; entryVersion refetch will reconcile
-    // with any concurrent writes from EditWeekCard etc. The save always writes
-    // to `today`, which is inside the Sun-Sat activity week the totals cover —
-    // including weekends — so we update unconditionally (no business-day gate).
-    setWeeklyTotals((v) => ({ ...v, [key]: v[key] + delta }));
-    onSaved?.();
-    return true;
   };
 
   const handleSaveRow = async (key: ActivityKey) => {
