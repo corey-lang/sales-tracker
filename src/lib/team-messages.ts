@@ -71,9 +71,86 @@ export type TeamMessageAttachment = {
  *  tractable on a phone and the rendered grid readable in the feed. */
 export const MAX_IMAGES_PER_POST = 10;
 
+// ---------------------------------------------------------------------------
+// Channels
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable channel identifier stored in `team_messages.channel` and
+ * `team_message_reads.channel`. Kept in lockstep with the CHECK constraints in
+ * supabase/juice_box_channels.sql — adding a value here means adding it there.
+ */
+export type JuiceBoxChannel = "general" | "product_help" | "social_media_hub";
+
+/** The channel every message lives in unless told otherwise. Pre-channel posts
+ *  were backfilled to this value, and any null/unknown value normalizes to it. */
+export const DEFAULT_JUICE_BOX_CHANNEL: JuiceBoxChannel = "general";
+
+/**
+ * The three channels, in tab order. `label` is the tab + composer label;
+ * `blurb` is the one-line purpose shown as the tab's title/tooltip and in the
+ * empty state, so a newcomer can tell where a post belongs.
+ */
+export const JUICE_BOX_CHANNELS = [
+  {
+    id: "general",
+    label: "General",
+    blurb:
+      "Team discussion, updates, announcements, celebrations, and everything else.",
+  },
+  {
+    id: "product_help",
+    label: "Product Help",
+    blurb:
+      "Coverage, pricing, plans, service questions, objections, and help answering agent questions.",
+  },
+  {
+    id: "social_media_hub",
+    label: "Social Media Hub",
+    blurb:
+      "Post ideas, captions, content requests, examples, marketing inspiration, and social wins.",
+  },
+] as const satisfies ReadonlyArray<{
+  id: JuiceBoxChannel;
+  label: string;
+  blurb: string;
+}>;
+
+/** Just the ids, in tab order — handy for iterating per-channel state. */
+export const JUICE_BOX_CHANNEL_IDS = JUICE_BOX_CHANNELS.map(
+  (c) => c.id,
+) as readonly JuiceBoxChannel[];
+
+export const isJuiceBoxChannel = (v: unknown): v is JuiceBoxChannel =>
+  v === "general" || v === "product_help" || v === "social_media_hub";
+
+/**
+ * Coerces any value into a channel, falling back to General.
+ *
+ * Used on every ingest boundary — DB rows, realtime payloads, cached client
+ * blobs, query params — so a message written before
+ * supabase/juice_box_channels.sql ran (or by an older client bundle) always
+ * resolves to General rather than rendering channel-less. Server routes that
+ * accept a channel from a REQUEST validate strictly (400) instead of
+ * normalizing, so a typo'd channel is never silently redirected into General.
+ */
+export function normalizeChannel(v: unknown): JuiceBoxChannel {
+  return isJuiceBoxChannel(v) ? v : DEFAULT_JUICE_BOX_CHANNEL;
+}
+
+/** Display label for a channel id (normalizes unknown input first). */
+export function channelLabel(v: unknown): string {
+  const id = normalizeChannel(v);
+  return JUICE_BOX_CHANNELS.find((c) => c.id === id)!.label;
+}
+
 export type TeamMessage = {
   id: string;
   created_at: string;
+  /** Which channel the post belongs to. Server-owned: on a reply it is copied
+   *  from the parent, otherwise it is the validated channel the composer was
+   *  posting in. Historical posts read as "general" (see normalizeChannel). */
+  channel: JuiceBoxChannel;
   salesperson_id: string;
   salesperson_name: string;
   message: string;
@@ -261,18 +338,101 @@ export const TEAM_MESSAGE_REACTIONS_CHANNEL =
  */
 export const TEAM_MESSAGES_UNREAD_CHANNEL = "realtime:team_messages_unread";
 
-/** The per-user read-marker table, backing the "New messages" divider + nav badge. */
+/**
+ * LEGACY per-user read-marker table — one row per salesperson, no channel
+ * dimension (UNIQUE on `salesperson_id`).
+ *
+ * Left in place and untouched by the channels rollout so the previously
+ * deployed bundle and any stale browser tab keep marking reads exactly as
+ * before. The channel-aware code reads and writes
+ * `TEAM_MESSAGE_CHANNEL_READS_TABLE` instead; this constant survives only for
+ * the rollout-window compatibility write in POST /api/team-messages/reads/me.
+ * It can be deleted together with the table in a future cleanup migration —
+ * see supabase/juice_box_channels.sql.
+ */
 export const TEAM_MESSAGE_READS_TABLE = "team_message_reads";
 
-/** Shape of a single user's read marker as returned by /api/team-messages/reads/me. */
+/**
+ * Per-CHANNEL read markers — one row per (salesperson_id, channel). Backs each
+ * channel's "New messages" divider, its tab badge, and the combined nav badge.
+ * Created and backfilled from the legacy table by
+ * supabase/juice_box_channels.sql.
+ */
+export const TEAM_MESSAGE_CHANNEL_READS_TABLE = "team_message_channel_reads";
+
+/**
+ * ATOMIC, MONOTONIC mark-read RPCs (supabase/juice_box_channels.sql).
+ *
+ * Both stamp `now()` inside Postgres and apply
+ * `last_read_at = GREATEST(existing, incoming)` in a single statement, so an
+ * out-of-order write can never move a marker backwards — the race an
+ * unconditional upsert had. Both RETURN the persisted timestamp, which is what
+ * the API answers with. EXECUTE is granted to `service_role` only, so they are
+ * reachable only through the server routes.
+ *
+ * `…LEGACY…` writes the pre-channels table and is called for GENERAL ONLY, as
+ * a best-effort mirror; retire it with the legacy table.
+ */
+export const JUICE_BOX_MARK_CHANNEL_READ_RPC = "juice_box_mark_channel_read";
+export const JUICE_BOX_MARK_LEGACY_READ_RPC = "juice_box_mark_legacy_read";
+
+/**
+ * Admin "Move conversation" RPC (supabase/juice_box_channels.sql). Moves a
+ * whole reply tree between channels and writes the audit row in ONE
+ * transaction. `EXECUTE` is granted to `service_role` only, so the sole caller
+ * is POST /api/team-messages/:id/move behind `requireAdmin`.
+ */
+export const JUICE_BOX_MOVE_CONVERSATION_RPC = "juice_box_move_conversation";
+
+/** Server-only audit table for conversation moves. No client reads it. */
+export const JUICE_BOX_CONVERSATION_MOVES_TABLE = "juice_box_conversation_moves";
+
+/**
+ * What POST /api/team-messages/:id/move returns — the minimum the UI needs to
+ * update itself and confirm what happened. Deliberately NO message bodies and
+ * nothing administrative beyond the counts.
+ */
+export type MoveConversationResult = {
+  /** The conversation's authoritative ROOT id, resolved server-side (the admin
+   *  may have acted on a reply). */
+  root_message_id: string;
+  from_channel: JuiceBoxChannel;
+  to_channel: JuiceBoxChannel;
+  /** Root + every descendant that moved. */
+  message_count: number;
+  moved_at: string;
+};
+
+/** Shape of a single user's read marker for ONE channel, as returned by
+ *  /api/team-messages/reads/me. */
 export type TeamMessageRead = {
+  channel: JuiceBoxChannel;
   last_read_at: string | null;
 };
 
-/** Shape of the unread summary returned by /api/team-messages/unread. */
+/** Per-channel unread slice: how many unread posts, and the marker they were
+ *  counted against (null = this user has no read receipt for that channel). */
+export type TeamMessageChannelUnread = {
+  count: number;
+  last_read_at: string | null;
+};
+
+/**
+ * Shape of the unread summary returned by /api/team-messages/unread.
+ *
+ * `count` is the COMBINED total across every channel — that is what the
+ * bottom-nav Juice Box badge shows. `channels` carries the per-channel
+ * breakdown that the channel tabs and each channel's NEW MESSAGES divider
+ * key off.
+ *
+ * `last_read_at` is retained as the GENERAL channel's marker so a client
+ * bundle cached from before channels shipped keeps reading a sane value
+ * instead of `undefined`.
+ */
 export type TeamMessageUnreadSummary = {
   count: number;
   last_read_at: string | null;
+  channels: Record<JuiceBoxChannel, TeamMessageChannelUnread>;
 };
 
 /** Raw reaction row as it arrives from the DB / realtime payload. The

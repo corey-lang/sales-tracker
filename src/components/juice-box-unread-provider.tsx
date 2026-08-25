@@ -14,11 +14,18 @@ import { apiFetch } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import {
+  normalizeChannel,
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGES_UNREAD_CHANNEL,
+  type JuiceBoxChannel,
   type TeamMessage,
+  type TeamMessageChannelUnread,
   type TeamMessageUnreadSummary,
 } from "@/lib/team-messages";
+import {
+  combinedUnreadCount,
+  emptyChannelUnread,
+} from "@/lib/juice-box-unread";
 
 // Single source of truth for Juice Box unread state across the app.
 //
@@ -32,13 +39,23 @@ import {
 //   - On mount (when the caller is signed in), fetches the unread
 //     summary from /api/team-messages/unread.
 //   - Subscribes to postgres_changes on `team_messages` so:
-//       * teammate INSERTs   -> increment count
+//       * teammate INSERTs   -> increment THAT ROW'S channel count
 //       * own INSERTs        -> ignored (we mark read on self-post)
 //       * deletions (UPDATE  -> is_deleted = true) -> refetch (cheaper than
 //         tracking which messages were unread on the client)
-//   - Exposes `markAllRead()` so the /juice-box page can flip the count
-//     to 0 and advance the local `lastReadAt` once the user has actually
-//     seen the latest posts.
+//   - Exposes `markChannelRead(channel)` so the /juice-box page can flip one
+//     channel's count to 0 and advance that channel's `lastReadAt` once the
+//     user has actually seen its latest posts.
+//
+// PER-CHANNEL STATE, ONE BADGE
+//   Unread state is tracked per channel (General / Product Help / Social Media
+//   Hub) because each channel owns its own NEW MESSAGES divider, initial
+//   scroll, and tab badge. The bottom-nav badge shows the COMBINED total, so a
+//   Product Help post still pulls the user into Juice Box.
+//
+//   Marking one channel read never touches another: markChannelRead zeroes
+//   only that channel locally, and the POST it sends upserts only that
+//   channel's (salesperson_id, channel) row server-side.
 //
 // SIGNED-OUT USERS
 //   For signed-out callers the provider is a no-op. The hook returns
@@ -47,35 +64,69 @@ import {
 //   `eligible` below is simply "do we have a session yet".
 
 type JuiceBoxUnreadContextValue = {
-  /** Latest known unread count. Defaults to 0 until the first fetch. */
+  /** COMBINED unread across every channel — what the nav badge shows.
+   *  Defaults to 0 until the first fetch. */
   unreadCount: number;
-  /** Server-confirmed last_read_at for the current user. null until known. */
-  lastReadAt: string | null;
+  /** Per-channel unread counts + read markers. Always has all three keys. */
+  channels: Record<JuiceBoxChannel, TeamMessageChannelUnread>;
   /** True once the bootstrap fetch resolves at least once; lets consumers
    *  avoid flashing "no unread" before the real number arrives. */
   loaded: boolean;
-  /** Marks everything up to now as read. Idempotent; safe to spam. */
-  markAllRead: () => Promise<void>;
+  /** Marks everything in ONE channel up to now as read. Idempotent; safe to
+   *  spam. Other channels are untouched. */
+  markChannelRead: (channel: JuiceBoxChannel) => Promise<void>;
 };
 
 const noop = async () => undefined;
 
 const Context = createContext<JuiceBoxUnreadContextValue>({
   unreadCount: 0,
-  lastReadAt: null,
+  channels: emptyChannelUnread(),
   loaded: false,
-  markAllRead: noop,
+  markChannelRead: noop,
 });
+
+/** Stable object for the signed-out case so consumers don't see a new
+ *  identity on every render. */
+const EMPTY_CHANNELS = emptyChannelUnread();
+
+/** Reads the per-channel block out of an /unread payload, tolerating a
+ *  response from an older deployment that has no `channels` key (in which
+ *  case its flat count/marker are attributed to General). */
+function channelsFromSummary(
+  summary: TeamMessageUnreadSummary,
+): Record<JuiceBoxChannel, TeamMessageChannelUnread> {
+  const next = emptyChannelUnread();
+  if (summary.channels) {
+    for (const key of Object.keys(next) as JuiceBoxChannel[]) {
+      const slice = summary.channels[key];
+      if (slice) {
+        next[key] = {
+          count: Number(slice.count) || 0,
+          last_read_at: slice.last_read_at ?? null,
+        };
+      }
+    }
+    return next;
+  }
+  next.general = {
+    count: Number(summary.count) || 0,
+    last_read_at: summary.last_read_at ?? null,
+  };
+  return next;
+}
 
 export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
   const { salesperson, loaded: salespersonLoaded } = useSalesperson();
   const userId = salesperson?.id ?? null;
   const eligible = userId !== null;
 
-  // Raw state — what the server told us. Derived display values below zero
-  // these out for ineligible users without needing to setState on transition.
-  const [rawUnreadCount, setRawUnreadCount] = useState(0);
-  const [rawLastReadAt, setRawLastReadAt] = useState<string | null>(null);
+  // Raw state — what the server told us, per channel. Derived display values
+  // below zero these out for ineligible users without needing to setState on
+  // transition.
+  const [rawChannels, setRawChannels] = useState<
+    Record<JuiceBoxChannel, TeamMessageChannelUnread>
+  >(() => emptyChannelUnread());
   const [bootstrapped, setBootstrapped] = useState(false);
 
   // Refs read from inside the realtime callback so it can stay defined
@@ -85,10 +136,12 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     userIdRef.current = userId;
   }, [userId]);
-  const lastReadAtRef = useRef<string | null>(null);
+  const channelsRef = useRef<Record<JuiceBoxChannel, TeamMessageChannelUnread>>(
+    emptyChannelUnread(),
+  );
   useEffect(() => {
-    lastReadAtRef.current = rawLastReadAt;
-  }, [rawLastReadAt]);
+    channelsRef.current = rawChannels;
+  }, [rawChannels]);
 
   // Bootstrap fetch: only runs for an eligible signed-in user. The early
   // returns intentionally do NOT setState — display values below derive
@@ -107,8 +160,7 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         if (!res.ok || !body || "error" in body) return;
         const summary = body as TeamMessageUnreadSummary;
-        setRawUnreadCount(summary.count);
-        setRawLastReadAt(summary.last_read_at);
+        setRawChannels(channelsFromSummary(summary));
       })
       .catch(() => {
         // Network errors fall through — badge stays at its prior value.
@@ -125,8 +177,8 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
   // Public values derive from raw state gated on eligibility — that way
   // becoming ineligible (sign-out, role change) flips the badge to 0
   // without an effect-driven reset.
-  const unreadCount = eligible ? rawUnreadCount : 0;
-  const lastReadAt = eligible ? rawLastReadAt : null;
+  const channels = eligible ? rawChannels : EMPTY_CHANNELS;
+  const unreadCount = eligible ? combinedUnreadCount(rawChannels) : 0;
   const loaded = !eligible ? salespersonLoaded : bootstrapped;
 
   // Realtime: keep the count current between bootstraps.
@@ -141,8 +193,7 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
             | TeamMessageUnreadSummary
             | null;
           if (cancelled || !res.ok || !body) return;
-          setRawUnreadCount(body.count);
-          setRawLastReadAt(body.last_read_at);
+          setRawChannels(channelsFromSummary(body));
         })
         .catch(() => undefined);
     };
@@ -156,11 +207,21 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
           const row = payload.new as TeamMessage;
           if (row.is_deleted) return;
           if (row.salesperson_id === userIdRef.current) return;
-          // Skip if the row predates the user's marker — possible only on
+          // Attribute the increment to the row's OWN channel — a Product Help
+          // post must not light up the General tab. A payload from before the
+          // channel column existed normalizes to General.
+          const rowChannel = normalizeChannel(row.channel);
+          // Skip if the row predates that channel's marker — possible only on
           // bizarre clock skew, but the guard makes the count truthful.
-          const marker = lastReadAtRef.current;
+          const marker = channelsRef.current[rowChannel]?.last_read_at ?? null;
           if (marker && row.created_at <= marker) return;
-          setRawUnreadCount((c) => c + 1);
+          setRawChannels((prev) => ({
+            ...prev,
+            [rowChannel]: {
+              count: (prev[rowChannel]?.count ?? 0) + 1,
+              last_read_at: prev[rowChannel]?.last_read_at ?? null,
+            },
+          }));
         },
       )
       .on(
@@ -211,12 +272,12 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
     }
   }, [eligible, unreadCount]);
 
-  // Reads current `unreadCount` inside markAllRead without forcing the
-  // callback identity to change every time the count moves.
-  const unreadCountRef = useRef(unreadCount);
+  // Reads current per-channel counts inside markChannelRead without forcing
+  // the callback identity to change every time a count moves.
+  const countsRef = useRef(channels);
   useEffect(() => {
-    unreadCountRef.current = unreadCount;
-  }, [unreadCount]);
+    countsRef.current = channels;
+  }, [channels]);
 
   // `bootstrapped` mirror — gates the unread-count short-circuit so the
   // very first markAllRead call after page open cannot be skipped just
@@ -226,34 +287,61 @@ export function JuiceBoxUnreadProvider({ children }: { children: ReactNode }) {
     bootstrappedRef.current = bootstrapped;
   }, [bootstrapped]);
 
-  const markAllRead = useCallback(async () => {
-    if (!eligible) return;
-    // Already empty — no point round-tripping. Only valid AFTER bootstrap
-    // has settled; before that, rawUnreadCount is the initial 0 default,
-    // which would silently swallow the first mark-read on a fresh open.
-    if (bootstrappedRef.current && unreadCountRef.current === 0) return;
-    // Optimistic: drop the badge immediately so the UI feels live.
-    setRawUnreadCount(0);
-    try {
-      const res = await apiFetch("/api/team-messages/reads/me", {
-        method: "POST",
-      });
-      if (!res.ok) return;
-      const body = (await res.json().catch(() => null)) as {
-        last_read_at?: string;
-      } | null;
-      if (body?.last_read_at) {
-        setRawLastReadAt(body.last_read_at);
+  const markChannelRead = useCallback(
+    async (channel: JuiceBoxChannel) => {
+      if (!eligible) return;
+      // Already empty — no point round-tripping. Only valid AFTER bootstrap
+      // has settled; before that, the count is the initial 0 default, which
+      // would silently swallow the first mark-read on a fresh open.
+      if (
+        bootstrappedRef.current &&
+        (countsRef.current[channel]?.count ?? 0) === 0
+      ) {
+        return;
       }
-    } catch {
-      // Network error: leave the optimistic 0 in place. The next bootstrap
-      // (e.g., next page load) will reconcile against the server.
-    }
-  }, [eligible]);
+      // Optimistic: drop THIS channel's badge immediately so the UI feels
+      // live. Other channels keep their counts.
+      setRawChannels((prev) => ({
+        ...prev,
+        [channel]: {
+          count: 0,
+          last_read_at: prev[channel]?.last_read_at ?? null,
+        },
+      }));
+      try {
+        const res = await apiFetch("/api/team-messages/reads/me", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel }),
+        });
+        if (!res.ok) return;
+        const body = (await res.json().catch(() => null)) as {
+          channel?: string;
+          last_read_at?: string;
+        } | null;
+        if (body?.last_read_at) {
+          // Trust the channel the SERVER says it stamped (it echoes it back),
+          // so a mismatched optimistic guess can't advance the wrong marker.
+          const stamped = normalizeChannel(body.channel ?? channel);
+          setRawChannels((prev) => ({
+            ...prev,
+            [stamped]: {
+              count: prev[stamped]?.count ?? 0,
+              last_read_at: body.last_read_at ?? null,
+            },
+          }));
+        }
+      } catch {
+        // Network error: leave the optimistic 0 in place. The next bootstrap
+        // (e.g., next page load) will reconcile against the server.
+      }
+    },
+    [eligible],
+  );
 
   return (
     <Context.Provider
-      value={{ unreadCount, lastReadAt, loaded, markAllRead }}
+      value={{ unreadCount, channels, loaded, markChannelRead }}
     >
       {children}
     </Context.Provider>

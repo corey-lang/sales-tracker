@@ -11,13 +11,22 @@ import {
 import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
 import { fanOutJuiceBoxPush } from "@/lib/server/push";
 import {
+  isMissingChannelsMigration,
+  migrationRequiredError,
+} from "@/lib/server/juice-box-migration";
+import {
+  channelLabel,
+  DEFAULT_JUICE_BOX_CHANNEL,
   FEED_PAGE_SIZE,
+  isJuiceBoxChannel,
   JUICE_BOX_MEDIA_BUCKET,
+  normalizeChannel,
   MAX_IMAGES_PER_POST,
   MESSAGE_MAX_LENGTH,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_REACTIONS_TABLE,
+  type JuiceBoxChannel,
   type TeamMessage,
   type TeamMessageAttachment,
   type TeamMessageReaction,
@@ -26,10 +35,24 @@ import {
 } from "@/lib/team-messages";
 
 // Juice Box live team feed — list + create.
-//   GET  /api/team-messages[?before=ISO&limit=N]
-//                              -> { messages: …[], hasMore: boolean }
+//   GET  /api/team-messages[?channel=ID&before=ISO&limit=N]
+//                              -> { channel, messages: …[], hasMore: boolean }
 //                                 oldest -> newest within the page
 //   POST /api/team-messages    -> { message: TeamMessage & { reactions: [] } }
+//
+// CHANNELS
+//   Every message carries a `channel` ("general" | "product_help" |
+//   "social_media_hub"). GET filters to exactly ONE channel — omitting the
+//   param means General, so a client bundle cached from before channels
+//   shipped keeps seeing the feed it always saw, while an UNKNOWN value is a
+//   400 rather than a silent fallback (a typo must never dump a Product Help
+//   question into General).
+//
+//   On POST the channel is server-owned in one specific way: for a REPLY the
+//   PARENT post's channel wins, because a reply living in a different channel
+//   from the post it quotes is a broken conversation. If the client names a
+//   channel that disagrees with the parent's, that is a 400 — loud, not
+//   silently rewritten — so a UI bug can't quietly scatter replies.
 //
 // PAGINATION
 //   The feed is paginated backwards. The initial load fetches the most
@@ -101,7 +124,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
+  "id, created_at, channel, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
 
 // One image attachment as posted by the client. `url` is the public URL
 // minted by /api/juice-box/media/sign-upload; dimensions are read off
@@ -121,6 +144,12 @@ const CreateMessageSchema = z
       .trim()
       .max(MESSAGE_MAX_LENGTH, `Keep posts under ${MESSAGE_MAX_LENGTH} characters.`),
     reply_to_message_id: z.uuid().optional(),
+    // Which channel to post in. Optional for back-compat with a cached
+    // client bundle that predates channels (→ General). An unrecognized
+    // value fails the enum and returns 400 — never normalized to General.
+    channel: z
+      .enum(["general", "product_help", "social_media_hub"])
+      .optional(),
     // Image attachments. One or many; each URL is independently
     // validated against the caller's signed-upload prefix below. Single
     // and multi-image posts share the same wire shape — the client
@@ -287,6 +316,15 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const beforeStr = url.searchParams.get("before");
     const limitStr = url.searchParams.get("limit");
+    const channelParam = url.searchParams.get("channel");
+
+    // Strict: a missing param means General (back-compat), a bogus one is a
+    // 400. Normalizing an unknown value here would show the caller General's
+    // posts while they believed they were reading another channel.
+    if (channelParam !== null && !isJuiceBoxChannel(channelParam)) {
+      throw badRequest("Unknown channel.");
+    }
+    const channel: JuiceBoxChannel = channelParam ?? DEFAULT_JUICE_BOX_CHANNEL;
 
     const parsedLimit = limitStr ? Number.parseInt(limitStr, 10) : NaN;
     const limit = Number.isFinite(parsedLimit)
@@ -301,6 +339,11 @@ export async function GET(req: Request) {
       .from(TEAM_MESSAGES_TABLE)
       .select(MESSAGE_COLUMNS)
       .eq("is_deleted", false)
+      // Channel filter is applied in the QUERY, not after the fact, so a page
+      // of `limit` rows is `limit` rows OF THIS CHANNEL — post-filtering would
+      // silently shrink pages and break the hasMore heuristic. Matches
+      // idx_team_messages_live_channel_created_at.
+      .eq("channel", channel)
       .order("created_at", { ascending: false })
       .limit(limit);
 
@@ -317,6 +360,10 @@ export async function GET(req: Request) {
       console.warn(
         `[team-messages] feed load failed caller=${me.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
       );
+      // ONE exception to the generic 500: the channels migration hasn't been
+      // applied to this database. Say so, so a local preview shows an
+      // actionable feed state instead of "Something went wrong."
+      if (isMissingChannelsMigration(res.error)) throw migrationRequiredError();
       throw new ApiError(500, "Couldn't load the feed.");
     }
 
@@ -356,6 +403,9 @@ export async function GET(req: Request) {
     }));
 
     return Response.json({
+      // Echoed so the client can assert the payload matches the tab it is
+      // rendering (a late response from a previous channel is discarded).
+      channel,
       messages: hydrated,
       // Heuristic — when a full page came back, assume there's another
       // older page behind it. The next call returns either more rows or
@@ -383,10 +433,15 @@ export async function POST(req: Request) {
       reply_to_message_preview: string;
     } | null = null;
 
+    // Effective channel. For a top-level post this is the validated request
+    // channel (or General when a pre-channels client omits it). For a REPLY it
+    // is overwritten below with the parent's channel.
+    let channel: JuiceBoxChannel = body.channel ?? DEFAULT_JUICE_BOX_CHANNEL;
+
     if (body.reply_to_message_id) {
       const parentRes = await supabase
         .from(TEAM_MESSAGES_TABLE)
-        .select("id, salesperson_name, message, is_deleted, media_type")
+        .select("id, channel, salesperson_name, message, is_deleted, media_type")
         .eq("id", body.reply_to_message_id)
         .maybeSingle();
 
@@ -405,10 +460,30 @@ export async function POST(req: Request) {
 
       const parent = parentRes.data as {
         id: string;
+        channel: string | null;
         salesperson_name: string;
         message: string;
         media_type: "image" | "gif" | null;
       };
+
+      // CROSS-CHANNEL REPLY GUARD.
+      //   The parent's channel is authoritative — a reply always lands where
+      //   the post it quotes lives, so a thread can never span channels and
+      //   the "jump to quoted post" affordance always finds its target in the
+      //   channel the reader is already in.
+      //
+      //   `normalizeChannel` covers a parent written before the channel
+      //   column existed (reads as General). A client that names a DIFFERENT
+      //   channel than the parent's is rejected rather than quietly rewritten:
+      //   that combination only happens when the UI is out of sync, and
+      //   failing loudly surfaces the bug instead of scattering replies.
+      const parentChannel = normalizeChannel(parent.channel);
+      if (body.channel && body.channel !== parentChannel) {
+        throw badRequest(
+          `That post lives in ${channelLabel(parentChannel)} — replies stay in the same channel.`,
+        );
+      }
+      channel = parentChannel;
 
       // If the parent had no text (media-only post), substitute a small
       // placeholder so the quoted block doesn't read as empty. Plain
@@ -540,6 +615,7 @@ export async function POST(req: Request) {
     }
 
     const insertPayload: {
+      channel: JuiceBoxChannel;
       salesperson_id: string;
       salesperson_name: string;
       message: string;
@@ -556,6 +632,7 @@ export async function POST(req: Request) {
       media_storage_path: string | null;
       media_attachments: TeamMessageAttachment[] | null;
     } = {
+      channel,
       salesperson_id: me.id,
       salesperson_name: me.first_name,
       message: body.message,
@@ -572,6 +649,38 @@ export async function POST(req: Request) {
       .insert(insertPayload)
       .select(MESSAGE_COLUMNS)
       .single();
+
+    // THE DATABASE HAS THE FINAL SAY ON A REPLY'S CHANNEL.
+    //   The parent lookup above and this INSERT are two separate statements, so
+    //   an admin's "Move conversation" can commit in between and the channel we
+    //   derived is then stale. A BEFORE INSERT trigger takes the conversation
+    //   root's row lock and re-reads the authoritative channel under it, so
+    //   that INSERT is refused (JB010) instead of splitting the thread — see
+    //   section 6 of supabase/juice_box_channels.sql. Nothing is written: the
+    //   trigger raises before the row exists.
+    //
+    //   Surfaced as 409 with an actionable message; the client reloads the feed
+    //   and the reply lands in the conversation's new home.
+    if (res.error?.code === "JB010") {
+      console.warn(
+        `[team-messages] reply rejected: conversation moved caller=${me.id} parent=${body.reply_to_message_id ?? "?"} attempted_channel=${channel}`,
+      );
+      throw new ApiError(
+        409,
+        "That conversation moved to another channel while you were writing. Reload and post your reply again.",
+      );
+    }
+    // JB011: the parent or root vanished mid-flight. JB013: the deferred
+    // reply/root consistency check. Both mean "the thing you replied to is not
+    // in the state you saw it in".
+    if (res.error?.code === "JB011" || res.error?.code === "JB013") {
+      console.warn(
+        `[team-messages] reply rejected: thread state changed caller=${me.id} code=${res.error.code} msg=${res.error.message}`,
+      );
+      throw badRequest(
+        "The post you tried to reply to is no longer available.",
+      );
+    }
 
     if (res.error || !res.data) {
       // Don't surface the raw provider error to the caller. Logged
@@ -660,8 +769,14 @@ export async function POST(req: Request) {
           //   Elevate App
           //   Ryan posted in Juice Box
           title: "Elevate App",
-          body: `${senderName} posted in Juice Box`,
-          url: "/juice-box",
+          // Name the CHANNEL so a recipient can tell a Product Help question
+          // from a Social Media Hub idea without opening the app.
+          body: `${senderName} posted in ${channelLabel(channel)}`,
+          // Deep link carries the channel so the tap opens the right tab. The
+          // service worker matches an open window by PATHNAME and otherwise
+          // navigates it to this URL, so the query string switches channels on
+          // an already-open Juice Box instead of being ignored.
+          url: `/juice-box?channel=${channel}`,
         },
       });
     } catch (err: unknown) {

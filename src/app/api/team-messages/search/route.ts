@@ -7,18 +7,37 @@ import {
   handleApiError,
   requireSalesperson,
 } from "@/lib/server/auth";
-import { TEAM_MESSAGES_TABLE, type TeamMessage } from "@/lib/team-messages";
+import {
+  isJuiceBoxChannel,
+  TEAM_MESSAGES_TABLE,
+  type TeamMessage,
+} from "@/lib/team-messages";
+
+// Juice Box search.
+//   GET /api/team-messages/search?q=…[&channel=ID&…filters]
+//
+// CHANNEL BEHAVIOUR
+//   Search spans ALL channels by default — "where did someone say that?" is
+//   rarely a per-channel question, and every result carries its own `channel`
+//   so the UI can label it and switch tabs before jumping to it. Pass
+//   `channel=ID` to scope the search to one channel; an unknown value is a 400
+//   (never silently widened to everything).
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
+  "id, created_at, channel, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
 
 const SEARCH_LIMIT_DEFAULT = 30;
 
 const QuerySchema = z.object({
   q: z.string().trim().max(80).optional(),
+  // Optional single-channel scope. Omitted = search every channel.
+  channel: z
+    .string()
+    .refine(isJuiceBoxChannel, "Unknown channel.")
+    .optional(),
   // Supabase returns timestamptz values with offsets (for example +00:00),
   // so Date.parse validation is safer than strict Zod datetime() defaults.
   before: z
@@ -63,6 +82,7 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const parsed = QuerySchema.safeParse({
       q: url.searchParams.get("q") ?? undefined,
+      channel: url.searchParams.get("channel") ?? undefined,
       before: url.searchParams.get("before") ?? undefined,
       limit: url.searchParams.get("limit") ?? undefined,
       peopleOnly: url.searchParams.get("peopleOnly") ?? undefined,
@@ -85,6 +105,10 @@ export async function GET(req: Request) {
       .eq("is_deleted", false)
       .order("created_at", { ascending: false })
       .limit(limit);
+
+    if (parsed.data.channel) {
+      query = query.eq("channel", parsed.data.channel);
+    }
 
     if (parsed.data.before) {
       query = query.lt("created_at", parsed.data.before);

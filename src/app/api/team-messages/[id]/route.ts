@@ -18,7 +18,7 @@ import { TEAM_MESSAGES_TABLE, type TeamMessage } from "@/lib/team-messages";
 export const runtime = "nodejs";
 
 const MESSAGE_COLUMNS =
-  "id, created_at, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
+  "id, created_at, channel, salesperson_id, salesperson_name, message, is_deleted, reply_to_message_id, reply_to_salesperson_name, reply_to_message_preview, media_type, media_url, media_thumb_url, media_width, media_height, media_alt, media_provider, media_attachments";
 
 export async function DELETE(
   req: Request,

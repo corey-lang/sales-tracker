@@ -1,5 +1,7 @@
 import {
+  DEFAULT_JUICE_BOX_CHANNEL,
   FEED_PAGE_SIZE,
+  type JuiceBoxChannel,
   type TeamMessage,
   type TeamMessageReaction,
 } from "@/lib/team-messages";
@@ -12,8 +14,10 @@ import {
 //   the first frame, then the background fetch refreshes server-truth.
 //
 // SCOPE
-//   * Per-signed-in-salesperson — the key includes salesperson_id so
-//     different users on the same device don't share state.
+//   * Per-signed-in-salesperson AND per-channel — the key includes both the
+//     salesperson_id and the channel id, so different users on the same device
+//     never share state and switching channels can't paint the previous
+//     channel's posts. There is no unscoped fallback key.
 //   * Most-recent FEED_PAGE_SIZE messages (~50) only. Anything Load-Older
 //     surfaced is intentionally NOT persisted; cache is for the first
 //     view, not the entire scroll history.
@@ -44,6 +48,10 @@ export type CachedFeed = {
   /** Pins the cache to a specific signed-in user. Guards against a
    *  shared device showing the wrong user's content. */
   salespersonId: string;
+  /** Pins the cache to one channel. Belt-and-braces next to the per-channel
+   *  key: a blob that somehow lands under the wrong key is discarded rather
+   *  than rendered in the wrong tab. */
+  channel: JuiceBoxChannel;
   /** Mirrors the server's `hasMore` so the "Load older posts" button
    *  is correct at first paint. */
   hasMore: boolean;
@@ -62,8 +70,12 @@ const CACHE_KEY_PREFIX = "juice-box:feed:";
  *     v1 blobs don't carry the field — the rendering helper
  *     (teamMessageMediaList) treats missing as null so rendering is
  *     fine, but bumping is the conservative choice.
+ * v3: channels. Messages gained `channel` and the key gained a channel
+ *     segment. A v2 blob has neither, so bumping (rather than migrating it
+ *     into General) keeps the invalidation trivial — the next fetch repaints
+ *     within a few hundred ms.
  */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 /**
  * Cache TTL. 12 hours hits the spec target — long enough that returning
@@ -72,17 +84,29 @@ const CACHE_VERSION = 2;
  */
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
-function cacheKey(salespersonId: string): string {
+function cacheKey(salespersonId: string, channel: JuiceBoxChannel): string {
+  return `${CACHE_KEY_PREFIX}${salespersonId}:${channel}`;
+}
+
+/** The pre-channels key shape (`juice-box:feed:<id>`). Its v2 blobs can never
+ *  be read again after the version bump, so the General read path deletes it
+ *  once to reclaim the quota instead of leaving it to rot. */
+function legacyCacheKey(salespersonId: string): string {
   return `${CACHE_KEY_PREFIX}${salespersonId}`;
 }
 
-function isCachedFeed(x: unknown, salespersonId: string): x is CachedFeed {
+function isCachedFeed(
+  x: unknown,
+  salespersonId: string,
+  channel: JuiceBoxChannel,
+): x is CachedFeed {
   if (typeof x !== "object" || x === null) return false;
   const o = x as Record<string, unknown>;
   return (
     o.version === CACHE_VERSION &&
     typeof o.cachedAt === "number" &&
     o.salespersonId === salespersonId &&
+    o.channel === channel &&
     typeof o.hasMore === "boolean" &&
     Array.isArray(o.messages)
   );
@@ -97,10 +121,20 @@ function isCachedFeed(x: unknown, salespersonId: string): x is CachedFeed {
  * Side effect: invalid / expired blobs are removed on read so they
  * don't pile up in storage.
  */
-export function readCachedFeed(salespersonId: string): CachedFeed | null {
+export function readCachedFeed(
+  salespersonId: string,
+  channel: JuiceBoxChannel = DEFAULT_JUICE_BOX_CHANNEL,
+): CachedFeed | null {
   if (typeof window === "undefined") return null;
   if (!salespersonId) return null;
-  const key = cacheKey(salespersonId);
+  const key = cacheKey(salespersonId, channel);
+
+  // One-time cleanup of the pre-channels blob. Only attempted on the General
+  // read (the channel that key used to represent) so it runs once per open,
+  // not three times.
+  if (channel === DEFAULT_JUICE_BOX_CHANNEL) {
+    safeRemove(legacyCacheKey(salespersonId));
+  }
 
   let raw: string | null = null;
   try {
@@ -119,7 +153,7 @@ export function readCachedFeed(salespersonId: string): CachedFeed | null {
     safeRemove(key);
     return null;
   }
-  if (!isCachedFeed(parsed, salespersonId)) {
+  if (!isCachedFeed(parsed, salespersonId, channel)) {
     safeRemove(key);
     return null;
   }
@@ -140,6 +174,7 @@ export function readCachedFeed(salespersonId: string): CachedFeed | null {
  */
 export function writeCachedFeed(
   salespersonId: string,
+  channel: JuiceBoxChannel,
   messages: CachedFeedMessage[],
   hasMore: boolean,
 ): void {
@@ -155,21 +190,29 @@ export function writeCachedFeed(
     version: CACHE_VERSION,
     cachedAt: Date.now(),
     salespersonId,
+    channel,
     hasMore,
     messages: trimmed,
   };
   try {
-    window.localStorage.setItem(cacheKey(salespersonId), JSON.stringify(payload));
+    window.localStorage.setItem(
+      cacheKey(salespersonId, channel),
+      JSON.stringify(payload),
+    );
   } catch {
     // Quota / disabled — cache is an optimization, not a requirement.
   }
 }
 
-/** Best-effort cache removal — used on sign-out flows if/when wired. */
-export function clearCachedFeed(salespersonId: string): void {
+/** Best-effort cache removal for one channel — used on sign-out flows if/when
+ *  wired. Pass no channel to clear General. */
+export function clearCachedFeed(
+  salespersonId: string,
+  channel: JuiceBoxChannel = DEFAULT_JUICE_BOX_CHANNEL,
+): void {
   if (typeof window === "undefined") return;
   if (!salespersonId) return;
-  safeRemove(cacheKey(salespersonId));
+  safeRemove(cacheKey(salespersonId, channel));
 }
 
 function safeRemove(key: string): void {

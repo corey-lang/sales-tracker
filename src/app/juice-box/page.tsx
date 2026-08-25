@@ -20,6 +20,7 @@ import {
   Download,
   ImagePlus,
   Loader2,
+  FolderInput,
   MoreVertical,
   Search,
   Send,
@@ -31,6 +32,17 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
+import { parseJuiceBoxDeepLink } from "@/lib/juice-box-deep-link";
+import {
+  classifyRealtimeUpdate,
+  collectLoadedThread,
+  createReconcileScheduler,
+  type ReconcileScheduler,
+} from "@/lib/juice-box-realtime";
+import {
+  dividerIndexFor,
+  initialLandingTarget,
+} from "@/lib/juice-box-unread";
 import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
 import { cn } from "@/lib/utils";
@@ -38,18 +50,25 @@ import { BottomNav } from "@/components/bottom-nav";
 import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 import {
   ALLOWED_REACTIONS,
+  channelLabel,
+  DEFAULT_JUICE_BOX_CHANNEL,
   FEED_PAGE_SIZE,
+  isJuiceBoxChannel,
+  JUICE_BOX_CHANNELS,
   JUICE_BOX_MEDIA_BUCKET,
   MAX_IMAGES_PER_POST,
   MEDIA_ALLOWED_IMAGE_MIME_TYPES,
   MEDIA_MAX_FILE_SIZE_BYTES,
   MESSAGE_MAX_LENGTH,
+  normalizeChannel,
   REPLY_PREVIEW_MAX_LENGTH,
   TEAM_MESSAGES_CHANNEL,
   TEAM_MESSAGES_TABLE,
   TEAM_MESSAGE_REACTIONS_CHANNEL,
   TEAM_MESSAGE_REACTIONS_TABLE,
   teamMessageMediaList,
+  type JuiceBoxChannel,
+  type MoveConversationResult,
   type ReactionEmoji,
   type TeamMessage,
   type TeamMessageMedia,
@@ -107,24 +126,14 @@ const DIVIDER_GRACE_MS = 6000;
 const DIVIDER_FADE_DURATION_MS = 1000;
 
 /**
- * True when ISO timestamp `iso` is strictly NEWER than `thanIso`, compared
- * NUMERICALLY (Date.parse) rather than lexicographically. This is robust to
- * format differences between the server-issued read marker (always `…Z`, ms
- * precision) and Postgres `timestamptz` serialization (which can use a `+00:00`
- * offset and/or microseconds) — a raw string `>` could otherwise mis-order
- * equal instants across those formats.
- *
- * Fails SAFE: any unparseable value returns false. A malformed MESSAGE
- * timestamp is therefore never treated as "after the read marker" (never
- * falsely shown as unread), and a malformed MARKER treats nothing as after it
- * (→ no bogus unread block, the feed reads as caught-up).
+ * How long to wait after the FIRST channel-changing realtime event before
+ * refetching the channel. A move UPDATEs every message in a thread and those
+ * events arrive in an arbitrary order, so the window collapses the whole burst
+ * into one authoritative fetch. Long enough to swallow a large thread's events,
+ * short enough that the feed self-corrects while the reader is still looking at
+ * it.
  */
-function isNewerThan(iso: string, thanIso: string): boolean {
-  const a = Date.parse(iso);
-  const b = Date.parse(thanIso);
-  if (Number.isNaN(a) || Number.isNaN(b)) return false;
-  return a > b;
-}
+const RECONCILE_DEBOUNCE_MS = 400;
 
 // ───────────────────────── Feed scroll model ─────────────────────────────
 //
@@ -652,6 +661,116 @@ export default function JuiceBoxPage() {
   const router = useRouter();
   const { salesperson, loaded } = useSalesperson();
   const [searchOpen, setSearchOpen] = useState(false);
+  const { channels: channelUnread } = useJuiceBoxUnread();
+
+  // Which channel is on screen. Seeded from the URL so a push notification
+  // ("Ryan posted in Product Help" → /juice-box?channel=product_help) and any
+  // shared deep link open the right tab.
+  //
+  // Read from window.location rather than useSearchParams(): this page is a
+  // client component with no server data needs, and useSearchParams() would
+  // opt the whole route out of static prerendering (or demand a Suspense
+  // boundary) for a value we only need once, on the client. The
+  // `typeof window` guard keeps the initializer SSR/prerender-safe.
+  const [deepLink] = useState(() => readDeepLink());
+  const [activeChannel, setActiveChannel] = useState<JuiceBoxChannel>(
+    () => deepLink.channel ?? DEFAULT_JUICE_BOX_CHANNEL,
+  );
+
+  // A `?message=<id>` deep link (or a cross-channel search hit) hands the feed
+  // a one-shot jump target. Held per channel switch — see JuiceBoxFeed's
+  // `initialJumpMessageId`.
+  const [pendingJump, setPendingJump] = useState<{
+    channel: JuiceBoxChannel;
+    messageId: string;
+  } | null>(() =>
+    deepLink.messageId && deepLink.channel
+      ? { channel: deepLink.channel, messageId: deepLink.messageId }
+      : null,
+  );
+
+  // BARE `?message=<id>` LINK — the id is known, the channel is not.
+  //
+  // Mounting a feed now would mean guessing General and paging back through
+  // General's history for a post that may live in Product Help or Social Media
+  // Hub, which can never succeed. So the feed is held back (a brief "Finding
+  // that message…") while we ask the server, through the session, which
+  // channel the message is in. Nothing is mounted for the wrong channel, so
+  // there is no flash of General and no wasted pagination.
+  const [resolvingChannel, setResolvingChannel] = useState(
+    () => deepLink.needsChannelLookup,
+  );
+
+  useEffect(() => {
+    if (!deepLink.needsChannelLookup || !deepLink.messageId) return;
+    const messageId = deepLink.messageId;
+    let cancelled = false;
+
+    // Runs exactly once per mount (deepLink is captured at mount), so a failed
+    // lookup falls back to General and STAYS there — no retry, no loop.
+    void (async () => {
+      let resolved: JuiceBoxChannel | null = null;
+      try {
+        const res = await apiFetch(
+          `/api/team-messages/${encodeURIComponent(messageId)}/channel`,
+        );
+        if (res.ok) {
+          const body = (await res.json().catch(() => null)) as {
+            channel?: unknown;
+          } | null;
+          // Only a recognized id is honoured — a legacy null (or anything
+          // unexpected) normalizes to General, exactly like a feed row.
+          if (body && isJuiceBoxChannel(body.channel)) {
+            resolved = body.channel;
+          } else if (body && "channel" in body) {
+            resolved = DEFAULT_JUICE_BOX_CHANNEL;
+          }
+        }
+        // Any non-OK status — 404 (deleted / never existed), 400 (malformed
+        // id), 401 (session expired), 500 — leaves `resolved` null and lands
+        // the user in General with no jump pending.
+      } catch {
+        // Network failure: same safe fallback.
+      }
+      if (cancelled) return;
+      if (resolved) {
+        setActiveChannel(resolved);
+        setPendingJump({ channel: resolved, messageId });
+      }
+      setResolvingChannel(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deepLink]);
+
+  const handleChannelChange = useCallback((next: JuiceBoxChannel) => {
+    // Two independent updates rather than one nested inside the other's
+    // updater — an updater must stay pure (React re-invokes it in dev).
+    setActiveChannel((prev) => (prev === next ? prev : next));
+    // Changing tabs by hand abandons any pending jump target.
+    setPendingJump(null);
+  }, []);
+
+  /**
+   * Search selected a result. Results span every channel, so switch tabs
+   * first when the hit lives elsewhere and hand the feed the jump target;
+   * the feed remounts for the new channel and runs its own
+   * load-older-until-found routine. A same-channel hit skips the remount and
+   * jumps in place (the existing behaviour).
+   */
+  const handleSearchSelection = useCallback(
+    (messageId: string, channel: JuiceBoxChannel) => {
+      if (channel === activeChannel) return false;
+      setPendingJump({ channel, messageId });
+      setActiveChannel(channel);
+      return true;
+    },
+    [activeChannel],
+  );
+
+  const clearPendingJump = useCallback(() => setPendingJump(null), []);
   // useScrollToTop is intentionally NOT called here. The feed's own scroll
   // effect lands the viewport on the most recent post once initial data
   // resolves — see FeedList. Calling useScrollToTop would race with that.
@@ -711,6 +830,14 @@ export default function JuiceBoxPage() {
             <p className="text-sm text-muted-foreground">Live team feed</p>
             <LiveBadge />
           </div>
+          {/* Channel selector. Lives INSIDE the sticky header so it stays
+              reachable while the feed scrolls — same behaviour the title
+              already had, no new sticky layer or z-index to reason about. */}
+          <ChannelTabs
+            active={activeChannel}
+            unread={channelUnread}
+            onChange={handleChannelChange}
+          />
           <div
             className="absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center gap-1"
             style={{ top: "calc(50% + env(safe-area-inset-top) / 2)" }}
@@ -740,16 +867,123 @@ export default function JuiceBoxPage() {
           </div>
         </header>
 
+        {/* Bare `?message=` link: hold the feed until the lookup answers, so
+            nothing mounts (or pages) for a channel the target isn't in. */}
+        {resolvingChannel ? (
+          <Card>
+            <CardContent className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+              <Loader2 aria-hidden="true" className="size-4 animate-spin" />
+              Finding that message…
+            </CardContent>
+          </Card>
+        ) : (
+        <>
+        {/*
+          `key={activeChannel}` REMOUNTS the feed on every channel switch.
+          That is deliberate and load-bearing: each channel then gets its own
+          message list, reactions map, pagination cursor, cache entry, NEW
+          MESSAGES divider anchor, and one-shot initial-landing scroll, with no
+          cross-channel leakage and no per-piece reset logic to keep in sync.
+          The localStorage cache makes the remount paint instantly.
+        */}
         <JuiceBoxFeed
+          key={activeChannel}
+          channel={activeChannel}
           currentUserId={salesperson.id}
           currentUserName={salesperson.first_name}
           isAdmin={salesperson.role === "admin"}
           searchOpen={searchOpen}
           onSearchOpenChange={setSearchOpen}
+          initialJumpMessageId={
+            pendingJump?.channel === activeChannel
+              ? pendingJump.messageId
+              : null
+          }
+          onInitialJumpHandled={clearPendingJump}
+          onSelectOtherChannel={handleSearchSelection}
         />
+        </>
+        )}
       </main>
       <BottomNav salesperson={salesperson} />
     </>
+  );
+}
+
+/**
+ * Reads `?channel=` / `?message=` off the current URL exactly once, on the
+ * client. Parsing (and the "bare message id needs a lookup" rule) lives in
+ * src/lib/juice-box-deep-link.ts so it can be unit-tested; this wrapper only
+ * supplies the URL and keeps the initializer SSR/prerender-safe.
+ */
+function readDeepLink() {
+  if (typeof window === "undefined") {
+    return parseJuiceBoxDeepLink("");
+  }
+  return parseJuiceBoxDeepLink(window.location.search);
+}
+
+/**
+ * The three channel pills under the header.
+ *
+ * Orange (the app's primary) marks the selected channel; unselected pills sit
+ * on the neutral muted surface. The row is a single horizontal scroller
+ * (`overflow-x-auto` + `shrink-0` pills + hidden scrollbar) so three labels
+ * can never wrap or widen the page on a narrow phone — the page itself never
+ * scrolls sideways. Centered from `sm` up, where they always fit.
+ *
+ * Each pill carries its OWN unread count. The nav badge stays the combined
+ * total, so nothing here changes what the bottom nav shows.
+ */
+function ChannelTabs({
+  active,
+  unread,
+  onChange,
+}: {
+  active: JuiceBoxChannel;
+  unread: Record<JuiceBoxChannel, { count: number }>;
+  onChange: (next: JuiceBoxChannel) => void;
+}) {
+  return (
+    <nav
+      aria-label="Juice Box channels"
+      className="-mx-1 mt-2 flex gap-1.5 overflow-x-auto px-1 pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] sm:justify-center [&::-webkit-scrollbar]:hidden"
+    >
+      {JUICE_BOX_CHANNELS.map((c) => {
+        const isActive = c.id === active;
+        const count = unread[c.id]?.count ?? 0;
+        return (
+          <button
+            key={c.id}
+            type="button"
+            onClick={() => onChange(c.id)}
+            title={c.blurb}
+            aria-current={isActive ? "page" : undefined}
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+              isActive
+                ? "bg-primary text-primary-foreground shadow-sm shadow-primary/25"
+                : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {c.label}
+            {count > 0 && (
+              <span
+                aria-label={`${count} unread`}
+                className={cn(
+                  "inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold leading-4",
+                  isActive
+                    ? "bg-primary-foreground/25 text-primary-foreground"
+                    : "bg-primary text-primary-foreground",
+                )}
+              >
+                {count > 99 ? "99+" : count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -776,12 +1010,20 @@ type FeedState =
   | { kind: "ready"; messages: TeamMessage[] };
 
 function JuiceBoxFeed({
+  channel,
   currentUserId,
   currentUserName,
   isAdmin,
   searchOpen,
   onSearchOpenChange,
+  initialJumpMessageId,
+  onInitialJumpHandled,
+  onSelectOtherChannel,
 }: {
+  /** The channel this feed instance renders. The component is keyed by it
+   *  upstream, so it never changes for a given mount — every piece of state
+   *  below is therefore per-channel by construction. */
+  channel: JuiceBoxChannel;
   currentUserId: string;
   /** The current user's first_name. Passed through to optimistic reaction
    *  applies so the local reactors map carries the right display name
@@ -790,6 +1032,18 @@ function JuiceBoxFeed({
   isAdmin: boolean;
   searchOpen: boolean;
   onSearchOpenChange: (next: boolean) => void;
+  /** One-shot jump target for this mount — set when a deep link or a
+   *  cross-channel search hit landed us here. Suppresses the normal initial
+   *  landing so the two don't fight over the scroll position. */
+  initialJumpMessageId: string | null;
+  /** Fired once the jump has been attempted, so the parent can drop it. */
+  onInitialJumpHandled: () => void;
+  /** Search picked a result in ANOTHER channel. Returns true when the parent
+   *  took over (switching tabs + remounting this feed). */
+  onSelectOtherChannel: (
+    messageId: string,
+    channel: JuiceBoxChannel,
+  ) => boolean;
 }) {
   // Local cache read once at mount. Subsequent state initializers below
   // pull from this single shared object so we don't hit localStorage
@@ -800,7 +1054,7 @@ function JuiceBoxFeed({
   // The seed is wrapped in useState so React holds onto it for the
   // mount's lifetime — useState's lazy initializer runs exactly once.
   const [cachedSeed] = useState<{ cached: ReturnType<typeof readCachedFeed> }>(
-    () => ({ cached: readCachedFeed(currentUserId) }),
+    () => ({ cached: readCachedFeed(currentUserId, channel) }),
   );
   const cached = cachedSeed.cached;
 
@@ -833,16 +1087,22 @@ function JuiceBoxFeed({
   // every visible message the divider disappears on the next render. Earlier
   // versions froze a divider anchor for the page lifetime, which kept stale
   // "New messages" markers visible after the user had already caught up.
-  const {
-    lastReadAt,
-    loaded: unreadLoaded,
-    markAllRead,
-  } = useJuiceBoxUnread();
+  const { channels: channelUnread, loaded: unreadLoaded, markChannelRead } =
+    useJuiceBoxUnread();
+  // THIS channel's marker only. Product Help's marker can never position
+  // General's divider (and vice versa).
+  const lastReadAt = channelUnread[channel]?.last_read_at ?? null;
+
+  // Marks only this channel read — other channels keep their badges.
+  const markThisChannelRead = useCallback(
+    () => markChannelRead(channel),
+    [markChannelRead, channel],
+  );
 
   // Debounced mark-read — collapses bursts (e.g., the initial scroll snap
   // plus an inbound realtime message hitting within the same second) into
   // one POST. 600ms feels snappy without spamming the API.
-  const markAllReadDebounced = useDebouncedCallback(markAllRead, 600);
+  const markAllReadDebounced = useDebouncedCallback(markThisChannelRead, 600);
 
   // One-shot signal flipped on by handleSelfPosted and consumed by the
   // FeedList scroll effect. When the local user pressed Post (vs. a
@@ -855,7 +1115,15 @@ function JuiceBoxFeed({
   // Merges an incoming message into the visible feed. Used by both the
   // optimistic post path and the realtime INSERT handler — id-dedup keeps
   // the two from doubling up.
-  const upsertMessage = useCallback((incoming: TeamMessage) => {
+  const upsertMessage = useCallback(
+    (incoming: TeamMessage) => {
+    // Channel guard. Realtime delivers every channel's inserts to every
+    // client, and an optimistic post could in principle arrive after a tab
+    // switch — either way a row from another channel must never enter this
+    // list. `normalizeChannel` treats a pre-channels row as General.
+    if (normalizeChannel(incoming.channel) !== channel) return;
+    // Belt and braces against a delayed pre-move payload.
+    if (movedAwayRef.current.has(incoming.id)) return;
     setState((prev) => {
       if (prev.kind !== "ready") return prev;
       if (incoming.is_deleted) {
@@ -876,7 +1144,9 @@ function JuiceBoxFeed({
       next.sort((a, b) => a.created_at.localeCompare(b.created_at));
       return { kind: "ready", messages: next };
     });
-  }, []);
+    },
+    [channel],
+  );
 
   const handleSelfPosted = useCallback(
     (m: TeamMessage) => {
@@ -938,6 +1208,15 @@ function JuiceBoxFeed({
   // on mobile once the user scrolled away from the top of the feed.
   const [replyTo, setReplyTo] = useState<TeamMessage | null>(null);
   const clearReply = useCallback(() => setReplyTo(null), []);
+
+  /** The card an admin picked "Move conversation" on; null when closed. */
+  const [moveTarget, setMoveTarget] = useState<TeamMessage | null>(null);
+  /** Quiet, self-dismissing banner shown when a conversation leaves this
+   *  channel — so the reader understands why something vanished. */
+  const [movedNotice, setMovedNotice] = useState<{
+    toChannel: JuiceBoxChannel;
+    at: number;
+  } | null>(null);
 
   // Reaction detail popover state — keyed by (messageId, emoji). Tapping
   // an existing chip opens a small sheet listing the reactor names; null
@@ -1027,14 +1306,22 @@ function JuiceBoxFeed({
   // open is also instant.
   useEffect(() => {
     let cancelled = false;
-    apiFetch(`/api/team-messages?limit=${FEED_PAGE_SIZE}`)
+    apiFetch(
+      `/api/team-messages?channel=${channel}&limit=${FEED_PAGE_SIZE}`,
+    )
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as {
+          channel?: string;
           messages?: CachedFeedMessage[];
           hasMore?: boolean;
           error?: string;
         } | null;
         if (cancelled) return;
+        // The route echoes the channel it served. Discard a payload for a
+        // different one rather than painting another tab's posts (belt and
+        // braces — the component is keyed by channel, so this shouldn't
+        // happen).
+        if (res.ok && body?.channel && body.channel !== channel) return;
         if (!res.ok) {
           if (!cached) {
             setState({
@@ -1045,7 +1332,11 @@ function JuiceBoxFeed({
           // Cached path → swallow; the visible feed stays usable.
           return;
         }
-        const hydrated = body?.messages ?? [];
+        // A response that was already in flight when a move landed must not
+        // re-add the departed conversation.
+        const hydrated = (body?.messages ?? []).filter(
+          (m) => !movedAwayRef.current.has(m.id),
+        );
         const freshHasMore = body?.hasMore === true;
         // Peel reactions off the wire payload so message state stays a
         // clean TeamMessage[] (matching the realtime row shape).
@@ -1057,7 +1348,7 @@ function JuiceBoxFeed({
 
         // Persist this snapshot for the next open. Trimmed inside
         // writeCachedFeed if larger than FEED_PAGE_SIZE.
-        writeCachedFeed(currentUserId, hydrated, freshHasMore);
+        writeCachedFeed(currentUserId, channel, hydrated, freshHasMore);
 
         // Merge into existing state (no-op when state is "loading"; a
         // real merge when we hydrated from cache + maybe accumulated
@@ -1106,7 +1397,21 @@ function JuiceBoxFeed({
     // `cached` is stable across renders (useState lazy initializer
     // runs once on mount), so including it doesn't widen the effect's
     // re-run cadence — it just satisfies react-hooks/exhaustive-deps.
-  }, [currentUserId, cached]);
+    // `channel` is fixed for the lifetime of this mount (keyed upstream).
+  }, [currentUserId, cached, channel]);
+
+  // Ids currently rendered. Lets the realtime handler distinguish "an edit to
+  // something on screen" (apply it) from "a row arriving from another channel"
+  // (reconcile instead of rendering a possibly-parentless reply).
+  const loadedIdsRef = useRef<Set<string>>(new Set());
+  /** The loaded messages themselves, for resolving a thread's full descendant
+   *  set OUTSIDE a setState updater (updaters must stay pure). */
+  const loadedMessagesRef = useRef<TeamMessage[]>([]);
+  useEffect(() => {
+    const messages = state.kind === "ready" ? state.messages : [];
+    loadedIdsRef.current = new Set(messages.map((m) => m.id));
+    loadedMessagesRef.current = messages;
+  }, [state]);
 
   // Mirror the latest state into refs so the visibilitychange handler
   // can read them without re-binding (the listener is bound once for
@@ -1137,6 +1442,7 @@ function JuiceBoxFeed({
       if (snap.messages.length === 0) return;
       writeCachedFeed(
         currentUserId,
+        channel,
         snapshotForCache(snap.messages, snap.reactions),
         snap.hasMore,
       );
@@ -1144,7 +1450,7 @@ function JuiceBoxFeed({
     document.addEventListener("visibilitychange", onVisibility);
     return () =>
       document.removeEventListener("visibilitychange", onVisibility);
-  }, [currentUserId]);
+  }, [currentUserId, channel]);
 
   /**
    * Prepend an older page of messages. Triggered by the "Load older posts"
@@ -1179,7 +1485,7 @@ function JuiceBoxFeed({
     try {
       const beforeParam = encodeURIComponent(topMessage.created_at);
       const res = await apiFetch(
-        `/api/team-messages?before=${beforeParam}&limit=${FEED_PAGE_SIZE}`,
+        `/api/team-messages?channel=${channel}&before=${beforeParam}&limit=${FEED_PAGE_SIZE}`,
       );
       const body = (await res.json().catch(() => null)) as {
         messages?: (TeamMessage & { reactions?: TeamMessageReaction[] })[];
@@ -1203,7 +1509,14 @@ function JuiceBoxFeed({
       });
 
       const seen = new Set(snapshot.messages.map((m) => m.id));
-      const older = olderRaw.filter((m) => !seen.has(m.id));
+      const older = olderRaw.filter(
+        (m) =>
+          !seen.has(m.id) &&
+          normalizeChannel(m.channel) === channel &&
+          // Same guard as the bootstrap merge: a page fetched before a move
+          // cannot bring the moved conversation back.
+          !movedAwayRef.current.has(m.id),
+      );
 
       if (olderRaw.length === 0) {
         setHasMore(false);
@@ -1248,40 +1561,8 @@ function JuiceBoxFeed({
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, []);
+  }, [channel]);
 
-  // Realtime subscription — team_messages. One channel per page mount;
-  // cleaned up on unmount so navigating away closes the websocket cleanly.
-  useEffect(() => {
-    const channel = supabase
-      .channel(TEAM_MESSAGES_CHANNEL)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: TEAM_MESSAGES_TABLE },
-        (payload) => {
-          const row = payload.new as TeamMessage;
-          if (row.is_deleted) return;
-          upsertMessage(row);
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: TEAM_MESSAGES_TABLE },
-        (payload) => {
-          const row = payload.new as TeamMessage;
-          if (row.is_deleted) {
-            removeMessage(row.id);
-            return;
-          }
-          upsertMessage(row);
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [upsertMessage, removeMessage]);
 
   // Realtime subscription — team_message_reactions. Independent channel so
   // it can mount/unmount alongside the messages channel without interference.
@@ -1290,7 +1571,7 @@ function JuiceBoxFeed({
   // can apply the (remove old emoji, add new emoji) delta on a switch
   // without a refetch.
   useEffect(() => {
-    const channel = supabase
+    const reactionsRt = supabase
       .channel(TEAM_MESSAGE_REACTIONS_CHANNEL)
       .on(
         "postgres_changes",
@@ -1381,9 +1662,16 @@ function JuiceBoxFeed({
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(reactionsRt);
     };
   }, [currentUserId]);
+
+  // The moved-away banner clears itself so it never becomes permanent chrome.
+  useEffect(() => {
+    if (!movedNotice) return;
+    const timer = window.setTimeout(() => setMovedNotice(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [movedNotice]);
 
   // Mirror `reactions` into a ref so toggleReaction can snapshot the
   // user's current emoji synchronously, OUTSIDE the setState updater.
@@ -1471,6 +1759,255 @@ function JuiceBoxFeed({
     setReplyTo(message);
   }, []);
 
+  // ─── Admin "Move conversation" ────────────────────────────────────────
+  // `moveTarget` is the card the admin acted on — a root OR a reply. The
+  // server resolves the conversation's real root either way, so the dialog only
+  // needs the clicked message (for its current channel) and the id to POST.
+  const handleMoveConversation = useCallback((message: TeamMessage) => {
+    setMoveTarget(message);
+  }, []);
+  const closeMoveDialog = useCallback(() => setMoveTarget(null), []);
+
+  /** Ids this feed has watched leave (a move). Filtered out of every later
+   *  merge so an in-flight pre-move response cannot resurrect them; cleared per
+   *  id only when a realtime event says the row is back in THIS channel. */
+  const movedAwayRef = useRef<Set<string>>(new Set());
+
+  /**
+   * A subtree left this channel — because this admin moved it, or because a
+   * realtime UPDATE said so. Drops every LOADED message in it and (for a whole
+   * conversation) surfaces a quiet notice.
+   *
+   * THE COMPLETE ID SET IS COMPUTED ONCE, UP FRONT, and used for all three
+   * consequences: removing the cards, remembering them in `movedAwayRef`, and
+   * deciding whether the open reply composer just lost its target. That last
+   * one is why it matters: the composer used to be closed only when it targeted
+   * the root or a DIRECT child, so someone replying to a nested descendant kept
+   * a composer over a conversation that had vanished — a draft the database
+   * could only reject. Now any target inside the removed set closes it, and a
+   * target outside it is left strictly alone.
+   *
+   * Resolved from `loadedMessagesRef` (not inside a setState updater, which must
+   * stay pure) via the shared, order-independent `collectLoadedThread`, so it
+   * works whether the root's event or a descendant's arrives first. Anything not
+   * currently loaded needs no action — it was never on screen, and the server's
+   * move already took the rest of the tree with it.
+   */
+  const dropMovedSubtree = useCallback(
+    (
+      subtreeRootId: string,
+      toChannel: JuiceBoxChannel,
+      options: { notify: boolean },
+    ) => {
+      const doomed = collectLoadedThread(
+        loadedMessagesRef.current,
+        subtreeRootId,
+      );
+      // Remember them so a pre-move response still in flight cannot re-add
+      // them (see movedAwayRef).
+      for (const id of doomed) movedAwayRef.current.add(id);
+
+      setState((prev) =>
+        prev.kind === "ready"
+          ? {
+              kind: "ready",
+              messages: prev.messages.filter((m) => !doomed.has(m.id)),
+            }
+          : prev,
+      );
+
+      // Close the composer if — and only if — it targets something that just
+      // left. Idempotent: once null it stays null, so a burst of move events
+      // cannot corrupt it.
+      setReplyTo((prev) => (prev && doomed.has(prev.id) ? null : prev));
+
+      if (options.notify) setMovedNotice({ toChannel, at: Date.now() });
+    },
+    [],
+  );
+
+  // ─── Conversation-level reconciliation after a move ───────────────────
+  //
+  // WHY NOT JUST UPSERT THE MOVED ROWS
+  //   A move UPDATEs every message in the thread, and Postgres Realtime makes
+  //   NO ordering guarantee across those rows: a reply's UPDATE can arrive
+  //   before its root's. Inserting each row as it lands would therefore render
+  //   a reply with no parent on screen — a visible orphan — until the root
+  //   happened to show up.
+  //
+  //   So a channel-changing UPDATE is treated as a SIGNAL, not as data: the
+  //   affected rows are removed from the source immediately (they are known to
+  //   be gone), and the destination is rebuilt from the authoritative API. One
+  //   refetch reconciles the whole thread at once, in the server's order, so
+  //   there is no window in which a partial thread is visible.
+  //
+  // BOUNDED AND DEDUPED
+  //   A 25-message move produces 25 UPDATE events. `reconcileTimerRef` collapses
+  //   the whole burst into ONE fetch, and the timer is cleared on unmount — the
+  //   feed is keyed by channel, so switching tabs cancels an in-flight
+  //   reconciliation for the tab being left.
+  //
+  // STALE-RESPONSE SAFETY
+  //   `movedAwayRef` remembers ids this feed has seen leave. Any later merge —
+  //   a pre-move bootstrap or Load-Older response that was already in flight,
+  //   or the reconciliation itself — filters them out, so a delayed response
+  //   can never resurrect a moved conversation. An id is forgiven only when a
+  //   realtime event says it is back in THIS channel (a live signal is always
+  //   newer than any in-flight fetch).
+  // One shared scheduler instance per mount (per channel — the feed is keyed by
+  // it upstream). Created lazily so the effect below can cancel exactly this
+  // instance on unmount.
+  const schedulerRef = useRef<ReconcileScheduler | null>(null);
+
+  const runReconcile = useCallback(async () => {
+    const scheduler = schedulerRef.current;
+    const generation = scheduler?.generation() ?? 0;
+    try {
+      const res = await apiFetch(
+        `/api/team-messages?channel=${channel}&limit=${FEED_PAGE_SIZE}`,
+      );
+      if (!res.ok) return;
+      const body = (await res.json().catch(() => null)) as {
+        channel?: string;
+        messages?: CachedFeedMessage[];
+        hasMore?: boolean;
+      } | null;
+      // Discard a response that lost a race with a newer reconciliation, or
+      // that answers for a different channel than this mount renders.
+      if (scheduler && !scheduler.isCurrent(generation)) return;
+      if (!body?.messages || (body.channel && body.channel !== channel)) return;
+
+      const hydrated = body.messages.filter(
+        (m) => !movedAwayRef.current.has(m.id),
+      );
+      const fresh: TeamMessage[] = hydrated.map((m) => {
+        const { reactions: _u, ...rest } = m;
+        void _u;
+        return rest;
+      });
+      setState((prev) =>
+        prev.kind === "ready"
+          ? { kind: "ready", messages: mergeFreshFeed(prev.messages, fresh) }
+          : { kind: "ready", messages: fresh },
+      );
+      setInitialIds((prev) => {
+        const next = new Set(prev ?? []);
+        for (const m of fresh) next.add(m.id);
+        return next;
+      });
+      setReactions((prev) => mergeFreshReactions(prev, hydrated));
+      // Keep the cache in step so the next open doesn't paint the pre-move
+      // window from localStorage.
+      writeCachedFeed(currentUserId, channel, hydrated, body.hasMore === true);
+    } catch {
+      // Network error — the feed keeps its current (already-corrected) state.
+    }
+  }, [channel, currentUserId]);
+
+  // Keep the scheduler's `run` pointing at the latest closure without
+  // recreating the scheduler (which would lose a pending run).
+  const runReconcileRef = useRef(runReconcile);
+  useEffect(() => {
+    runReconcileRef.current = runReconcile;
+  }, [runReconcile]);
+
+  const scheduleReconcile = useCallback(() => {
+    if (!schedulerRef.current) {
+      schedulerRef.current = createReconcileScheduler({
+        delayMs: RECONCILE_DEBOUNCE_MS,
+        run: () => runReconcileRef.current(),
+      });
+    }
+    schedulerRef.current.schedule();
+  }, []);
+
+  // Cancel a pending reconciliation when this channel's feed unmounts (tab
+  // switch) so it can never write into the wrong channel's state, and
+  // invalidate any response still in flight.
+  useEffect(() => {
+    return () => {
+      schedulerRef.current?.cancel();
+    };
+  }, []);
+
+  // Realtime subscription — team_messages. One channel per page mount;
+  // cleaned up on unmount so navigating away closes the websocket cleanly.
+  useEffect(() => {
+    // Topic name carries the channel so a remount (tab switch) never reuses
+    // the previous channel's subscription. Row-level filtering still happens
+    // in upsertMessage — realtime delivers every channel's inserts, and that
+    // guard is the single place a foreign row is dropped.
+    const rt = supabase
+      .channel(`${TEAM_MESSAGES_CHANNEL}:${channel}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: TEAM_MESSAGES_TABLE },
+        (payload) => {
+          const row = payload.new as TeamMessage;
+          if (row.is_deleted) return;
+          upsertMessage(row);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: TEAM_MESSAGES_TABLE },
+        (payload) => {
+          const row = payload.new as TeamMessage;
+          if (row.is_deleted) {
+            // Removal is id-based, so it is safe to apply regardless of
+            // channel — an id we don't hold is a no-op.
+            removeMessage(row.id);
+            return;
+          }
+          // The ordering rules live in src/lib/juice-box-realtime.ts so they
+          // can be tested against every event order Realtime might produce.
+          const plan = classifyRealtimeUpdate({
+            row,
+            activeChannel: channel,
+            isLoaded: loadedIdsRef.current.has(row.id),
+          });
+
+          switch (plan.kind) {
+            case "apply":
+              upsertMessage(row);
+              return;
+            case "drop-conversation":
+              // A root left: drop it with every loaded descendant and say where
+              // it went. Reconcile too — a descendant's event may not have
+              // arrived, and only the server knows the full thread.
+              dropMovedSubtree(row.id, plan.toChannel, { notify: true });
+              break;
+            case "drop-message":
+              // A reply left — possibly BEFORE its root's event. Drop that
+              // reply's own subtree so a composer aimed at anything beneath it
+              // closes too. No banner: the root's event carries that.
+              dropMovedSubtree(row.id, plan.toChannel, { notify: false });
+              break;
+            case "reconcile":
+              // Belongs here but isn't on screen — the destination side of a
+              // move. Render nothing from this event; rebuild from the API so
+              // the thread appears complete and in timestamp order.
+              movedAwayRef.current.delete(row.id); // it's back; stop filtering
+              break;
+            default:
+              return;
+          }
+          if (plan.reconcile) scheduleReconcile();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(rt);
+    };
+  }, [
+    upsertMessage,
+    removeMessage,
+    channel,
+    dropMovedSubtree,
+    scheduleReconcile,
+  ]);
+
   /**
    * Tap handler for the floating "Jump to latest" pill. Uses the same
    * composer-aware scroll math the final-landing + ongoing-scroll
@@ -1508,10 +2045,14 @@ function JuiceBoxFeed({
     };
   }, [reactionDetails, reactions]);
 
-  const handleSelectSearchResult = useCallback(
+  /**
+   * Page back through history until `messageId` is rendered, then scroll to
+   * it. Shared by search selection and the one-shot deep-link / cross-channel
+   * jump, so both behave identically. Bounded at 8 pages so a bad id can't
+   * spin the loader forever.
+   */
+  const locateAndScrollToMessage = useCallback(
     async (messageId: string) => {
-      onSearchOpenChange(false);
-
       const elementId = `juice-message-${messageId}`;
       const hasTargetInDom = () =>
         typeof document !== "undefined" &&
@@ -1528,8 +2069,50 @@ function JuiceBoxFeed({
 
       scrollToMessage(messageId);
     },
-    [handleLoadOlder, onSearchOpenChange],
+    [handleLoadOlder],
   );
+
+  const handleSelectSearchResult = useCallback(
+    async (messageId: string, resultChannel: JuiceBoxChannel) => {
+      onSearchOpenChange(false);
+      // Search spans every channel. A hit in ANOTHER channel is handed back
+      // to the page, which switches tabs and remounts this feed with the id
+      // as `initialJumpMessageId` — the jump then runs against the right
+      // channel's history instead of paging this one forever looking for a
+      // message it will never contain.
+      if (resultChannel !== channel) {
+        const handled = onSelectOtherChannel(messageId, resultChannel);
+        if (handled) return;
+      }
+      await locateAndScrollToMessage(messageId);
+    },
+    [channel, locateAndScrollToMessage, onSearchOpenChange, onSelectOtherChannel],
+  );
+
+  // ─── One-shot deep-link / cross-channel jump ──────────────────────────
+  // Runs at most once per mount, after the bootstrap fetch settles so the
+  // first page of this channel is already rendered. FeedList's initial
+  // landing is suppressed while a jump is pending (see suppressInitialLanding)
+  // so the two never fight over the scroll position.
+  const jumpStartedRef = useRef(false);
+  useEffect(() => {
+    if (!initialJumpMessageId) return;
+    if (jumpStartedRef.current) return;
+    if (!freshFeedLoaded) return;
+    jumpStartedRef.current = true;
+    void (async () => {
+      await locateAndScrollToMessage(initialJumpMessageId);
+      // Landing on a specific post means the reader has seen the channel's
+      // newest content only if they were already at the bottom; the normal
+      // near-bottom listener decides that. Just release the pending target.
+      onInitialJumpHandled();
+    })();
+  }, [
+    initialJumpMessageId,
+    freshFeedLoaded,
+    locateAndScrollToMessage,
+    onInitialJumpHandled,
+  ]);
 
   // The sheet is rendered only when BOTH `reactionDetails` and a live
   // aggregate are present, so if the chip's last reactor un-reacts while
@@ -1541,10 +2124,13 @@ function JuiceBoxFeed({
     <>
       <FeedList
         state={state}
+        channel={channel}
+        suppressInitialLanding={initialJumpMessageId !== null}
         currentUserId={currentUserId}
         isAdmin={isAdmin}
         onDeleted={removeMessage}
         onReply={handleReply}
+        onMoveConversation={handleMoveConversation}
         reactions={reactions}
         onToggleReaction={toggleReaction}
         onShowReactionDetails={(messageId, emoji) =>
@@ -1598,14 +2184,44 @@ function JuiceBoxFeed({
           </div>
         )}
         <div className="mx-auto w-full max-w-2xl px-3 py-2">
-          <Composer onPosted={handleSelfPosted} />
+          <Composer channel={channel} onPosted={handleSelfPosted} />
         </div>
       </div>
+      {/* A conversation left this channel. Non-disruptive: sits above the
+          composer, does not steal focus, and clears itself. */}
+      {movedNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed inset-x-0 z-30 flex justify-center px-4"
+          style={{ bottom: "calc(9.5rem + var(--app-safe-bottom, 0px))" }}
+        >
+          <p className="pointer-events-auto rounded-full bg-muted px-3 py-1.5 text-xs font-medium text-foreground shadow-lg ring-1 ring-border animate-in fade-in-0 slide-in-from-bottom-1 duration-200">
+            Conversation moved to {channelLabel(movedNotice.toChannel)}.
+          </p>
+        </div>
+      )}
       {replyTo && (
         <ReplyModal
           replyTo={replyTo}
           onPosted={handleSelfPosted}
           onClose={clearReply}
+        />
+      )}
+      {moveTarget && (
+        <MoveConversationSheet
+          message={moveTarget}
+          onClose={closeMoveDialog}
+          onMoved={(result) => {
+            // Optimistic: drop the thread locally so the admin sees the move
+            // immediately. The realtime UPDATE for every moved row arrives
+            // moments later and is idempotent (removeMessage on an id we no
+            // longer hold is a no-op).
+            dropMovedSubtree(result.root_message_id, result.to_channel, {
+              notify: true,
+            });
+            closeMoveDialog();
+          }}
         />
       )}
       {reactionDetails && reactionDetailAggregate && (
@@ -1628,6 +2244,7 @@ function JuiceBoxFeed({
         />
       )}
       <JuiceBoxSearchSheet
+        activeChannel={channel}
         open={searchOpen}
         onOpenChange={onSearchOpenChange}
         onSelectMessage={handleSelectSearchResult}
@@ -1637,13 +2254,23 @@ function JuiceBoxFeed({
 }
 
 function JuiceBoxSearchSheet({
+  activeChannel,
   open,
   onOpenChange,
   onSelectMessage,
 }: {
+  /** The tab the user is currently on. Results from OTHER channels are
+   *  labelled with a channel chip so it's obvious that opening one will move
+   *  them; results from this channel are not (that would be noise). */
+  activeChannel: JuiceBoxChannel;
   open: boolean;
   onOpenChange: (next: boolean) => void;
-  onSelectMessage: (messageId: string) => Promise<void> | void;
+  /** Receives the hit's channel alongside its id so the caller can switch
+   *  tabs before scrolling to a message that lives elsewhere. */
+  onSelectMessage: (
+    messageId: string,
+    channel: JuiceBoxChannel,
+  ) => Promise<void> | void;
 }) {
   type JuiceBoxSearchResult = {
     message: TeamMessage;
@@ -1976,12 +2603,16 @@ function JuiceBoxSearchSheet({
                       : hasMedia
                         ? "Media post"
                         : "Message";
+                    // Search covers every channel; historical posts read as
+                    // General. Only flag the ones that will move the user.
+                    const resultChannel = normalizeChannel(message.channel);
+                    const otherChannel = resultChannel !== activeChannel;
                     return (
                       <button
                         key={message.id}
                         type="button"
                         onClick={() => {
-                          void onSelectMessage(message.id);
+                          void onSelectMessage(message.id, resultChannel);
                         }}
                         className="w-full rounded-lg border border-border/70 bg-card px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                       >
@@ -1997,6 +2628,11 @@ function JuiceBoxSearchSheet({
                           {hasMedia && (
                             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
                               Media
+                            </span>
+                          )}
+                          {otherChannel && (
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                              {channelLabel(resultChannel)}
                             </span>
                           )}
                         </div>
@@ -2097,7 +2733,16 @@ function writeGifCache(key: string, results: GifResult[]): void {
   }
 }
 
-function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
+function Composer({
+  channel,
+  onPosted,
+}: {
+  /** The channel this composer posts into — the selected tab. Sent with the
+   *  POST and shown in the placeholder / helper line so it is never ambiguous
+   *  where a message is about to land. */
+  channel: JuiceBoxChannel;
+  onPosted: (message: TeamMessage) => void;
+}) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2438,6 +3083,7 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: trimmed,
+          channel,
           ...(mediaPayload ?? {}),
         }),
       });
@@ -2517,10 +3163,13 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
                 setText(e.target.value);
                 if (error) setError(null);
               }}
+              // Placeholder names the destination channel so the user always
+              // knows where a post is about to land — the composer is fixed
+              // to the bottom and can sit well away from the selected tab.
               placeholder={
                 media
-                  ? "Add a caption…"
-                  : "Drop some juice... a win, meme, GIF, or shoutout"
+                  ? `Add a caption… (posting in ${channelLabel(channel)})`
+                  : `Message ${channelLabel(channel)}… a win, question, meme, or shoutout`
               }
               rows={isExpanded ? 2 : 1}
               maxLength={MESSAGE_MAX_LENGTH}
@@ -2589,16 +3238,24 @@ function Composer({ onPosted }: { onPosted: (message: TeamMessage) => void }) {
                   GIF
                 </button>
                 {isExpanded && (
-                  <p
-                    className={cn(
-                      "pl-1 text-[11px]",
-                      trimmed.length > MESSAGE_MAX_LENGTH - 100
-                        ? "text-muted-foreground"
-                        : "text-muted-foreground/60",
-                    )}
-                  >
-                    {trimmed.length}/{MESSAGE_MAX_LENGTH}
-                  </p>
+                  <>
+                    {/* Persistent destination label. The placeholder also
+                        names the channel, but it disappears the moment the
+                        user types — this stays put while they compose. */}
+                    <p className="pl-1 text-[11px] font-semibold text-primary">
+                      in {channelLabel(channel)}
+                    </p>
+                    <p
+                      className={cn(
+                        "pl-1 text-[11px]",
+                        trimmed.length > MESSAGE_MAX_LENGTH - 100
+                          ? "text-muted-foreground"
+                          : "text-muted-foreground/60",
+                      )}
+                    >
+                      {trimmed.length}/{MESSAGE_MAX_LENGTH}
+                    </p>
+                  </>
                 )}
               </div>
               {isExpanded && (
@@ -3071,6 +3728,11 @@ function ReplyModal({
         body: JSON.stringify({
           message: trimmed,
           reply_to_message_id: replyTo.id,
+          // Post into the PARENT's channel. The server independently forces
+          // the parent's channel and 400s a mismatch, so this is the client
+          // agreeing with that rule rather than the rule itself — a reply can
+          // never land in a different channel from the post it quotes.
+          channel: normalizeChannel(replyTo.channel),
         }),
       });
     } catch (err) {
@@ -3216,10 +3878,13 @@ function ReplyModal({
 
 function FeedList({
   state,
+  channel,
+  suppressInitialLanding,
   currentUserId,
   isAdmin,
   onDeleted,
   onReply,
+  onMoveConversation,
   reactions,
   onToggleReaction,
   onShowReactionDetails,
@@ -3237,11 +3902,20 @@ function FeedList({
   freshFeedLoaded,
 }: {
   state: FeedState;
+  /** The channel being rendered — used for the empty state's copy so an empty
+   *  Product Help tab explains what belongs there instead of reading like a
+   *  broken feed. */
+  channel: JuiceBoxChannel;
+  /** True while a deep-link / cross-channel jump owns the scroll position.
+   *  The one-shot initial landing stands down so the two don't fight. */
+  suppressInitialLanding: boolean;
   currentUserId: string;
   isAdmin: boolean;
   onDeleted: (id: string) => void;
   /** Fired when the user picks Reply (long-press or 3-dot menu) on a card. */
   onReply: (message: TeamMessage) => void;
+  /** Admin-only: fired when an admin picks "Move conversation" on any card. */
+  onMoveConversation: (message: TeamMessage) => void;
   /** Live reactions map. Each card pulls its own per-message slice from this
    *  via `reactions.get(message.id)`. */
   reactions: ReactionsState;
@@ -3322,14 +3996,18 @@ function FeedList({
   // divider's fade timing.
   const firstUnreadMessageId = useMemo(() => {
     if (state.kind !== "ready") return null;
-    if (state.messages.length === 0) return null;
-    if (!unreadLoaded) return null;
-    if (lastReadAt === null) return null;
-    const idx = state.messages.findIndex((m) =>
-      isNewerThan(m.created_at, lastReadAt),
-    );
-    if (idx < 0 || idx >= state.messages.length - 1) return null;
-    return state.messages[idx].id;
+    // Shared with the tests in src/lib/juice-box-unread.test.ts. The rule is
+    // unchanged; it now runs against THIS channel's marker, so each channel
+    // lands independently — and a channel the user has never opened
+    // (lastReadAt === null, which is every existing teammate on the two new
+    // channels) still lands at the latest message with no divider above old
+    // content.
+    const target = initialLandingTarget({
+      messages: state.messages,
+      lastReadAt,
+      unreadLoaded,
+    });
+    return target?.kind === "first-unread" ? target.messageId : null;
   }, [state, lastReadAt, unreadLoaded]);
 
 
@@ -3390,11 +4068,7 @@ function FeedList({
   // requires a real (non-null) anchor.
   const dividerIndex = useMemo(() => {
     if (state.kind !== "ready") return -1;
-    if (state.messages.length === 0) return -1;
-    if (dividerAnchor === undefined || dividerAnchor === null) return -1;
-    return state.messages.findIndex((m) =>
-      isNewerThan(m.created_at, dividerAnchor),
-    );
+    return dividerIndexFor(state.messages, dividerAnchor);
   }, [state, dividerAnchor]);
 
   // Keep `onNearBottom` reachable from the scroll listener (which is set up
@@ -3669,6 +4343,13 @@ function FeedList({
   useEffect(() => {
     if (finalLandingStartedRef.current) return;
     if (!finalLandingPendingRef.current) return;
+    // A deep link / cross-channel jump owns the scroll for this mount: stand
+    // down permanently rather than racing it, and let the generic ongoing
+    // effect take over afterwards.
+    if (suppressInitialLanding) {
+      finalLandingPendingRef.current = false;
+      return;
+    }
     if (!freshFeedLoaded) return;
     if (!unreadLoaded) return;
     if (messageCount === 0) return;
@@ -3759,6 +4440,7 @@ function FeedList({
     messageCount,
     firstUnreadMessageId,
     latestMessageId,
+    suppressInitialLanding,
   ]);
 
   if (state.kind === "loading") {
@@ -3812,8 +4494,16 @@ function FeedList({
       )}
       {state.messages.length === 0 ? (
         <Card>
+          {/* Channel-aware empty state: a brand-new Product Help / Social
+              Media Hub tab reads as "here's what belongs here", not as a
+              feed that failed to load. */}
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No posts yet. Be the first to share a win.
+            <p className="font-medium text-foreground">
+              No posts in {channelLabel(channel)} yet.
+            </p>
+            <p className="mx-auto mt-1 max-w-sm">
+              {JUICE_BOX_CHANNELS.find((c) => c.id === channel)?.blurb}
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -3830,6 +4520,7 @@ function FeedList({
                 isAdmin={isAdmin}
                 isFresh={isFresh}
                 onDeleted={onDeleted}
+                onMoveConversation={onMoveConversation}
                 onReply={onReply}
                 reactions={renderReactions(reactions.get(m.id))}
                 onToggleReaction={onToggleReaction}
@@ -3867,6 +4558,7 @@ function FeedCard({
   isFresh,
   onDeleted,
   onReply,
+  onMoveConversation,
   reactions,
   onToggleReaction,
   onShowReactionDetails,
@@ -3882,6 +4574,8 @@ function FeedCard({
   onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
   onShowReactionDetails: (messageId: string, emoji: string) => void;
   onOpenMedia: (items: TeamMessageMedia[], index: number) => void;
+  /** Admin-only: open the move dialog for this card's conversation. */
+  onMoveConversation: (message: TeamMessage) => void;
 }) {
   const timeAgo = useMemo(
     () => formatDistanceToNow(new Date(message.created_at), { addSuffix: true }),
@@ -4045,6 +4739,7 @@ function FeedCard({
             </p>
           </div>
           <FeedCardMenu
+            onMoveConversation={() => onMoveConversation(message)}
             isAdmin={isAdmin}
             deleting={deleting}
             onDelete={handleDelete}
@@ -4723,11 +5418,16 @@ function FeedCardMenu({
   deleting,
   onDelete,
   onReply,
+  onMoveConversation,
 }: {
   isAdmin: boolean;
   deleting: boolean;
   onDelete: () => void;
   onReply: () => void;
+  /** Admin-only. Opens the move dialog for the conversation this card belongs
+   *  to — shown on replies as well as roots, because the server resolves the
+   *  root either way and moves the whole thread. */
+  onMoveConversation: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -4783,6 +5483,20 @@ function FeedCardMenu({
               role="menuitem"
               onClick={() => {
                 setOpen(false);
+                onMoveConversation();
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-muted"
+            >
+              <FolderInput aria-hidden="true" className="size-3.5" />
+              Move conversation
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
                 // Native confirm — blocking, accessible, zero new dependencies.
                 // Cheap guardrail against an accidental admin tap; the actual
                 // permission check still happens server-side in requireAdmin.
@@ -4802,6 +5516,239 @@ function FeedCardMenu({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Admin-only "Move conversation" dialog.
+ *
+ * Mirrors ReplyModal's shape (fixed overlay at z-50, above the composer and
+ * bottom nav; Escape and backdrop close; focus moves in on open and returns on
+ * close) so it reads as part of Juice Box rather than a bolted-on admin panel.
+ *
+ * WHAT IT MOVES
+ *   The whole conversation, always. The card the admin acted on may be a reply;
+ *   the server walks up to the root and moves every descendant with it, so the
+ *   copy says "conversation" and the destination list is the only choice
+ *   offered. The current channel is shown but NOT selectable.
+ *
+ * The button is disabled while the request is in flight, so a double-tap cannot
+ * fire two moves — and even if one did, the RPC's second call would come back
+ * 409 "already in that channel" rather than doing anything.
+ */
+function MoveConversationSheet({
+  message,
+  onClose,
+  onMoved,
+}: {
+  message: TeamMessage;
+  onClose: () => void;
+  onMoved: (result: MoveConversationResult) => void;
+}) {
+  const currentChannel = normalizeChannel(message.channel);
+  const destinations = JUICE_BOX_CHANNELS.filter(
+    (c) => c.id !== currentChannel,
+  );
+  const [selected, setSelected] = useState<JuiceBoxChannel>(
+    destinations[0]?.id ?? currentChannel,
+  );
+  const [moving, setMoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+
+  // Escape closes (unless a move is in flight — don't abandon a request whose
+  // outcome the admin needs to see).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !moving) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [moving, onClose]);
+
+  // Move focus into the dialog on open and hand it back to the previously
+  // focused element (the card's menu button) on close.
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    confirmRef.current?.focus();
+    return () => previouslyFocused?.focus?.();
+  }, []);
+
+  // Simple focus trap: Tab cycles within the dialog.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const root = dialogRef.current;
+      if (!root) return;
+      const focusable = root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const handleMove = async () => {
+    if (moving) return;
+    setMoving(true);
+    setError(null);
+
+    let res: Response;
+    try {
+      // Only the destination crosses the wire. The acting admin, the source
+      // channel and the conversation's root are all derived server-side.
+      res = await apiFetch(`/api/team-messages/${message.id}/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to_channel: selected }),
+      });
+    } catch (err) {
+      setMoving(false);
+      setError(err instanceof Error ? err.message : "Network error.");
+      return;
+    }
+
+    const body = (await res.json().catch(() => null)) as
+      | (MoveConversationResult & { error?: string })
+      | null;
+
+    if (!res.ok || !body?.root_message_id) {
+      setMoving(false);
+      setError(body?.error ?? `Couldn't move (${res.status}).`);
+      return;
+    }
+
+    setMoving(false);
+    onMoved(body);
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="move-conversation-title"
+      aria-describedby="move-conversation-desc"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+      style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !moving) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-2xl animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-2 duration-200"
+      >
+        <h2
+          id="move-conversation-title"
+          className="text-base font-semibold tracking-tight"
+        >
+          Move conversation
+        </h2>
+        <p
+          id="move-conversation-desc"
+          className="mt-1 text-xs text-muted-foreground"
+        >
+          The whole conversation moves — the original post and every reply.
+          Authors, timestamps, reactions and attachments stay exactly as they
+          are.
+        </p>
+
+        <p className="mt-3 text-xs text-muted-foreground">
+          Currently in{" "}
+          <span className="font-semibold text-foreground">
+            {channelLabel(currentChannel)}
+          </span>
+        </p>
+
+        <fieldset className="mt-3" disabled={moving}>
+          <legend className="mb-1.5 text-xs font-medium text-foreground">
+            Move to
+          </legend>
+          <div role="radiogroup" aria-label="Destination channel" className="space-y-1.5">
+            {destinations.map((c) => {
+              const isSelected = c.id === selected;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={isSelected}
+                  onClick={() => setSelected(c.id)}
+                  disabled={moving}
+                  className={cn(
+                    "flex w-full flex-col items-start gap-0.5 rounded-lg border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
+                    isSelected
+                      ? "border-primary bg-primary/10"
+                      : "border-border bg-background/40 hover:bg-muted",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "text-sm font-semibold",
+                      isSelected ? "text-primary" : "text-foreground",
+                    )}
+                  >
+                    {c.label}
+                  </span>
+                  <span className="text-[11px] leading-snug text-muted-foreground">
+                    {c.blurb}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
+
+        {error && (
+          <p role="alert" className="mt-3 text-xs text-destructive">
+            {error}
+          </p>
+        )}
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            disabled={moving}
+          >
+            Cancel
+          </Button>
+          <Button
+            ref={confirmRef}
+            type="button"
+            size="sm"
+            onClick={handleMove}
+            disabled={moving || selected === currentChannel}
+            className="gap-1.5"
+          >
+            {moving ? (
+              <>
+                <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+                Moving…
+              </>
+            ) : (
+              <>
+                <FolderInput aria-hidden="true" className="size-3.5" />
+                Move to {channelLabel(selected)}
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
