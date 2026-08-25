@@ -131,6 +131,31 @@ export function hydrateStoredSalesperson(
   };
 }
 
+/**
+ * Deletes the stored session — the ONE place Sales Tracker auth state is
+ * removed. Synchronous: `localStorage.removeItem` completes before this
+ * returns, so a caller can clear and then navigate in the same tick without
+ * the next screen re-reading a dead session (that race is exactly what caused
+ * the sign-in ⇄ dashboard redirect loop).
+ *
+ * SCOPE: only `STORAGE_KEY` ("sales-tracker:salesperson"). It deliberately does
+ * NOT touch the Juice Box feed caches (`juice-box:feed:*`), the Map visit-age
+ * filter (`sales-tracker:map-visit-filter:*`), the quotes-seen list, or
+ * anything else — those are per-user conveniences, not credentials, and
+ * wiping them on an expired token would throw away state for no reason.
+ *
+ * Safe to call when nothing is stored, when storage is disabled, and on the
+ * server (no-ops). Idempotent.
+ */
+export function clearStoredSalesperson(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Private mode / storage disabled — nothing to remove.
+  }
+}
+
 export function useSalesperson() {
   const [salesperson, setSalespersonState] = useState<StoredSalesperson | null>(
     null,
@@ -157,8 +182,10 @@ export function useSalesperson() {
     setSalespersonState(value);
   }, []);
 
+  // Delegates to the module-level helper so there is exactly one
+  // implementation of "remove the session", then drops the in-memory copy.
   const clear = useCallback(() => {
-    window.localStorage.removeItem(STORAGE_KEY);
+    clearStoredSalesperson();
     setSalespersonState(null);
   }, []);
 

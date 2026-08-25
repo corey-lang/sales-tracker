@@ -39,15 +39,50 @@ export type LivePermissions = {
   can_import_offices: boolean;
 };
 
+/**
+ * What a consumer should DO with the result of the permission fetch.
+ *
+ *   "loading"  — still resolving; render a spinner, decide nothing.
+ *   "expired"  — the server rejected the session (401). The honest remedy is
+ *                the sign-in screen, not an error card: nothing is wrong with
+ *                the app, the stored token is simply no longer valid (expired,
+ *                or signed with a different SESSION_SECRET / service-role key
+ *                than this environment uses). Send the user to sign in again.
+ *   "error"    — the check itself failed (5xx, offline). NOT an auth failure,
+ *                so bouncing to sign-in would be misleading; show the problem.
+ *   "ok"       — permissions are known and usable.
+ *
+ * Exported as a pure function so the distinction is unit-tested rather than
+ * re-derived by eye in every consumer. This is a UX routing decision only —
+ * the security boundary remains the server guard on each request.
+ */
+export type AccessGate = "loading" | "expired" | "error" | "ok";
+
+export function accessGateFrom(input: {
+  loaded: boolean;
+  permissions: LivePermissions | null;
+  /** HTTP status of the last attempt; null when the request never completed. */
+  status: number | null;
+}): AccessGate {
+  if (!input.loaded) return "loading";
+  if (input.permissions) return "ok";
+  return input.status === 401 ? "expired" : "error";
+}
+
 export function useLivePermissions(): {
   permissions: LivePermissions | null;
   /** True once the live fetch has resolved (success OR failure). */
   loaded: boolean;
+  /** HTTP status of the last attempt; null if it never completed (offline). */
+  status: number | null;
+  /** Pre-computed gate for consumers — see accessGateFrom. */
+  gate: AccessGate;
 } {
   const [permissions, setPermissions] = useState<LivePermissions | null>(
     null,
   );
   const [loaded, setLoaded] = useState(false);
+  const [status, setStatus] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,10 +90,12 @@ export function useLivePermissions(): {
       try {
         const res = await apiFetch("/api/me/permissions");
         if (cancelled) return;
+        setStatus(res.status);
         if (!res.ok) {
           // 401 (signed out / expired) and any other error fall through
-          // to the loaded-with-null state. Consumers will redirect to
-          // sign-in or fail closed on access checks.
+          // to the loaded-with-null state; `status` tells consumers which,
+          // so an expired session routes to sign-in while a real outage
+          // shows an error instead of a misleading "sign in again".
           return;
         }
         const payload = (await res.json().catch(() => null)) as
@@ -81,5 +118,10 @@ export function useLivePermissions(): {
     };
   }, []);
 
-  return { permissions, loaded };
+  return {
+    permissions,
+    loaded,
+    status,
+    gate: accessGateFrom({ loaded, permissions, status }),
+  };
 }

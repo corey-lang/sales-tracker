@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
@@ -44,16 +44,18 @@ import { OrdersCard } from "@/components/orders-card";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { salesperson, loaded } = useSalesperson();
+  const { salesperson, loaded, clear } = useSalesperson();
   // The role this page renders from comes from the SERVER
   // (GET /api/me/permissions re-reads the `salespeople` row), not from the
   // stored session — the stored copy is user-editable, so it can decide chrome
   // but never what a page shows. Every card below also fetches through
   // authenticated routes that re-check the role, so this gate is UX
   // (don't paint a dashboard the caller can't use), not the security boundary.
-  const { permissions, loaded: permissionsLoaded } = useLivePermissions();
+  const { permissions, loaded: permissionsLoaded, gate } = useLivePermissions();
   const verifiedRole = permissions?.role ?? null;
   const [entryVersion, setEntryVersion] = useState(0);
+  /** One-shot: the expired-session handoff (clear + redirect) runs once. */
+  const expiredHandledRef = useRef(false);
 
   useEffect(() => {
     if (!loaded) return;
@@ -68,8 +70,28 @@ export default function DashboardPage() {
     // AE data routes 403 them regardless).
     if (permissionsLoaded && verifiedRole === "juice_box_only") {
       router.replace("/juice-box");
+      return;
     }
-  }, [loaded, salesperson, permissionsLoaded, verifiedRole, router]);
+    // The server REJECTED the stored session (401): expired, or signed with a
+    // different SESSION_SECRET / service-role key than this environment uses
+    // (which is what happens to an old localhost token after an env refresh).
+    // Nothing is wrong with the app and nothing is being hidden — the honest
+    // remedy is the sign-in screen. A NON-401 failure is not an auth problem
+    // and is surfaced below rather than redirected.
+    //
+    // DELETE THE DEAD SESSION FIRST. Redirecting while it is still in
+    // localStorage is what caused the sign-in ⇄ dashboard loop: the sign-in
+    // screen saw a session, bounced back here, and we bounced again. `clear()`
+    // removes it synchronously (see clearStoredSalesperson) before the
+    // navigation is queued, so the sign-in screen finds nothing to redirect on.
+    // The one-shot ref means this happens at most once per mount.
+    if (gate === "expired") {
+      if (expiredHandledRef.current) return;
+      expiredHandledRef.current = true;
+      clear();
+      router.replace("/");
+    }
+  }, [loaded, salesperson, permissionsLoaded, verifiedRole, gate, clear, router]);
 
   useScrollToTop();
 
@@ -81,18 +103,41 @@ export default function DashboardPage() {
     );
   }
 
-  // FAIL CLOSED: the permission read resolved without an answer (expired
-  // session, or the request failed). Render nothing role-shaped rather than
-  // trusting the stored role — the AE cards would only 401/403 anyway.
+  // FAIL CLOSED: the permission read resolved without an answer. Render nothing
+  // role-shaped rather than trusting the stored role — the AE cards would only
+  // 401/403 anyway.
+  //
+  // "expired" is already being redirected to sign-in by the effect above, so
+  // this only paints for a genuine FAILURE of the check (5xx, offline). The
+  // copy says so, because telling someone to sign in again when the server is
+  // erroring sends them in a circle.
   if (!permissions) {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-4">
-        <p className="text-sm text-muted-foreground">
-          Couldn&apos;t verify your access.
-        </p>
-        <Link href="/" className={buttonVariants({ variant: "outline" })}>
-          Sign in again
-        </Link>
+        {gate === "expired" ? (
+          <p className="text-sm text-muted-foreground">
+            Your session expired. Taking you to sign in…
+          </p>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Couldn&apos;t check your access right now — the server didn&apos;t
+              answer. Your sign-in is still valid.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className={buttonVariants({ variant: "outline" })}
+              >
+                Try again
+              </button>
+              <Link href="/" className={buttonVariants({ variant: "ghost" })}>
+                Sign in again
+              </Link>
+            </div>
+          </>
+        )}
       </main>
     );
   }
