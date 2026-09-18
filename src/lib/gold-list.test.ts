@@ -19,6 +19,7 @@ import {
   matchesStatusFilter,
   scheduleToneFor,
   searchableDigits,
+  shouldShowOwnerLine,
   sortAgents,
   sortAgentsByFollowUp,
   sortAgentsByName,
@@ -519,5 +520,57 @@ describe("enhancement review regressions", () => {
       const today = format(todayInAppTimezone(new Date(now)), "yyyy-MM-dd");
       expect(matchesStatusFilter(row, expected, today)).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The card's "AE: <name>" owner line
+// ---------------------------------------------------------------------------
+
+describe("shouldShowOwnerLine", () => {
+  const ME = "me-id";
+  const OTHER = "kennedy-id";
+
+  it("is hidden on an AE's own list — their name on every card is noise", () => {
+    expect(
+      shouldShowOwnerLine({ ae_id: ME, view_all: false, viewer_id: ME }),
+    ).toBe(false);
+  });
+
+  it("is shown when an admin views every AE at once", () => {
+    expect(
+      shouldShowOwnerLine({ ae_id: null, view_all: true, viewer_id: ME }),
+    ).toBe(true);
+  });
+
+  it("is shown when an admin filters to another AE's list", () => {
+    expect(
+      shouldShowOwnerLine({ ae_id: OTHER, view_all: false, viewer_id: ME }),
+    ).toBe(true);
+  });
+
+  it("labels the viewer's own cards inside the all-AEs view", () => {
+    const scope = { ae_id: null, view_all: true, viewer_id: ME };
+    // Someone else's card is labelled…
+    expect(shouldShowOwnerLine(scope, { salesperson_id: OTHER })).toBe(true);
+    // …and the admin’s own rows are equally explicit in a mixed list.
+    expect(shouldShowOwnerLine(scope, { salesperson_id: ME })).toBe(true);
+  });
+
+  it("stays hidden for an AE's own cards however the scope is expressed", () => {
+    const scope = { ae_id: ME, view_all: false, viewer_id: ME };
+    expect(shouldShowOwnerLine(scope, { salesperson_id: ME })).toBe(false);
+  });
+
+  it("only ever suppresses the line — the per-card check never adds one", () => {
+    // On a single-AE scope the line is off, and passing an agent can only turn
+    // it further off, never on. (An AE can never hold another AE's rows
+    // anyway: the server scopes the read before the board sees it.)
+    expect(
+      shouldShowOwnerLine(
+        { ae_id: ME, view_all: false, viewer_id: ME },
+        { salesperson_id: OTHER },
+      ),
+    ).toBe(false);
   });
 });

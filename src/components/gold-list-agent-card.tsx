@@ -18,6 +18,7 @@ import {
 import { apiFetchJson } from "@/lib/api-client";
 import { APP_TIMEZONE, formatDateMDY, formatTaskMoment } from "@/lib/dates";
 import { cn } from "@/lib/utils";
+import { goldListEmailHref, goldListPhoneHref } from "@/lib/gold-list-contact";
 import {
   ACTIVITY_NOTE_MAX_LENGTH,
   AGENT_FIELD_MAX_LENGTH,
@@ -58,7 +59,7 @@ import { Input } from "@/components/ui/input";
 // half of the same rule.
 
 const TEXTAREA_CLASS =
-  "mt-1 w-full resize-y rounded-md border border-border bg-background/40 px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40";
+  "mt-1 w-full resize-y rounded-md border border-border bg-background/40 px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary";
 
 /** Which inline form (if any) the card is showing. Only one at a time. */
 type CardMode = "idle" | "edit" | "schedule" | "reschedule" | "complete";
@@ -368,6 +369,10 @@ export function GoldListAgentCard({
     const opening = !historyOpen;
     setHistoryOpen(opening);
     if (!opening || history !== null) return;
+    await loadHistory();
+  };
+
+  const loadHistory = async () => {
     setHistoryLoading(true);
     setError(null);
     try {
@@ -377,45 +382,54 @@ export function GoldListAgentCard({
       setHistory(res.activities);
     } catch (err) {
       setError(messageOf(err, "Could not load the history."));
-      setHistoryOpen(false);
+      // Contact details remain available even if the history request fails.
     } finally {
       setHistoryLoading(false);
     }
   };
 
   return (
+    // Compact spacing applies to groups, not to control targets or text sizes.
     <Card
-      size="sm"
       className={cn(
-        "min-w-0 [overflow-wrap:anywhere] [&_button]:min-h-11 [&_button]:min-w-11 [&_input]:min-h-11 [&_input]:text-base [&_textarea]:text-base [&_a]:min-h-11",
-        archived && "opacity-70",
+        "min-w-0 gap-3 py-3 [overflow-wrap:anywhere] [&_button]:min-h-11 [&_button]:min-w-11 [&_button]:text-base [&_button:focus-visible]:ring-primary [&_input]:min-h-11 [&_input]:text-base [&_textarea]:text-base [&_a]:min-h-11",
       )}
     >
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-2.5 px-3">
         {outsideFilters ? (
-          <p role="status" className="text-xs text-muted-foreground">
+          <p role="status" className="text-[0.9375rem] text-foreground/80">
             Activity completed. Schedule the next activity or skip to return to
             your filtered list.
           </p>
         ) : null}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 space-y-0.5">
-            <p className="break-words text-base font-semibold leading-tight">
+            {/* Level 1 of the hierarchy — the only 20px text on the card. */}
+            <p className="break-words text-xl font-semibold leading-snug">
               {agent.agent_name}
             </p>
+            {/* Level 4 — metadata, but at 15px and a brighter mix than
+                `muted-foreground` so it reads on the dark card instead of
+                receding into it. */}
             {agent.brokerage ? (
-              <p className="break-words text-xs text-muted-foreground">
+              <p className="break-words text-[0.9375rem] leading-snug text-foreground/80">
                 {agent.brokerage}
               </p>
             ) : null}
+            {/* Shown only where rows could belong to someone else — see
+                shouldShowOwnerLine(). An AE's own list never repeats their
+                name on every card. */}
             {showOwner && agent.owner_name ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-[0.9375rem] leading-snug text-foreground/70">
                 AE: {agent.owner_name}
               </p>
             ) : null}
           </div>
           {canEdit ? (
-            <div className="flex flex-wrap items-center gap-1">
+            // `shrink-0` so the action pair never collapses into the name, and
+            // the two 44px targets stay side by side with a gap between them —
+            // Archive is not reachable by a slightly-off tap on Edit.
+            <div className="flex shrink-0 items-center gap-1">
               {!archived ? (
                 <Button
                   variant="ghost"
@@ -451,23 +465,42 @@ export function GoldListAgentCard({
           ) : null}
         </div>
 
+        {/* CONTACT ROW — always on the card, not behind Details.
+            A collapsed card has to answer three things: who is this, how do I
+            reach them, and what is next. Reaching them is core work, so the
+            row sits directly under the identity block and above the activity
+            section, and it stays put when Details & history is expanded (and
+            when a history load fails) — there is ONE set of links, live in
+            every state, rather than a second copy inside the disclosure that
+            would duplicate the same tel:/mailto: targets.
+
+            Rendered only when there is something to show: an agent with no
+            phone and no email gets no row, no placeholder and no extra gap.
+
+            `flex-wrap` lets the two links share a row when they fit and stack
+            when they don't; the email's `break-all` wraps a long address
+            inside the card instead of widening the page. The card's
+            `[&_a]:min-h-11` gives each link a 44px target without padding
+            that would show as a box. */}
         {(agent.phone || agent.email) && mode !== "edit" ? (
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-0 text-base">
             {agent.phone ? (
               <a
-                href={`tel:${agent.phone}`}
-                className="inline-flex min-w-0 break-all items-center gap-1 text-muted-foreground hover:text-foreground"
+                href={goldListPhoneHref(agent.phone)}
+                aria-label={`Call ${agent.agent_name} at ${agent.phone}`}
+                className="inline-flex min-w-0 break-all items-center gap-1.5 rounded-sm text-foreground/90 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
               >
-                <Phone aria-hidden="true" className="size-3.5" />
+                <Phone aria-hidden="true" className="size-4 shrink-0" />
                 {agent.phone}
               </a>
             ) : null}
             {agent.email ? (
               <a
-                href={`mailto:${agent.email}`}
-                className="inline-flex min-w-0 items-center gap-1 text-muted-foreground hover:text-foreground"
+                href={goldListEmailHref(agent.email)}
+                aria-label={`Email ${agent.agent_name} at ${agent.email}`}
+                className="inline-flex min-w-0 items-center gap-1.5 rounded-sm text-foreground/90 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
               >
-                <Mail aria-hidden="true" className="size-3.5 shrink-0" />
+                <Mail aria-hidden="true" className="size-4 shrink-0" />
                 <span className="break-all">{agent.email}</span>
               </a>
             ) : null}
@@ -475,7 +508,7 @@ export function GoldListAgentCard({
         ) : null}
 
         {historyOpen && agent.notes && mode !== "edit" ? (
-          <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+          <p className="whitespace-pre-wrap break-words text-[0.9375rem] text-foreground/80">
             {agent.notes}
           </p>
         ) : null}
@@ -491,7 +524,7 @@ export function GoldListAgentCard({
 
         {/* ----- the follow-up loop ----- */}
         {archived ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[0.9375rem] text-foreground/70">
             Archived {formatTaskMoment(agent.archived_at!)}. History is kept.
           </p>
         ) : next ? (
@@ -512,8 +545,15 @@ export function GoldListAgentCard({
             onCancel={() => void handleCancelActivity()}
           />
         ) : (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed border-border px-2.5 py-2">
-            <p className="text-xs text-muted-foreground">No next activity</p>
+          // No dashed empty-state box: it cost ~60px of card height and a
+          // border to say one short sentence. This is the same information as
+          // a plain row — status on the left, action on the right — which
+          // `flex-wrap` stacks cleanly at narrow widths rather than shrinking
+          // either one to force a single line.
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <p className="text-base font-medium text-foreground/90">
+              No next activity
+            </p>
             {canEdit ? (
               <Button
                 size="sm"
@@ -565,36 +605,56 @@ export function GoldListAgentCard({
           />
         ) : null}
 
-        {error ? <p className="text-xs text-destructive">{error}</p> : null}
+        {error ? (
+          <p role="alert" className="text-[0.9375rem] text-destructive">
+            {error}
+          </p>
+        ) : null}
 
         {/* ----- preserved history ----- */}
         <div className="space-y-2">
+          {/* The WHOLE ROW is the control, not just the chevron: full width,
+              its label and its summary inside the button, the chevron pushed
+              to the far edge by `justify-between`. Keyboard operation, the
+              aria-expanded state, lazy loading and the disabled-while-a-form-
+              is-open behaviour are unchanged; only the hit area and the
+              typography grew. The negative margin lets the hover/focus
+              background bleed to the card's padding edge without widening the
+              card. */}
           <button
             type="button"
             ref={actionFocus}
             disabled={busy || mode !== "idle"}
             onClick={() => void toggleHistory()}
             aria-expanded={historyOpen}
-            className="inline-flex flex-wrap items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+            className="-mx-2 flex w-[calc(100%+1rem)] items-center justify-between gap-2 rounded-md px-2 text-left text-base font-medium text-foreground/90 transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60"
           >
-            <History aria-hidden="true" className="size-3.5" />
-            Details & history ({agent.completed_count})
-            {agent.last_completed_on ? (
-              <span className="text-muted-foreground">
-                · last {formatDateMDY(agent.last_completed_on)}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="inline-flex items-center gap-1.5">
+                <History aria-hidden="true" className="size-4 shrink-0" />
+                Details &amp; history ({agent.completed_count})
               </span>
-            ) : null}
+              {agent.last_completed_on ? (
+                <span className="text-[0.9375rem] font-normal text-foreground/70">
+                  · Last {formatDateMDY(agent.last_completed_on)}
+                </span>
+              ) : null}
+            </span>
             <ChevronDown
               aria-hidden="true"
               className={cn(
-                "size-3.5 transition-transform",
+                "size-5 shrink-0 transition-transform",
                 historyOpen && "rotate-180",
               )}
             />
           </button>
           {historyOpen ? (
             historyLoading ? (
-              <p className="text-xs text-muted-foreground">Loading…</p>
+              <p className="text-[0.9375rem] text-foreground/70">Loading…</p>
+            ) : history === null ? (
+              <Button variant="outline" onClick={() => void loadHistory()}>
+                Retry history
+              </Button>
             ) : (
               <ActivityHistoryList
                 activities={history ?? []}
@@ -630,23 +690,30 @@ function NextActivityRow({
 }) {
   const tone = scheduleToneFor(activity.scheduled_for, todayIso);
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2">
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
       {/* With a note present the text block claims the whole first row on
           phones, so a long note wraps across the card's full width instead of
           into a ~100px ribbon beside the buttons (the row is `flex-wrap`, so
           the actions drop to their own line). Rows without a note keep the
           compact side-by-side layout — the extra line is spent only where
           there is something to read. */}
-      <div
-        className={cn(
-          "min-w-0 flex-1",
-          activity.activity_note && "basis-full sm:basis-auto",
-        )}
-      >
-        <p className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
-          <CalendarClock aria-hidden="true" className="size-4 shrink-0" />
-          {activity.description}
-          <span className="font-normal text-muted-foreground">
+      {/* On phones the text always claims the full row and the actions wrap
+          beneath it. Sharing the row squeezed a short description like "Office
+          visit 09-18-2026" into a ~90px column that broke after every word —
+          the review's "do not shrink the text to force one line". From `sm:`
+          up there is room for both, so they sit side by side again. */}
+      <div className="min-w-0 flex-1 basis-full sm:basis-auto">
+        {/* Level 2 of the hierarchy: the activity itself, 16px and medium —
+            the most important thing on a card that has one. */}
+        {/* Inline (not flex) so a long description wraps AROUND the icon
+            instead of leaving it stranded alone on the first line. */}
+        <p className="text-base font-medium leading-snug">
+          <CalendarClock
+            aria-hidden="true"
+            className="mr-1.5 inline size-4 shrink-0 align-[-0.15em]"
+          />
+          {activity.description}{" "}
+          <span className="whitespace-nowrap text-[0.9375rem] font-normal text-foreground/70">
             {formatDateMDY(activity.scheduled_for)}
           </span>
         </p>
@@ -656,7 +723,7 @@ function NextActivityRow({
             the card's [overflow-wrap:anywhere]) keeps a long note wrapping
             inside the card at 320px instead of forcing the row wider. */}
         {activity.activity_note ? (
-          <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-[0.9375rem] leading-snug text-foreground/80">
             {activity.activity_note}
           </p>
         ) : null}
@@ -699,12 +766,20 @@ function NextActivityRow({
 
 function ToneLabel({ tone }: { tone: ReturnType<typeof scheduleToneFor> }) {
   if (tone === "overdue") {
-    return <p className="text-xs font-medium text-destructive">Overdue</p>;
+    return (
+      <p className="mt-0.5 text-[0.9375rem] font-semibold text-destructive">
+        Overdue
+      </p>
+    );
   }
   if (tone === "today") {
-    return <p className="text-xs font-medium text-primary">Due today</p>;
+    return (
+      <p className="mt-0.5 text-[0.9375rem] font-semibold text-primary">
+        Due today
+      </p>
+    );
   }
-  return <p className="text-xs text-muted-foreground">Upcoming</p>;
+  return <p className="mt-0.5 text-[0.9375rem] text-foreground/70">Upcoming</p>;
 }
 
 /**
@@ -835,7 +910,7 @@ function CompleteActivityForm({
           onChange={(e) => setNote(e.target.value)}
         />
       </label>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-sm text-foreground/70">
         After completing, you can schedule the next activity or skip it.
       </p>
       <div className="flex flex-wrap gap-2">
@@ -872,7 +947,7 @@ function ActivityHistoryList({
     );
   if (past.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-[0.9375rem] text-foreground/70">
         No completed activity yet. Completed activities stay here for good.
       </p>
     );
@@ -881,9 +956,9 @@ function ActivityHistoryList({
     <ul className="space-y-2 border-l border-border pl-3">
       {past.map((activity) => (
         <li key={activity.id} className="space-y-0.5">
-          <p className="text-xs">
+          <p className="text-base leading-snug">
             <span className="font-medium">{activity.description}</span>{" "}
-            <span className="text-muted-foreground">
+            <span className="text-[0.9375rem] text-foreground/70">
               {formatDateMDY(activity.scheduled_for)}
             </span>
             {activity.status === "cancelled" ? (
@@ -896,21 +971,23 @@ function ActivityHistoryList({
               Both are preserved verbatim once the activity is completed — the
               history trigger freezes the row. */}
           {activity.activity_note ? (
-            <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+            <p className="whitespace-pre-wrap break-words text-[0.9375rem] leading-snug text-foreground/80">
               <span className="font-medium">Scheduled note:</span>{" "}
               {activity.activity_note}
             </p>
           ) : null}
-          <p className="text-xs text-muted-foreground">
+          {/* Tertiary stamps — the only 14px text on the card, and still on a
+              brighter mix than muted-foreground. */}
+          <p className="text-sm text-foreground/60">
             Created by {creator} · {formatTaskMoment(activity.created_at)}
           </p>
           {activity.completed_at ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm text-foreground/60">
               Completed {formatTaskMoment(activity.completed_at)}
             </p>
           ) : null}
           {activity.outcome_note ? (
-            <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+            <p className="whitespace-pre-wrap break-words text-[0.9375rem] leading-snug text-foreground/80">
               <span className="font-medium">Outcome:</span>{" "}
               {activity.outcome_note}
             </p>

@@ -176,6 +176,38 @@ export type GoldListAgentWithFollowUp = GoldListAgent & {
 // Presentation helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether a card should carry its "AE: <name>" owner line.
+ *
+ * The line is context, not decoration: an AE looking at their own Gold List
+ * already knows every row is theirs, so repeating their name on every card is
+ * noise. It earns its space only when the rows on screen could belong to
+ * someone else:
+ *
+ *   * an admin viewing every AE at once (rows have different owners), or
+ *   * an admin viewing one OTHER AE's list (the rows aren't the viewer's).
+ *
+ * Derived from the server-issued `scope` — the same object that decides what
+ * the caller may read — rather than from role strings or rendered text, so the
+ * line can never appear on a view the server didn't actually widen. It changes
+ * display only; authorization and data access are untouched.
+ */
+export function shouldShowOwnerLine(
+  scope: {
+    /** The AE being viewed, or null for "every AE". */
+    ae_id: string | null;
+    view_all: boolean;
+    viewer_id: string;
+  },
+  agent?: { salesperson_id: string },
+): boolean {
+  // Every card needs an owner in the mixed all-AE view, including an admin's
+  // own salesperson identity. Single-owner views can omit redundant labels.
+  if (scope.view_all) return true;
+  if (agent && agent.salesperson_id === scope.viewer_id) return false;
+  return scope.ae_id !== scope.viewer_id;
+}
+
 /** Active (non-archived) agents only — the basis of the header count. */
 export function activeAgents<T extends { archived_at: string | null }>(
   agents: readonly T[],

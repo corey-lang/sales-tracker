@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { format } from "date-fns";
-import { Plus, Search, X } from "lucide-react";
+import { ChevronDown, Plus, Search, X } from "lucide-react";
 
 import { apiFetchJson } from "@/lib/api-client";
 import { todayInAppTimezone } from "@/lib/dates";
+import { cn } from "@/lib/utils";
 import {
   AGENT_FIELD_MAX_LENGTH,
   AGENT_NAME_MAX_LENGTH,
@@ -18,6 +19,7 @@ import {
   activeAgents,
   agentCountLabel,
   isGoldListSort,
+  shouldShowOwnerLine,
   sortAgents,
   visibleAgents,
   type GoldListAgentWithFollowUp,
@@ -473,7 +475,7 @@ export function GoldListBoard() {
               key={agent.id}
               agent={agent}
               todayIso={todayIso}
-              showOwner={viewingAll}
+              showOwner={data ? shouldShowOwnerLine(data.scope, agent) : false}
               onAgentChange={handleAgentChange}
               onKeepVisibleChange={keepFollowUpVisible}
               outsideFilters={!visible.some((a) => a.id === agent.id)}
@@ -484,13 +486,23 @@ export function GoldListBoard() {
       {/* Archived agents keep their history and can be restored. Fetching them
           is opt-in so the everyday list stays small. */}
       <div className="space-y-3">
+        {/* A text control, not a button-shaped block: 16px, a 44px target
+            (the wrapper's [&_button]:min-h-11), and visible hover / focus /
+            pressed states. Behaviour is unchanged. */}
         <button
           type="button"
           aria-expanded={showArchived}
           onClick={() => setShowArchived((v) => !v)}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground"
+          className="-mx-2 inline-flex items-center gap-1.5 rounded-md px-2 text-base font-medium text-foreground/80 transition-colors hover:bg-muted/50 hover:text-foreground active:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary aria-expanded:text-foreground"
         >
           {showArchived ? "Hide archived" : "Show archived"}
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "size-4 transition-transform",
+              showArchived && "rotate-180",
+            )}
+          />
         </button>
         {showArchived && !loading ? (
           visibleArchived.length === 0 ? (
@@ -506,7 +518,9 @@ export function GoldListBoard() {
                   key={agent.id}
                   agent={agent}
                   todayIso={todayIso}
-                  showOwner={viewingAll}
+                  showOwner={
+                    data ? shouldShowOwnerLine(data.scope, agent) : false
+                  }
                   onAgentChange={handleAgentChange}
                 />
               ))}
