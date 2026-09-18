@@ -266,7 +266,7 @@ function SnapshotSection({ detail }: { detail: CoachingDetail }) {
             value={snapshot.week_totals.team_meetings}
           />
           <Stat
-            label="Gold list"
+            label="Coaching relationships"
             value={snapshot.week_totals.gold_list_touches}
           />
           <Stat
@@ -977,10 +977,10 @@ function RelationshipsSection({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Gold list relationships</CardTitle>
+        <CardTitle>Coaching relationships (legacy)</CardTitle>
         <CardDescription>
-          Strategic relationships we&apos;re building — persistent across weeks,
-          not the AE&apos;s personal gold-list touch log.
+          Preserved manager coaching notes, separate from the AE’s follow-up list.
+          <a className="block underline" href={`/gold-list?ae_id=${aeId}`}>Open this AE’s Gold List for contacts and activities</a>
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, ShieldCheck, MapPin, BarChart3, Sparkles } from "lucide-react";
+import {
+  BarChart3,
+  LogOut,
+  MapPin,
+  ShieldCheck,
+  Sparkles,
+  Trophy,
+} from "lucide-react";
 
 import { useSalesperson } from "@/lib/use-salesperson";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
@@ -17,6 +24,12 @@ import { NotificationOptIn } from "@/components/notification-opt-in";
 // fourth destination. Intentionally lightweight: profile summary, an Admin
 // link when applicable, and Log out. Anything else (settings, preferences,
 // help) can land here later without changing the nav surface.
+//
+// Leaderboard lives here now. It gave up its bottom-nav tab to Gold List (see
+// src/components/bottom-nav.tsx); the route, the page and its server gate are
+// unchanged — only the entry point moved. It sits above My Activity because
+// both are "how am I doing" reads, and it carries the same juice_box_only
+// exclusion the /leaderboard page itself enforces.
 
 export default function MorePage() {
   const router = useRouter();
@@ -99,6 +112,20 @@ export default function MorePage() {
             <Sparkles aria-hidden="true" className="size-4" />
             What&apos;s New
           </Link>
+          {/* Leaderboard — moved off the bottom nav when Gold List took its
+              tab. juice_box_only accounts are excluded here exactly as they
+              are on /leaderboard itself (which redirects them to /juice-box)
+              and by /api/leaderboard's requireAeToolAccess gate, so this is
+              the UX half of a rule the server already enforces. */}
+          {salesperson.role !== "juice_box_only" && (
+            <Link
+              href="/leaderboard"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              <Trophy aria-hidden="true" className="size-4" />
+              Leaderboard
+            </Link>
+          )}
           {/* My Activity — the AE's own range report. Open to anyone with the
               AE surface (i.e. not juice_box_only); the page + route both
               hard-scope to the signed-in salesperson. */}

@@ -4,11 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Citrus,
+  Gem,
   Home,
   ListChecks,
   Map as MapIcon,
   ScanLine,
-  Trophy,
   type LucideIcon,
 } from "lucide-react";
 
@@ -23,12 +23,22 @@ import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 // Role-awareness:
 //   * Juice Box       — open to the whole team; tab renders for any
 //                       signed-in salesperson.
+//   * Gold List       — relationship follow-up list. AE workflow, hidden
+//                       from assistants (and from juice_box_only).
 //   * Map             — Territory Map; deep-links to /offices?view=map.
 //                       AE workflow, hidden from assistants.
 //   * To-Dos          — AE workflow, hidden from assistants.
 //   * Scan Biz Card   — AE workflow, hidden from assistants.
 //   Settings / logout / notifications no longer live in the nav; they're
 //   reachable from the Home header (a small "More" icon links to /more).
+//
+// LEADERBOARD IS NO LONGER A TAB. Gold List took its slot (third, right after
+// Juice Box) because the follow-up loop is a daily workflow while the
+// leaderboard is an occasional check-in. /leaderboard itself is untouched —
+// same route, same page, same `requireAeToolAccess` gate on
+// /api/leaderboard — and is now reached from /more, next to My Activity.
+// Gold List did NOT become a seventh tab: at 320px seven tabs leave ~45px of
+// content width each, and six is already the practical ceiling.
 //
 // Spacing: this component is `position: fixed`, so consuming pages add
 // `BOTTOM_NAV_SPACER` (a `pb-…` class) to their main wrapper so the last
@@ -54,11 +64,6 @@ const JUICE_BOX: NavItem = {
   label: "Juice Box",
   icon: Citrus,
 };
-const LEADERBOARD: NavItem = {
-  href: "/leaderboard",
-  label: "Leaderboard",
-  icon: Trophy,
-};
 const TODOS: NavItem = { href: "/todos", label: "To-Dos", icon: ListChecks };
 const SCAN_BIZ_CARD: NavItem = {
   href: "/scan-biz-card",
@@ -72,6 +77,21 @@ const SCAN_BIZ_CARD: NavItem = {
 // "Map" label keeps the tab bar readable; "Territory Map" wouldn't fit
 // a 6-up bottom nav.
 const MAP: NavItem = { href: "/offices?view=map", label: "Map", icon: MapIcon };
+// Gold List — the AE's relationship follow-up list (/gold-list). Same AE-tool
+// audience as To-Dos / Scan / Map: hidden from assistants and juice_box_only.
+// Admins keep the tab because an admin who also sells has their own list (and
+// the page is where they read everyone else's).
+//
+// It occupies the slot Leaderboard used to hold, and keeps the FULL "Gold
+// List" label: tab labels wrap rather than truncate (see the label span
+// below), so at 320px it reads as "Gold" / "List" on two lines instead of
+// clipping to "Gold L…". Server-side authorization is unrelated to this file
+// — /api/gold-list/* re-checks the caller on every request.
+const GOLD_LIST: NavItem = {
+  href: "/gold-list",
+  label: "Gold List",
+  icon: Gem,
+};
 
 /**
  * Bottom padding any page using BottomNav should apply to its main wrapper.
@@ -98,10 +118,18 @@ const MAP: NavItem = { href: "/offices?view=map", label: "Map", icon: MapIcon };
 export const BOTTOM_NAV_SPACER =
   "pb-[calc(7rem+var(--app-safe-bottom,0px))]!";
 
-function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
+/**
+ * The tabs a given session should see. Exported for tests: it is a pure
+ * function of the stored session, so the per-role composition — chrome, never
+ * an authorization decision (see the security note in use-salesperson.ts) —
+ * can be asserted without rendering.
+ */
+export function buildNavItems(
+  salesperson: StoredSalesperson | null,
+): NavItem[] {
   if (!salesperson) return [HOME_AE];
   // Juice Box-only accounts (Travis, Rizz, …) see ONLY the Juice Box
-  // tab — they have no access to Home / Leaderboard / To-Dos / Scan
+  // tab — they have no access to Home / Gold List / To-Dos / Scan
   // and shouldn't be tempted by tabs that would just redirect them
   // back here. Notifications + log out are reachable via the gear in
   // the Juice Box page header (see /juice-box).
@@ -111,12 +139,14 @@ function buildNavItems(salesperson: StoredSalesperson | null): NavItem[] {
   // Home is the AE /dashboard.
   const home = salesperson.role === "admin" ? HOME_ADMIN : HOME_AE;
   // Juice Box is otherwise open to the whole team; every signed-in
-  // user gets the tab. To-Dos and Scan Biz Card stay AE-only since
-  // assistants have a restricted (VerificationCenter) dashboard and
-  // don't use those workflows.
-  const items: NavItem[] = [home, JUICE_BOX, LEADERBOARD];
+  // user gets the tab. Gold List, Map, To-Dos and Scan Biz Card stay
+  // AE-only: assistants have a restricted (VerificationCenter)
+  // dashboard and don't use those workflows. That leaves assistants
+  // with a two-tab bar — their third tab was Leaderboard, which now
+  // lives on /more for every role that can open it.
+  const items: NavItem[] = [home, JUICE_BOX];
   if (salesperson.role !== "assistant") {
-    items.push(MAP, TODOS, SCAN_BIZ_CARD);
+    items.push(GOLD_LIST, MAP, TODOS, SCAN_BIZ_CARD);
   }
   return items;
 }
@@ -198,7 +228,17 @@ export function BottomNav({
                   />
                   {showBadge && <UnreadBadge count={unreadCount} />}
                 </span>
-                <span className="max-w-full truncate">{item.label}</span>
+                {/* Labels WRAP instead of truncating. At 320px a six-up row
+                    gives each tab ~45px of content width, which clips
+                    "Gold List" to "Gold L…" under `truncate`; wrapping renders
+                    it as "Gold" / "List" and keeps the full label readable.
+                    `[overflow-wrap:anywhere]` is the backstop for a future
+                    single-word label with no space to break at. The taller
+                    two-line row still clears BOTTOM_NAV_SPACER (~78px of nav
+                    against 112px of padding). */}
+                <span className="max-w-full text-center leading-tight [overflow-wrap:anywhere]">
+                  {item.label}
+                </span>
               </Link>
             </li>
           );

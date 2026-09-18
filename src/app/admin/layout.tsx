@@ -22,9 +22,10 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
  *  are dropdown groups so the row stays scannable without cutting any
  *  destinations.
  *
- *  /office-imports lives outside /admin so non-admin assistants (who
- *  can't pass this layout's role==='admin' gate) can still reach it via /more.
- *  It still nests cleanly under the admin "Tools" group here because the
+ *  /office-imports and /gold-list live outside /admin so non-admin users
+ *  (assistants via /more; every AE via the bottom nav) can still reach them
+ *  without passing this layout's role==='admin' gate.
+ *  They still nest cleanly under the admin "Tools" group here because the
  *  active-state matcher keys off pathname, not URL ancestry. */
 type NavLeaf = { href: string; label: string };
 type NavItem =
@@ -52,6 +53,9 @@ const ADMIN_NAV: NavItem[] = [
     label: "Tools",
     items: [
       { href: "/admin/business-cards", label: "Business Cards" },
+      // Lives outside /admin (it's an AE surface that admins can read in
+      // full via its AE filter), same arrangement as Office Imports below.
+      { href: "/gold-list", label: "Gold List" },
       { href: "/office-imports", label: "Office Imports" },
       { href: "/admin/cogent", label: "Cogent Orders" },
       { href: "/admin/working-days", label: "Working Day Adjustments" },
