@@ -88,6 +88,9 @@ const TONE_CLASS: Record<Tone, string> = {
 
 export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
   const [standings, setStandings] = useState<Standing[] | null>(null);
+  // Only a private test account receives this: its own score, kept OUT of the
+  // team standings (it is never ranked against the team).
+  const [personal, setPersonal] = useState<Standing | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -98,6 +101,7 @@ export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
       .then(async (res) => {
         const body = (await res.json()) as {
           standings?: Standing[];
+          personal?: Standing;
           error?: string;
         };
         if (cancelled) return;
@@ -106,6 +110,7 @@ export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
           return;
         }
         setStandings(body.standings ?? []);
+        setPersonal(body.personal ?? null);
         setError(null);
       })
       .catch((err: unknown) => {
@@ -136,6 +141,7 @@ export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
           ) : (
             <ThisWeekBody
               standings={standings}
+              personal={personal}
               salespersonId={salespersonId}
             />
           )}
@@ -147,9 +153,11 @@ export function ThisWeekCard({ salespersonId, refreshKey }: Props) {
 
 function ThisWeekBody({
   standings,
+  personal,
   salespersonId,
 }: {
   standings: Standing[];
+  personal: Standing | null;
   salespersonId: string;
 }) {
   // Rank by percent (no goal = lowest), name as tiebreak.
@@ -159,7 +167,8 @@ function ThisWeekBody({
       a.first_name.localeCompare(b.first_name),
   );
   const myIndex = ranked.findIndex((s) => s.id === salespersonId);
-  const mine = myIndex >= 0 ? ranked[myIndex] : null;
+  // A test account isn't in the ranking: show its personal score, unranked.
+  const mine = myIndex >= 0 ? ranked[myIndex] : personal;
 
   // Top 3, plus the current rep's row when they sit outside it.
   const rows: Array<{ standing: Standing; rank: number; detached: boolean }> =
@@ -195,7 +204,11 @@ function ThisWeekBody({
           </span>
         </div>
       ) : null}
-      <Momentum mine={mine} rank={myIndex + 1} total={ranked.length} />
+      <Momentum
+        mine={mine}
+        rank={myIndex >= 0 ? myIndex + 1 : 0}
+        total={ranked.length}
+      />
       <Leaderboard rows={rows} currentSalespersonId={salespersonId} />
     </div>
   );
@@ -267,14 +280,18 @@ function Momentum({
       </div>
 
       <div className="flex items-center gap-3 text-xs text-muted-foreground">
-        <span className="inline-flex items-center gap-1">
-          <Trophy aria-hidden="true" className="size-3.5 text-amber-500" />
-          <span className="font-semibold text-foreground tabular-nums">
-            #{rank}
-          </span>
-          of {total}
-        </span>
-        <span aria-hidden="true">·</span>
+        {rank > 0 ? (
+          <>
+            <span className="inline-flex items-center gap-1">
+              <Trophy aria-hidden="true" className="size-3.5 text-amber-500" />
+              <span className="font-semibold text-foreground tabular-nums">
+                #{rank}
+              </span>
+              of {total}
+            </span>
+            <span aria-hidden="true">·</span>
+          </>
+        ) : null}
         <span className="inline-flex items-center gap-1">
           <CalendarDays aria-hidden="true" className="size-3.5" />
           {daysLeftLabel}

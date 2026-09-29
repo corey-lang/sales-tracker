@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 
-import { supabase } from "@/lib/supabase/client";
 import { apiFetch } from "@/lib/api-client";
 
 import { Button } from "@/components/ui/button";
@@ -14,10 +13,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-// "Match-all" filter for Supabase deletes (.delete() requires a filter to
-// avoid accidental full-table wipes).
-const MATCH_ALL = "1900-01-01";
-
 export function MaintenanceCard() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -26,7 +21,7 @@ export function MaintenanceCard() {
   const clearTestData = async () => {
     if (
       !confirm(
-        "Delete every activity_entries row for accounts marked is_test = true? This cannot be undone.",
+        "Delete every activity_entries row for YOUR test account(s)? This cannot be undone.",
       )
     )
       return;
@@ -35,35 +30,28 @@ export function MaintenanceCard() {
     setMsg(null);
     setError(null);
 
-    const { data: testPeople, error: peopleErr } = await supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .eq("is_test", true);
+    const res = await apiFetch("/api/admin/maintenance/activity", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "clear_test" }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      deleted?: number;
+      accounts?: number;
+      error?: string;
+    };
 
-    if (peopleErr) {
-      setBusy(false);
-      setError(peopleErr.message);
+    setBusy(false);
+    if (!res.ok) {
+      setError(body.error ?? "Could not clear test activity.");
       return;
     }
-    if (!testPeople || testPeople.length === 0) {
-      setBusy(false);
+    if (!body.accounts) {
       setMsg("No test accounts found — nothing to clear.");
       return;
     }
-
-    const ids = testPeople.map((p) => p.id);
-    const { error: delErr, count } = await supabase
-      .from("activity_entries")
-      .delete({ count: "exact" })
-      .in("salesperson_id", ids);
-
-    setBusy(false);
-    if (delErr) {
-      setError(delErr.message);
-      return;
-    }
     setMsg(
-      `Cleared ${count ?? 0} activity rows for ${testPeople.length} test account(s).`,
+      `Cleared ${body.deleted ?? 0} activity rows for ${body.accounts} test account(s).`,
     );
   };
 
@@ -80,17 +68,22 @@ export function MaintenanceCard() {
     setMsg(null);
     setError(null);
 
-    const { error: delErr, count } = await supabase
-      .from("activity_entries")
-      .delete({ count: "exact" })
-      .gte("entry_date", MATCH_ALL);
+    const res = await apiFetch("/api/admin/maintenance/activity", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "clear_all" }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      deleted?: number;
+      error?: string;
+    };
 
     setBusy(false);
-    if (delErr) {
-      setError(delErr.message);
+    if (!res.ok) {
+      setError(body.error ?? "Could not clear activity.");
       return;
     }
-    setMsg(`Cleared ${count ?? 0} activity rows.`);
+    setMsg(`Cleared ${body.deleted ?? 0} activity rows.`);
   };
 
   /**

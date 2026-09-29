@@ -114,7 +114,7 @@ function makeBuilder(table: string) {
         onRejected as never,
       ),
   };
-  for (const method of ["eq", "gte", "lte", "is", "in", "order", "limit"]) {
+  for (const method of ["eq", "gte", "lte", "is", "in", "order", "limit", "or", "range", "not"]) {
     self[method] = (col?: string, value?: unknown) => {
       if (col !== undefined) filters[`${method}:${col}`] = value;
       return self;

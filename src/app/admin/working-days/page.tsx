@@ -5,7 +5,7 @@ import { format, parseISO } from "date-fns";
 import { Trash2 } from "lucide-react";
 
 import { apiFetch, apiFetchJson } from "@/lib/api-client";
-import { supabase } from "@/lib/supabase/client";
+import { useVisibleRoster } from "@/lib/use-visible-roster";
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
 import { mondayOfWeek } from "@/lib/goals";
 import { formatAvailableDays } from "@/lib/working-days";
@@ -81,28 +81,26 @@ export default function AdminWorkingDaysPage() {
     }
   }, []);
 
+  // Active AEs for the individual-adjustment picker — you can't book PTO for
+  // someone who has left. From /api/roster/visible: real AEs plus this admin's
+  // OWN private test account (never anyone else's).
+  const { people: visibleRoster } = useVisibleRoster();
   useEffect(() => {
-    let cancelled = false;
-    // Active AEs only, for the individual-adjustment picker — you can't
-    // book PTO for someone who has left (`deactivated_at IS NULL`).
-    supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .eq("role", "ae")
-      .eq("is_test", false)
-      .is("deactivated_at", null)
-      .order("first_name", { ascending: true })
-      .then(({ data }) => {
-        if (cancelled || !data) return;
-        setPeople(data as Salesperson[]);
-      });
+    if (!visibleRoster) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPeople(
+      visibleRoster
+        .filter((p) => p.role === "ae" && p.deactivated_at === null)
+        .sort((x, y) => Number(x.is_test) - Number(y.is_test))
+        .map((p) => ({ id: p.id, first_name: p.first_name })),
+    );
+  }, [visibleRoster]);
+
+  useEffect(() => {
     // refresh() sets state only after an awaited fetch (not synchronously),
     // so this is safe; the lint rule can't see through the useCallback.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
-    return () => {
-      cancelled = true;
-    };
   }, [refresh]);
 
   // Group by the Monday of each adjustment's week, newest week first.

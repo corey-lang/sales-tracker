@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
+  requireLinkableDuplicateContact,
+  requireVisibleScans,
+} from "@/lib/server/roster";
+import {
   handleApiError,
   parseBody,
   requireReviewer,
@@ -20,12 +24,12 @@ export const runtime = "nodejs";
 
 const MarkDuplicateSchema = z.object({
   scanId: z.string().min(1, "scanId is required."),
-  duplicateOfContactId: z.string().optional(),
+  duplicateOfContactId: z.union([z.string().uuid("duplicateOfContactId must be a UUID."), z.literal("")]).optional(),
 });
 
 export async function POST(req: Request) {
   try {
-    await requireReviewer(req);
+    const me = await requireReviewer(req);
     const { scanId, duplicateOfContactId } = await parseBody(
       req,
       MarkDuplicateSchema,
@@ -35,6 +39,15 @@ export async function POST(req: Request) {
       : null;
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, me, [scanId]);
+    // The original contact must exist, be visible to this reviewer, and be on
+    // the same side of the test/real line as the scan — a caller-supplied
+    // UUID can't be used to pull a private test contact into another
+    // reviewer's (or a real scan's) workflow.
+    if (dupContactId) {
+      await requireLinkableDuplicateContact(supabase, me, scanId, dupContactId);
+    }
 
     const duplicateNotes = dupContactId
       ? `Confirmed duplicate of contact ${dupContactId}`

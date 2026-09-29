@@ -44,6 +44,7 @@
 
 import { addDays, format, parseISO } from "date-fns";
 
+import { selectAllPages } from "@/lib/server/paginate";
 import { getServerSupabase } from "@/lib/supabase/server";
 
 // Production Elevate integration endpoint. The earlier `test-app.elevateh.com`
@@ -265,7 +266,7 @@ export type OrdersSummary = {
   };
 };
 
-type Mapping = {
+export type Mapping = {
   sales_territory_name: string;
   salesperson_id: string;
   first_name: string;
@@ -308,14 +309,18 @@ export function isAttributableAe(rel: MappedAeRelation): boolean {
  * surfaces as UNMAPPED (flagged, never silently attributed), so non-AE/test/
  * departed users can't leak into production order reporting.
  */
-async function loadActiveMappings(): Promise<Mapping[]> {
+export async function loadActiveMappings(): Promise<Mapping[]> {
   const supabase = getServerSupabase();
-  const res = await supabase
-    .from("cogent_territory_mappings")
-    .select(
-      "sales_territory_name, salesperson_id, salespeople(first_name, role, is_test, deactivated_at)",
-    )
-    .eq("active", true);
+  // Paged to completion so a long mapping list can't be silently truncated.
+  const res = await selectAllPages<Record<string, unknown>>(() =>
+    supabase
+      .from("cogent_territory_mappings")
+      .select(
+        "id, sales_territory_name, salesperson_id, salespeople(first_name, role, is_test, deactivated_at)",
+      )
+      .eq("active", true)
+      .order("id", { ascending: true }),
+  );
 
   if (res.error) {
     console.warn(
@@ -325,7 +330,7 @@ async function loadActiveMappings(): Promise<Mapping[]> {
   }
 
   const mappings: Mapping[] = [];
-  for (const row of res.data ?? []) {
+  for (const row of res.data) {
     const r = row as {
       sales_territory_name: string;
       salesperson_id: string;

@@ -29,6 +29,7 @@ export const AUTO_APPROVE_MIN_CONFIDENCE = 90;
  */
 export const SCAN_SELECT_COLUMNS = [
   "id",
+  "is_test_data",
   "salesperson_id",
   "salesperson_name",
   "image_url",
@@ -57,6 +58,8 @@ export const SCAN_SELECT_COLUMNS = [
 /** The scan fields this module reads when building / classifying a contact. */
 export type ContactScan = {
   id: string;
+  /** Test-account scan. Test and real data never duplicate-match each other. */
+  is_test_data?: boolean | null;
   salesperson_id: string | null;
   salesperson_name: string | null;
   image_url: string | null;
@@ -437,9 +440,12 @@ export async function findDuplicateContact(
     return null;
   }
 
+  // Real scans only match real contacts (and test scans only test ones), so
+  // a test account's contacts can never mark a real card as a duplicate.
   const res = await supabase
     .from("business_card_contacts")
-    .select(CONTACT_DUP_COLUMNS);
+    .select(CONTACT_DUP_COLUMNS)
+    .eq("is_test_data", scan.is_test_data === true);
   if (res.error) {
     throw new Error(`Duplicate check failed: ${res.error.message}`);
   }

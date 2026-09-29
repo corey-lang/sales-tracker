@@ -21,7 +21,7 @@ export async function GET(
   { params }: { params: Promise<{ ae_id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id } = await params;
     const search = new URL(req.url).searchParams;
     const before = search.get("before");
@@ -36,7 +36,7 @@ export async function GET(
       throw badRequest("before_id must be a 1:1 id.");
     }
     const supabase = getServerSupabase();
-    const ae = await requireCoachableAe(supabase, ae_id);
+    const ae = await requireCoachableAe(supabase, ae_id, me);
     const page = await loadMeetingHistory(
       supabase,
       ae.id,

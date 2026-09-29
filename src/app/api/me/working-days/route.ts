@@ -36,6 +36,7 @@ export async function GET(req: Request) {
     const { adjustments, error } = await fetchWeekAdjustments(
       getServerSupabase(),
       weekStart,
+      [me.id],
     );
     if (error) {
       // `error` is already a user-safe string (raw provider text logged inside

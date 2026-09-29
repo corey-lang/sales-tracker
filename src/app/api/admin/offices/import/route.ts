@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { visibleRosterOr } from "@/lib/roster";
 import {
   ApiError,
   badRequest,
@@ -247,6 +248,7 @@ async function resolveSalespeople(
     id?: string | null;
     firstName?: string | null;
   },
+  viewer: { id: string },
 ): Promise<SalespersonResolver> {
   const wantedIds = new Set<string>();
   const wantedNames = new Set<string>();
@@ -281,6 +283,8 @@ async function resolveSalespeople(
           .from("salespeople")
           .select("id, first_name, is_test")
           .is("deactivated_at", null)
+          // Another admin's private test account resolves as "not found".
+          .or(visibleRosterOr(viewer.id))
           .in("id", idArr)
       : Promise.resolve({ data: [], error: null } as const),
     nameArr.length > 0
@@ -288,6 +292,8 @@ async function resolveSalespeople(
           .from("salespeople")
           .select("id, first_name, is_test")
           .is("deactivated_at", null)
+          // Another admin's private test account resolves as "not found".
+          .or(visibleRosterOr(viewer.id))
           .in("first_name", nameArr)
       : Promise.resolve({ data: [], error: null } as const),
   ]);
@@ -428,6 +434,7 @@ export async function POST(req: Request) {
       supabase,
       parsed.map((p) => p.row),
       defaults,
+      me,
     );
 
     // Pre-flight: if a default AE was specified, fail the whole batch

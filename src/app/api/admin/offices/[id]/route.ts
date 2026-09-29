@@ -1,3 +1,4 @@
+import { requireVisibleSalesperson } from "@/lib/server/roster";
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
@@ -79,7 +80,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireOfficeImporter(req);
+    const me = await requireOfficeImporter(req);
     const { id } = await params;
 
     // UUID parse up front so a malformed id never reaches the DB.
@@ -109,6 +110,10 @@ export async function GET(
     }
 
     const office = officeRes.data as unknown as OfficeRow;
+
+    // A private test account's offices (and visits) are its owner's alone:
+    // for anyone else this is indistinguishable from a missing office.
+    await requireVisibleSalesperson(supabase, me, office.salesperson_id, "Office not found.");
 
     // Visits read is independent of the office read. A failure here
     // degrades to an empty timeline + warning rather than 500'ing

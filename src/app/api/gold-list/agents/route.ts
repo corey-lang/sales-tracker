@@ -4,6 +4,7 @@ import { allGoldListRows, requireGoldListAccess } from "@/lib/server/gold-list";
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { allTestSalespersonIds } from "@/lib/server/roster";
 import { ApiError, handleApiError, parseBody } from "@/lib/server/auth";
 import {
   AGENT_COLUMNS,
@@ -106,7 +107,16 @@ export async function GET(req: Request) {
       throw new ApiError(500, "Could not load the Gold List.");
     }
 
-    const rows = (res.data ?? []) as GoldListAgent[];
+    let rows = (res.data ?? []) as GoldListAgent[];
+    if (viewAll) {
+      // "All AEs" is a business aggregate: it never includes ANY test
+      // account's agents (fake data must not move the count or the list) —
+      // not another admin's, and not the viewer's own. The owner still sees
+      // their test account's Gold List by selecting it explicitly
+      // (?ae_id=<test account>), which is the single-AE path above.
+      const tests = await allTestSalespersonIds(supabase);
+      if (tests.size) rows = rows.filter((a) => !tests.has(a.salesperson_id));
+    }
     const agents = await decorateAgents(supabase, rows, me);
 
     const body: GoldListAgentsResponse = {
@@ -120,7 +130,7 @@ export async function GET(req: Request) {
       },
     };
     if (canViewAllGoldLists(me)) {
-      body.ae_options = await listGoldListAeOptions(supabase);
+      body.ae_options = await listGoldListAeOptions(supabase, me);
     }
     return Response.json(body, {
       headers: { "Cache-Control": "private, no-store" },

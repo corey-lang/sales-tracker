@@ -1,3 +1,4 @@
+import { hiddenTestSalespersonIds } from "@/lib/server/roster";
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
@@ -124,10 +125,16 @@ export async function POST(req: Request) {
         .select("id, salesperson_id")
         .eq("id", contactId)
         .maybeSingle();
+      // A reviewer may stamp any contact EXCEPT another admin's private test
+      // account's (those are the owner's alone).
+      const hiddenOwners = isReviewer
+        ? await hiddenTestSalespersonIds(getServerSupabase(), me)
+        : new Set<string>();
       if (
         !ownRes.error &&
         ownRes.data &&
-        (isReviewer || ownRes.data.salesperson_id === me.id)
+        ((isReviewer && !hiddenOwners.has(String(ownRes.data.salesperson_id))) ||
+          ownRes.data.salesperson_id === me.id)
       ) {
         await getServerSupabase()
           .from("business_card_contacts")

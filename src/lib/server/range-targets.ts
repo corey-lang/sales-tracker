@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { buildRangeTargets, type RangeTargets } from "@/lib/range-targets";
 import type { WeeklyGoal } from "@/lib/goals";
+import { goalScopeOr, selectAllPages } from "@/lib/server/paginate";
 import { fetchRangeAdjustments } from "@/lib/server/working-days";
 
 // Server wrapper around the pure Range Goal Engine (src/lib/range-targets).
@@ -27,8 +28,15 @@ export async function calculateRangeTargets(
   endDate: string,
 ): Promise<RangeTargets> {
   const [goalsRes, adj] = await Promise.all([
-    supabase.from("weekly_goals").select("*"),
-    fetchRangeAdjustments(supabase, startDate, endDate),
+    // Only this AE's own rows + global rows, paged (never other people's).
+    selectAllPages<WeeklyGoal>(() =>
+      supabase
+        .from("weekly_goals")
+        .select("*")
+        .or(goalScopeOr([salespersonId]))
+        .order("id", { ascending: true }),
+    ),
+    fetchRangeAdjustments(supabase, startDate, endDate, [salespersonId]),
   ]);
 
   if (goalsRes.error) {
@@ -46,7 +54,7 @@ export async function calculateRangeTargets(
     salespersonId,
     startDate,
     endDate,
-    goals: (goalsRes.data ?? []) as WeeklyGoal[],
+    goals: goalsRes.data,
     adjustments: adj.adjustments,
   });
 }

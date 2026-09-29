@@ -12,8 +12,8 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
-import { supabase } from "@/lib/supabase/client";
 import { useSalesperson } from "@/lib/use-salesperson";
+import { useVisibleRoster } from "@/lib/use-visible-roster";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { useLivePermissions } from "@/lib/use-live-permissions";
 
@@ -661,49 +661,21 @@ export default function OfficeImportsPage() {
   const [defaultAeId, setDefaultAeId] = useState<string>("");
   const hasDefaultAe = defaultAeId.length > 0;
 
-  // Pull the AE roster for the picker. The anon key has SELECT on
-  // salespeople by default (no RLS on that table), so we can read it
-  // directly from the browser — matches the pattern in src/app/page.tsx
-  // (the name-picker login screen), including its active-roster predicate:
-  // `deactivated_at IS NULL`, so offices are never assigned to someone who
-  // has left. The server-side resolver in /api/admin/offices/import applies
-  // the same filter, so a hand-edited request can't do it either.
+  // The AE roster for the picker, from /api/roster/visible: real people plus
+  // the viewer's OWN private test account (the server applies the visibility
+  // rule; ownership is never readable with the public key). Active only —
+  // offices are never assigned to someone who has left. The import route
+  // applies the same rules again, so a hand-edited request can't bypass them.
+  const { people: visibleRoster } = useVisibleRoster();
   useEffect(() => {
-    let cancelled = false;
-    supabase
-      .from("salespeople")
-      .select("id, first_name, is_test")
-      .is("deactivated_at", null)
-      .order("first_name", { ascending: true })
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          // Picker failure is non-fatal — the user can still import
-          // a CSV that carries its own AE column. Surface the error
-          // inline only if they try to use the picker (the value
-          // stays empty until then).
-          console.warn("[office-imports] AE roster fetch failed", error);
-          setAePeople([]);
-          return;
-        }
-        setAePeople(
-          (
-            (data ?? []) as Array<{
-              id: string;
-              first_name: string;
-              is_test: boolean | null;
-            }>
-          ).map((row) => ({
-            id: row.id,
-            first_name: row.first_name,
-            is_test: row.is_test === true,
-          })),
-        );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!visibleRoster) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAePeople(
+      visibleRoster
+        .filter((p) => p.deactivated_at === null)
+        .map((p) => ({ id: p.id, first_name: p.first_name, is_test: p.is_test })),
+    );
+  }, [visibleRoster]);
 
   // ---- Import state ------------------------------------------------------
   const [importing, setImporting] = useState(false);

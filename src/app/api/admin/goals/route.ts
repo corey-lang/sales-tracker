@@ -8,7 +8,21 @@ import {
   requireAdmin,
 } from "@/lib/server/auth";
 import { WEEKLY_GOAL_MAX_VALUE } from "@/lib/one-on-ones";
+import { goalScopeOr, selectAllPages } from "@/lib/server/paginate";
+import {
+  requireVisibleSalesperson,
+  visibleSalespersonIds,
+} from "@/lib/server/roster";
 
+// GET /api/admin/goals[?salesperson_id=<uuid>|global]
+//
+// Admin-only. The goal rows the SIGNED-IN admin may see: global rows plus
+// rows for real people and for that admin's OWN private test accounts —
+// never another admin's. Scoped IN the query (ids resolved server-side),
+// paged to completion, so private rows are never loaded, let alone sent to a
+// browser. `salesperson_id=<uuid>` narrows to one person (404 if the viewer
+// can't see them); `salesperson_id=global` returns only global rows.
+//
 // POST /api/admin/goals
 //
 // Admin-only. Single endpoint behind which all admin Goal-card writes
@@ -63,12 +77,53 @@ const CreateSchema = z.object({
   gold_list_touches: goalValueField,
 });
 
+export async function GET(req: Request) {
+  try {
+    const me = await requireAdmin(req);
+    const supabase = getServerSupabase();
+    const scope = new URL(req.url).searchParams.get("salesperson_id");
+
+    let ids: string[];
+    if (scope === null) {
+      ids = await visibleSalespersonIds(supabase, me);
+    } else if (scope === "global") {
+      ids = [];
+    } else {
+      if (!z.string().uuid().safeParse(scope).success) {
+        throw new ApiError(400, "salesperson_id must be a UUID or 'global'.");
+      }
+      await requireVisibleSalesperson(supabase, me, scope);
+      ids = [scope];
+    }
+
+    const res = await selectAllPages<Record<string, unknown>>(() => {
+      const q = supabase.from("weekly_goals").select("*");
+      return (scope === "global" ? q.is("salesperson_id", null) : q.or(goalScopeOr(ids)))
+        .order("effective_from", { ascending: false })
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true });
+    });
+    if (res.error) {
+      throw new ApiError(500, `Could not load goals: ${res.error.message}`);
+    }
+    return Response.json({ goals: res.data });
+  } catch (err) {
+    return handleApiError(err);
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const me = await requireAdmin(req);
     const body = await parseBody(req, CreateSchema);
 
     const supabase = getServerSupabase();
+
+    // A per-person goal may only be written for someone the signed-in admin
+    // can see (another admin's private test account is a 404).
+    if (body.salesperson_id !== null) {
+      await requireVisibleSalesperson(supabase, me, body.salesperson_id);
+    }
 
     // Find the existing row at (scope, effective_from). One row max,
     // thanks to the partial UNIQUE indexes.

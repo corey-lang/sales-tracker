@@ -78,11 +78,14 @@ function tableRows(table: string): Row[] {
 
 function makeBuilder(table: string) {
   const filters: Record<string, unknown> = {};
+  /** PostgREST `or()` of `col.eq.value` terms (enough for the roster rule). */
+  const orGroups: Array<(row: Row) => boolean> = [];
   let slice: [number, number] = [0, 499];
   const orders: Array<[string, boolean]> = [];
   let pending: { op: "insert" | "update"; payload: Row } | null = null;
 
   const matches = (row: Row): boolean => {
+    if (!orGroups.every((g) => g(row))) return false;
     for (const [key, value] of Object.entries(filters)) {
       const [op, col] = key.split(":");
       if (!col) continue;
@@ -189,6 +192,17 @@ function makeBuilder(table: string) {
     },
     update: (payload: Row) => {
       pending = { op: "update", payload };
+      return self;
+    },
+    or: (expr: string) => {
+      const terms = expr.split(",").map((t) => {
+        const [col, op, ...rest] = t.split(".");
+        if (op !== "eq") throw new Error(`fake or(): unsupported op ${op}`);
+        const raw = rest.join(".");
+        const value = raw === "true" ? true : raw === "false" ? false : raw;
+        return (row: Row) => (row[col] ?? (typeof value === "boolean" ? false : null)) === value;
+      });
+      orGroups.push((row) => terms.some((f) => f(row)));
       return self;
     },
     maybeSingle: () => resolve(true),

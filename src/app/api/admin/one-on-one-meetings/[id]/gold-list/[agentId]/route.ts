@@ -36,11 +36,11 @@ export async function PUT(
   { params }: { params: Promise<{ id: string; agentId: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id, agentId } = await params;
     const body = await parseBody(req, Schema);
     const supabase = getServerSupabase();
-    const meeting = await requireMeeting(supabase, id);
+    const meeting = await requireMeeting(supabase, id, me);
     assertInProgress(meeting);
     const agent = await requireManagedAgent(supabase, meeting, agentId);
     const note = await saveGoldListDiscussionNote(

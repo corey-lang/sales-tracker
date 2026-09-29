@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleScans } from "@/lib/server/roster";
 import {
   handleApiError,
   parseBody,
@@ -38,6 +39,8 @@ export async function POST(req: Request) {
     const { scanId } = await parseBody(req, ApproveSchema);
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, reviewer, [scanId]);
 
     const scanRes = await supabase
       .from("business_card_scans")

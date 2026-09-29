@@ -38,7 +38,7 @@ export async function POST(
     const { id, agentId } = await params;
     const body = await parseBody(req, createActivitySchema);
     const supabase = getServerSupabase();
-    const meeting = await requireMeeting(supabase, id);
+    const meeting = await requireMeeting(supabase, id, me);
     assertInProgress(meeting);
     const agent = await requireManagedAgent(supabase, meeting, agentId);
 

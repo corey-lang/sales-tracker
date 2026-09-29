@@ -1,4 +1,9 @@
 import { getServerSupabase } from "@/lib/supabase/server";
+import {
+  goalScopeOr,
+  selectAllPages,
+  selectAllPagesForIds,
+} from "@/lib/server/paginate";
 import { badRequest, handleApiError, requireAdmin } from "@/lib/server/auth";
 import {
   ACTIVITIES,
@@ -46,32 +51,49 @@ export async function GET(req: Request) {
 
     const supabase = getServerSupabase();
 
-    let entriesQuery = supabase
-      .from("activity_entries")
-      .select(["salesperson_id", "entry_date", ...ACTIVITY_KEYS].join(","))
-      .gte("entry_date", from)
-      .lte("entry_date", to);
-    if (salesperson !== "all") {
-      entriesQuery = entriesQuery.eq("salesperson_id", salesperson);
+    // 1) REPORTING roster first (real AEs only — never test accounts, for
+    //    any viewer). A single-AE filter narrows it; it can't widen it.
+    const peopleRes = await supabase
+      .from("salespeople")
+      .select("id, first_name")
+      .eq("role", "ae")
+      .eq("is_test", false)
+      .is("deactivated_at", null)
+      .order("first_name", { ascending: true });
+    if (peopleRes.error) {
+      console.error(
+        `[activity-totals] roster read failed code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,
+      );
+      return Response.json({ error: "Could not load activity totals." }, { status: 500 });
     }
+    const roster = (peopleRes.data ?? []) as Array<{ id: string; first_name: string }>;
+    const scopeIds = roster
+      .map((p) => p.id)
+      .filter((id) => salesperson === "all" || id === salesperson);
 
-    const [peopleRes, entriesRes, goalsRes, adj] = await Promise.all([
-      // Active AEs only — `deactivated_at IS NULL` drops people who have
-      // left the company from current totals (their entries stay in the DB).
-      supabase
-        .from("salespeople")
-        .select("id, first_name")
-        .eq("role", "ae")
-        .eq("is_test", false)
-        .is("deactivated_at", null)
-        .order("first_name", { ascending: true }),
-      entriesQuery,
-      supabase.from("weekly_goals").select("*"),
-      fetchRangeAdjustments(supabase, from, to),
+    // 2) Only those ids' rows, filtered in-query and paged to completion —
+    //    a custom range can legitimately exceed one response (a year of
+    //    team activity), and no other account's rows can displace them.
+    const [entriesRes, goalsRes, adj] = await Promise.all([
+      selectAllPagesForIds<Partial<ActivityValues> & { salesperson_id: string; entry_date: string }>(
+        scopeIds,
+        (chunk) =>
+          supabase
+            .from("activity_entries")
+            .select(["id", "salesperson_id", "entry_date", ...ACTIVITY_KEYS].join(","))
+            .in("salesperson_id", chunk)
+            .gte("entry_date", from)
+            .lte("entry_date", to)
+            .order("id"),
+      ),
+      selectAllPages<WeeklyGoal>(() =>
+        supabase.from("weekly_goals").select("*").or(goalScopeOr(scopeIds)).order("id"),
+      ),
+      fetchRangeAdjustments(supabase, from, to, scopeIds),
     ]);
 
-    if (peopleRes.error ?? entriesRes.error ?? goalsRes.error) {
-      const provider = peopleRes.error ?? entriesRes.error ?? goalsRes.error;
+    if (entriesRes.error ?? goalsRes.error) {
+      const provider = entriesRes.error ?? goalsRes.error;
       console.error(
         `[activity-totals] read failed [${from}..${to}] code=${provider?.code ?? "?"} msg=${provider?.message ?? "?"}`,
       );
@@ -80,22 +102,13 @@ export async function GET(req: Request) {
         { status: 500 },
       );
     }
-    // Fail closed — never score against unadjusted targets.
     if (adj.error) {
       return Response.json({ error: adj.error }, { status: 502 });
     }
 
-    let people = (peopleRes.data ?? []) as Array<{
-      id: string;
-      first_name: string;
-    }>;
-    if (salesperson !== "all") {
-      people = people.filter((p) => p.id === salesperson);
-    }
-    const goals = (goalsRes.data ?? []) as WeeklyGoal[];
-    const entries = (entriesRes.data ?? []) as unknown as Array<
-      Partial<ActivityValues> & { salesperson_id: string; entry_date: string }
-    >;
+    const people = roster.filter((p) => scopeIds.includes(p.id));
+    const goals = goalsRes.data;
+    const entries = entriesRes.data;
 
     // Sum each AE's logged activity over the range, weekends INCLUDED —
     // activity totals are the Sun-Sat numerator. Targets stay business-day

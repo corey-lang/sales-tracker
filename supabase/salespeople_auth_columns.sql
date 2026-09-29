@@ -22,6 +22,19 @@ ALTER TABLE salespeople
   ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS admin_pin TEXT;
 
+-- 1b. A database seeded by an OLDER seed.sql may hold "Test" as a normal row
+--     (that seed ran before `is_test` existed). Nothing here reclassifies it:
+--     no immutable marker distinguishes it from a real person, so guessing
+--     could remove someone real from login/reporting. It is reported only;
+--     convert it deliberately with supabase/provision_test_ae.template.sql.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM salespeople WHERE is_test)
+     AND EXISTS (SELECT 1 FROM salespeople WHERE first_name = 'Test' AND is_test = FALSE) THEN
+    RAISE NOTICE 'AMBIGUOUS LEGACY STATE: an unflagged salesperson named "Test" exists and no test account does. It was NOT reclassified (it may be a real person). If it is the old seed row, convert it deliberately with supabase/provision_test_ae.template.sql (v_convert_legacy_row).';
+  END IF;
+END$$;
+
 -- 2. Keep the legacy is_admin boolean consistent with role for any row that
 --    predates is_admin. role remains authoritative.
 UPDATE salespeople

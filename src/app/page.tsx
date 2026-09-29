@@ -146,10 +146,15 @@ export default function Home() {
     // must not appear in the name list. This is presentation only — the
     // authoritative refusal is in /api/auth/login, which rejects a
     // deactivated row even if the name is typed in by hand.
+    //
+    // Test accounts (private production sandboxes) are never listed — their
+    // owner signs in through the separate test sign-in (`/?test=1`), which
+    // requires the account's PIN (enforced server-side in /api/auth/login).
     supabase
       .from("salespeople")
       .select("id, first_name, role")
       .is("deactivated_at", null)
+      .eq("is_test", false)
       .order("first_name", { ascending: true })
       .then(({ data, error }) => {
         if (error) {
@@ -158,6 +163,15 @@ export default function Home() {
         }
         setPeople((data ?? []) as LoginPerson[]);
       });
+  }, []);
+
+  // `/?test=1` switches to the test-account sign-in: name + PIN, no name
+  // list. Read from the URL after mount (not useSearchParams) so the normal
+  // sign-in page stays static and unchanged.
+  const [testMode, setTestMode] = useState(false);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTestMode(new URLSearchParams(window.location.search).get("test") === "1");
   }, []);
 
   // The salesperson whose name exactly matches what's typed/selected, or null.
@@ -174,6 +188,8 @@ export default function Home() {
   // drifted row (is_admin=true, role='ae') doesn't display a PIN prompt
   // the server-side gate wouldn't actually validate.
   const matchedAdmin = selectedPerson?.role === "admin" ? selectedPerson : null;
+  // Test sign-in always asks for a PIN; the server decides if it's valid.
+  const needsPin = testMode || !!matchedAdmin;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -251,9 +267,11 @@ export default function Home() {
       <Logo width={240} height={74} priority />
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle>Sign in</CardTitle>
+          <CardTitle>{testMode ? "Test account sign-in" : "Sign in"}</CardTitle>
           <CardDescription>
-            Type your first name. Admins also enter a PIN.
+            {testMode
+              ? "Enter the test account's name and its PIN."
+              : "Type your first name. Admins also enter a PIN."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -263,10 +281,10 @@ export default function Home() {
               <Input
                 id="name"
                 name="name"
-                list="salespeople-list"
+                list={testMode ? undefined : "salespeople-list"}
                 autoComplete="off"
                 autoCapitalize="words"
-                placeholder="Select your name"
+                placeholder={testMode ? "Test account name" : "Select your name"}
                 value={typed}
                 onChange={(e) => {
                   setTyped(e.target.value);
@@ -281,9 +299,9 @@ export default function Home() {
               </datalist>
             </div>
 
-            {matchedAdmin && (
+            {needsPin && (
               <div className="space-y-2">
-                <Label htmlFor="pin">Admin PIN</Label>
+                <Label htmlFor="pin">{testMode ? "PIN" : "Admin PIN"}</Label>
                 <Input
                   id="pin"
                   type="password"
@@ -325,7 +343,11 @@ export default function Home() {
             <Button
               className="w-full"
               type="submit"
-              disabled={loading || !selectedPerson || (!!matchedAdmin && !pin)}
+              disabled={
+                loading ||
+                (testMode ? !typed.trim() : !selectedPerson) ||
+                (needsPin && !pin)
+              }
             >
               {loading ? "Signing in…" : "Sign in"}
             </Button>

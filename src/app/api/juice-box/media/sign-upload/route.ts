@@ -8,6 +8,7 @@ import {
   handleApiError,
   parseBody,
   requireSalesperson,
+  forbidden,
 } from "@/lib/server/auth";
 import {
   JUICE_BOX_MEDIA_BUCKET,
@@ -64,6 +65,11 @@ const EXT_BY_MIME: Record<string, string> = {
 export async function POST(req: Request) {
   try {
     const me = await requireSalesperson(req);
+    // Test accounts (private production sandboxes) never post to the real
+    // team's Juice Box — reading is fine, writing is refused server-side.
+    if (me.is_test) {
+      throw forbidden("Test accounts can't post to the Juice Box.");
+    }
     const body = await parseBody(req, SignSchema);
 
     if (!(MEDIA_ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(body.content_type)) {

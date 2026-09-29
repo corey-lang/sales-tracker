@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleWeek } from "@/lib/server/roster";
 import {
   handleApiError,
   notFound,
@@ -62,7 +63,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id } = await params;
     const body = await parseBody(req, UpdateSchema);
 
@@ -87,6 +88,8 @@ export async function PATCH(
     }
 
     const supabase = getServerSupabase();
+    // A private test account's Weekly Focus is visible only to its owner.
+    await requireVisibleWeek(supabase, id, me);
 
     // Always read the focus row so we can return a consistent shape and
     // resolve ae_id for the private-notes upsert. When there's a shared

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleScans } from "@/lib/server/roster";
 import { handleApiError, parseBody, requireAdmin } from "@/lib/server/auth";
 import {
   normalizeEmail,
@@ -54,10 +55,12 @@ function clean(value: string | undefined): string | null {
 
 export async function POST(req: Request) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { scanId, fields } = await parseBody(req, UpdateScanSchema);
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, me, [scanId]);
 
     const scanRes = await supabase
       .from("business_card_scans")

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 
 import { supabase } from "@/lib/supabase/client";
 import { formatDateMDY } from "@/lib/dates";
 import { useSalesperson } from "@/lib/use-salesperson";
+import { useVisibleRoster } from "@/lib/use-visible-roster";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -44,7 +45,7 @@ type Props = {
 export function MessagesCard({ people }: Props) {
   const { salesperson } = useSalesperson();
   const [allPeople, setAllPeople] = useState<Salesperson[]>([]);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [rawMessages, setMessages] = useState<Message[]>([]);
   const [refreshTick, setRefreshTick] = useState(0);
 
   const [scope, setScope] = useState<string>(GLOBAL_SCOPE);
@@ -55,24 +56,24 @@ export function MessagesCard({ people }: Props) {
 
   const refresh = () => setRefreshTick((n) => n + 1);
 
-  // Name-resolution lookup for EXISTING message rows only — deliberately
-  // unfiltered, so a message addressed to (or written by) someone who has
-  // since left still renders their name instead of "Unknown". The recipient
-  // dropdown uses the `people` prop, which is the live roster (admins and
-  // deactivated AEs already excluded upstream in src/app/admin/page.tsx).
+  // Per-AE messages only for AEs in this admin's visible roster (fail
+  // private until it loads); global messages always show.
+  const messages = useMemo(() => {
+    const visible = new Set(allPeople.map((p) => p.id));
+    return rawMessages.filter(
+      (m) => m.salesperson_id == null || visible.has(m.salesperson_id),
+    );
+  }, [rawMessages, allPeople]);
+
+  // Name-resolution lookup for EXISTING message rows — includes people who
+  // have since left, so their messages still render a name. Another admin's
+  // private test account (and messages addressed to it) never appears; the
+  // recipient dropdown uses the `people` prop, the live visible roster.
+  const { people: roster } = useVisibleRoster();
   useEffect(() => {
-    let cancelled = false;
-    supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .then(({ data }) => {
-        if (cancelled) return;
-        if (data) setAllPeople(data as Salesperson[]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (roster) setAllPeople(roster);
+  }, [roster]);
 
   useEffect(() => {
     let cancelled = false;

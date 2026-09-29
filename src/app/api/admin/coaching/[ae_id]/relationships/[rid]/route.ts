@@ -70,14 +70,14 @@ export async function PATCH(
   { params }: { params: Promise<{ ae_id: string; rid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id, rid } = await params;
     const body = await parseBody(req, UpdateSchema);
 
     const supabase = getServerSupabase();
     // Gate on role='ae' so the URL's ae_id can't be a stale id that
     // happens to still resolve in salespeople under a different role.
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
 
     const patch: Record<string, unknown> = {};
     if (body.contact_name !== undefined) patch.contact_name = body.contact_name;
@@ -124,10 +124,10 @@ export async function DELETE(
   { params }: { params: Promise<{ ae_id: string; rid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id, rid } = await params;
     const supabase = getServerSupabase();
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
     // Soft archive — preserves longitudinal Gold List history. To truly
     // delete, a service-role caller can act on the row directly; the UI
     // never does.

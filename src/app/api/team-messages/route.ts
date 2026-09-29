@@ -7,6 +7,7 @@ import {
   handleApiError,
   parseBody,
   requireSalesperson,
+  forbidden,
 } from "@/lib/server/auth";
 import { fetchGiphyById, isGiphyHost } from "@/lib/server/giphy";
 import { fanOutJuiceBoxPush } from "@/lib/server/push";
@@ -420,6 +421,11 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const me = await requireSalesperson(req);
+    // Test accounts (private production sandboxes) never post to the real
+    // team's Juice Box — reading is fine, writing is refused server-side.
+    if (me.is_test) {
+      throw forbidden("Test accounts can't post to the Juice Box.");
+    }
     const body = await parseBody(req, CreateMessageSchema);
     const supabase = getServerSupabase();
 

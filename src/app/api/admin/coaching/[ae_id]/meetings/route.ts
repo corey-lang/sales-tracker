@@ -33,7 +33,7 @@ export async function GET(
     const me = await requireAdmin(req);
     const { ae_id } = await params;
     const supabase = getServerSupabase();
-    const ae = await requireCoachableAe(supabase, ae_id);
+    const ae = await requireCoachableAe(supabase, ae_id, me);
     const workspace = await loadWorkspace(supabase, ae, me);
     return Response.json(workspace, {
       headers: { "Cache-Control": "private, no-store" },
@@ -51,7 +51,7 @@ export async function POST(
     const me = await requireAdmin(req);
     const { ae_id } = await params;
     const supabase = getServerSupabase();
-    const ae = await requireCoachableAe(supabase, ae_id);
+    const ae = await requireCoachableAe(supabase, ae_id, me);
     const { meeting, created } = await startOrResumeMeeting(supabase, ae, me);
     return Response.json({ meeting, created }, { status: created ? 201 : 200 });
   } catch (err) {

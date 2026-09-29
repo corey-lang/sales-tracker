@@ -27,6 +27,12 @@ import {
   type AuthedSalesperson,
 } from "@/lib/server/auth";
 import {
+  canSeeSalesperson,
+  visibleRosterOr,
+  type RosterVisibilityRow,
+} from "@/lib/roster";
+import { requireVisibleSalesperson } from "@/lib/server/roster";
+import {
   GOLD_LIST_ACTIVITIES_TABLE,
   GOLD_LIST_AGENTS_TABLE,
   type GoldListActivity,
@@ -120,9 +126,10 @@ export async function resolveGoldListScope(
   }
   // An admin filtering by AE — confirm the id is a real salesperson so a typo
   // in the query string reads as "not found" rather than an empty Gold List.
+  // A private test account someone else owns is also "not found".
   const res = await supabase
     .from("salespeople")
-    .select("id")
+    .select("id, is_test, test_owner_id")
     .eq("id", requested)
     .maybeSingle();
   if (res.error) {
@@ -131,7 +138,9 @@ export async function resolveGoldListScope(
     );
     throw new ApiError(500, "Could not load that AE's Gold List.");
   }
-  if (!res.data) throw notFound("AE not found.");
+  if (!res.data || !canSeeSalesperson(me, res.data as RosterVisibilityRow)) {
+    throw notFound("AE not found.");
+  }
   return { me, ownerId: requested, viewAll: false };
 }
 
@@ -164,8 +173,16 @@ export async function requireViewableAgent(
   }
   if (!res.data) throw notFound("Gold List agent not found.");
   const agent = res.data as GoldListAgent;
-  if (agent.salesperson_id !== me.id && !canViewAllGoldLists(me)) {
-    throw notFound("Gold List agent not found.");
+  if (agent.salesperson_id !== me.id) {
+    if (!canViewAllGoldLists(me)) throw notFound("Gold List agent not found.");
+    // Admin read of someone else's agent: not a private test account they
+    // don't own.
+    await requireVisibleSalesperson(
+      supabase,
+      me,
+      agent.salesperson_id,
+      "Gold List agent not found.",
+    );
   }
   return agent;
 }
@@ -599,12 +616,14 @@ async function loadOwnerNames(
  */
 export async function listGoldListAeOptions(
   supabase: Db,
+  viewer: { id: string },
 ): Promise<Array<{ id: string; first_name: string }>> {
+  // Real AEs/admins, plus the viewer's OWN private test account(s).
   const res = await supabase
     .from("salespeople")
     .select("id, first_name, role")
     .in("role", ["ae", "admin"])
-    .eq("is_test", false)
+    .or(visibleRosterOr(viewer.id))
     .order("first_name", { ascending: true });
   if (res.error) {
     console.warn(

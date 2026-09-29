@@ -1,3 +1,4 @@
+import { ID_CHUNK, selectAllPages } from "@/lib/server/paginate";
 import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, requireReviewer } from "@/lib/server/auth";
 
@@ -92,30 +93,37 @@ export async function GET(req: Request) {
   const exportedBy = reviewer.first_name;
 
   // `id` is selected for the post-export marking step; it is not a CSV column.
-  let query = supabase
-    .from("business_card_contacts")
-    .select(["id", ...COLUMNS].join(", "))
-    .in("verification_status", ["auto_approved", "approved"])
-    .order("created_at", { ascending: false });
+  // Paged to completion: a single request is silently capped by the API row
+  // limit, which would drop contacts from the CSV (and leave them unmarked).
+  const res = await selectAllPages<Record<string, unknown>>(() => {
+    let query = supabase
+      .from("business_card_contacts")
+      .select(["id", ...COLUMNS].join(", "))
+      .in("verification_status", ["auto_approved", "approved"])
+      // Never export test data (contacts from test scans / test accounts —
+      // stamped by trg_stamp_business_card_contact_test_data).
+      .eq("is_test_data", false);
 
-  if (salespersonId) {
-    query = query.eq("salesperson_id", salespersonId);
-  } else if (salespersonName) {
-    query = query.eq("salesperson_name", salespersonName);
-  }
+    if (salespersonId) {
+      query = query.eq("salesperson_id", salespersonId);
+    } else if (salespersonName) {
+      query = query.eq("salesperson_name", salespersonName);
+    }
 
-  // Default: skip contacts already exported. includeExported=true re-exports
-  // everything but (below) leaves the original exported_at values untouched.
-  if (!includeExported) {
-    query = query.is("exported_at", null);
-  }
-
-  const res = await query;
+    // Default: skip contacts already exported. includeExported=true re-exports
+    // everything but (below) leaves the original exported_at values untouched.
+    if (!includeExported) {
+      query = query.is("exported_at", null);
+    }
+    return query
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true });
+  });
   if (res.error) {
     return Response.json({ error: res.error.message }, { status: 500 });
   }
 
-  const rows = (res.data ?? []) as unknown as Record<string, unknown>[];
+  const rows = res.data;
 
   // Mark contacts as exported only for a real, fresh export: at least one row,
   // and not a re-export (includeExported must not overwrite old export stamps).
@@ -162,15 +170,19 @@ export async function GET(req: Request) {
 
     // Stamp the contacts. The `.is("exported_at", null)` guard makes this a
     // no-op for any contact exported by a concurrent run — never an overwrite.
-    const markRes = await supabase
-      .from("business_card_contacts")
-      .update({
-        exported_at: new Date().toISOString(),
-        export_batch_id: batchId,
-        exported_by: exportedBy,
-      })
-      .in("id", ids)
-      .is("exported_at", null);
+    const exportedAt = new Date().toISOString();
+    let markRes: { error: { message: string } | null } = { error: null };
+    for (let i = 0; i < ids.length && !markRes.error; i += ID_CHUNK) {
+      markRes = await supabase
+        .from("business_card_contacts")
+        .update({
+          exported_at: exportedAt,
+          export_batch_id: batchId,
+          exported_by: exportedBy,
+        })
+        .in("id", ids.slice(i, i + ID_CHUNK))
+        .is("exported_at", null);
+    }
 
     if (markRes.error) {
       return Response.json(

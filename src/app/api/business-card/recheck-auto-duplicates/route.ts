@@ -1,3 +1,4 @@
+import { selectAllPages } from "@/lib/server/paginate";
 import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, requireReviewer } from "@/lib/server/auth";
 import {
@@ -50,17 +51,35 @@ export async function POST(req: Request) {
     const supabase = getServerSupabase();
 
     // 1. Load eligible auto-duplicate scans + all contact dup-rows in parallel.
-    const [scansRes, contactsRes] = await Promise.all([
-      supabase
-        .from("business_card_scans")
-        .select(
-          "id, extracted_email, extracted_phone, extracted_full_name, extracted_last_name, extracted_company, normalized_email, normalized_phone",
-        )
-        .eq("verification_status", "auto_duplicate")
-        .is("verified_contact_id", null)
-        .limit(RECHECK_CAP),
-      supabase.from("business_card_contacts").select(CONTACT_DUP_COLUMNS),
+    // Both paged: the contact pool must be COMPLETE (a truncated pool would
+    // wrongly clear real duplicates), and the scan list is capped by
+    // RECHECK_CAP as a work limit, not by the API row limit.
+    const [scansPaged, contactsRes] = await Promise.all([
+      selectAllPages<Record<string, unknown>>(() =>
+        supabase
+          .from("business_card_scans")
+          .select(
+            "id, extracted_email, extracted_phone, extracted_full_name, extracted_last_name, extracted_company, normalized_email, normalized_phone",
+          )
+          .eq("verification_status", "auto_duplicate")
+          .is("verified_contact_id", null)
+          // Real data only: test scans are never rechecked against, and test
+          // contacts never count as, real duplicates.
+          .eq("is_test_data", false)
+          .order("id", { ascending: true }),
+      ),
+      selectAllPages<Record<string, unknown>>(() =>
+        supabase
+          .from("business_card_contacts")
+          .select(CONTACT_DUP_COLUMNS)
+          .eq("is_test_data", false)
+          .order("id", { ascending: true }),
+      ),
     ]);
+    const scansRes = {
+      error: scansPaged.error,
+      data: scansPaged.data.slice(0, RECHECK_CAP),
+    };
 
     if (scansRes.error) {
       return Response.json(

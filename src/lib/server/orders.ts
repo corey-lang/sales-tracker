@@ -182,6 +182,9 @@ export async function getMonthlyOrders(now?: Date): Promise<MonthlyOrders> {
     supabase,
     startDate,
     monthEndDate,
+    // Company holidays only: no per-person rows (PTO / a test account's)
+    // are read at all.
+    [],
   );
 
   let pace: OrderPace | null = null;

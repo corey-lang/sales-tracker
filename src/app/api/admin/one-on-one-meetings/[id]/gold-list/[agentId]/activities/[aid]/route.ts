@@ -32,7 +32,7 @@ export async function PATCH(
     const { id, agentId, aid } = await params;
     const body = await parseBody(req, updateActivitySchema);
     const supabase = getServerSupabase();
-    const meeting = await requireMeeting(supabase, id);
+    const meeting = await requireMeeting(supabase, id, me);
     assertInProgress(meeting);
     const agent = await requireManagedAgent(supabase, meeting, agentId);
 

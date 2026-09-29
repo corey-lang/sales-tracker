@@ -47,11 +47,11 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id } = await params;
     const body = await parseBody(req, CreateSchema);
     const supabase = getServerSupabase();
-    const meeting = await requireMeeting(supabase, id);
+    const meeting = await requireMeeting(supabase, id, me);
     assertInProgress(meeting);
 
     const res = await supabase

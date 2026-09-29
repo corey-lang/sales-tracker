@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleScans } from "@/lib/server/roster";
 import {
   handleApiError,
   parseBody,
@@ -34,10 +35,12 @@ const UpdateRotationSchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    await requireReviewer(req);
+    const me = await requireReviewer(req);
     const { scanId, rotation } = await parseBody(req, UpdateRotationSchema);
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, me, [scanId]);
 
     // Only an existing scan's rotation may be updated.
     const upd = await supabase

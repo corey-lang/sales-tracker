@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { addDays, format, startOfWeek } from "date-fns";
 
-import { supabase } from "@/lib/supabase/client";
+import { useVisibleRoster } from "@/lib/use-visible-roster";
 import { todayInAppTimezone } from "@/lib/dates";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 
@@ -21,7 +21,27 @@ import { MaintenanceCard } from "@/components/admin/maintenance-card";
 type Salesperson = { id: string; first_name: string };
 
 export default function AdminDashboardPage() {
-  const [people, setPeople] = useState<Salesperson[]>([]);
+  // Active AEs as this admin may see them: real AEs, plus the admin's OWN
+  // private test account (sorted last). Other admins' test accounts never
+  // appear. The totals themselves always exclude test accounts server-side.
+  const { people: roster } = useVisibleRoster();
+  const people: Salesperson[] = useMemo(
+    () =>
+      (roster ?? [])
+        .filter((p) => p.role === "ae" && p.deactivated_at === null)
+        .sort((a, b) => Number(a.is_test) - Number(b.is_test))
+        .map((p) => ({ id: p.id, first_name: p.first_name })),
+    [roster],
+  );
+
+  // Dashboard messages can't be addressed to a private test account (they're
+  // hidden from the direct API by design), so that recipient list is real
+  // people only.
+  const messagePeople = useMemo(
+    () => (roster ?? []).filter((p) => p.role === "ae" && p.deactivated_at === null && !p.is_test)
+      .map((p) => ({ id: p.id, first_name: p.first_name })),
+    [roster],
+  );
 
   useScrollToTop();
 
@@ -41,33 +61,6 @@ export default function AdminDashboardPage() {
   });
   const [salespersonFilter, setSalespersonFilter] = useState<string>("all");
 
-  useEffect(() => {
-    let cancelled = false;
-    // Real AEs only. Filtering positively on `role = 'ae'` (vs. excluding
-    // known non-AE roles) keeps juice_box_only guests (Travis, Rizz, Faith,
-    // …) and any future role out of the admin selector, filters, totals,
-    // and goal scope automatically. role is now the single source of truth
-    // for admin status (the legacy is_admin column is unused in app logic),
-    // so the previous belt-and-suspenders is_admin filter is gone. The test
-    // account is the lone AE-role exception we still want visible — kept
-    // and pushed to the bottom of the list via the is_test ordering.
-    // `deactivated_at IS NULL` keeps departed AEs out of the selector,
-    // filters, totals, and goal scope — their rows (and history) stay.
-    supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .eq("role", "ae")
-      .is("deactivated_at", null)
-      .order("is_test", { ascending: true })
-      .order("first_name", { ascending: true })
-      .then(({ data }) => {
-        if (cancelled) return;
-        if (data) setPeople(data);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   return (
     <div className="flex flex-col gap-6">
@@ -88,7 +81,7 @@ export default function AdminDashboardPage() {
         people={people}
       />
 
-      <MessagesCard people={people} />
+      <MessagesCard people={messagePeople} />
 
       <GoalsCard people={people} />
 

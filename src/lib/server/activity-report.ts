@@ -15,6 +15,11 @@ import {
 } from "@/lib/goals";
 import { weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
+import {
+  goalScopeOr,
+  selectAllPages,
+  selectAllPagesForIds,
+} from "@/lib/server/paginate";
 
 // Admin Activity Report aggregation — per-AE progress toward weekly goals for
 // one Mon-Fri week, computed SERVER-SIDE with the service-role client behind
@@ -67,6 +72,121 @@ function appDateOnly(iso: string): string {
 }
 
 /**
+ * THE per-AE weekly scoring, shared by the team report below and the
+ * single-AE reader (buildSingleAeActivityWeek). Pure: given one AE's Sun-Sat
+ * actuals, the goal rows, and the week's working-day adjustments, it resolves
+ * the goal AS OF `goalAsOf`, applies availability (PTO/holidays), and scores
+ * with adjustedWeekScore() — the same helpers the leaderboard uses.
+ */
+export function scoreActivityWeek(input: {
+  salesperson: { id: string; first_name: string };
+  actual: ActivityValues;
+  goals: WeeklyGoal[];
+  adjustments: Awaited<ReturnType<typeof fetchWeekAdjustments>>["adjustments"];
+  since: string;
+  goalAsOf: string;
+  today: string;
+}): ActivityReportRow {
+  const { salesperson: p, actual, goals, adjustments, since, goalAsOf, today } = input;
+  const resolvedGoal = resolveActiveGoal(p.id, goals, goalAsOf);
+  const avail = weekAvailability({
+    weekStart: since,
+    salespersonId: p.id,
+    adjustments,
+    today,
+  });
+  // Score + adjusted targets from the SHARED helper — the same call the
+  // leaderboard makes, so the report % and leaderboard % are identical.
+  const { percent, adjustedTargets } = adjustedWeekScore(
+    actual,
+    resolvedGoal,
+    avail.availableDays,
+  );
+  // Original targets (DB, never mutated) for the "16 / 20" context.
+  const originalTargets = weeklyTargetsFrom(resolvedGoal);
+  const cells = {} as Record<ActivityKey, ActivityReportCell>;
+  for (const k of ACTIVITY_KEYS) {
+    const goal = adjustedTargets[k];
+    cells[k] = {
+      actual: actual[k],
+      goal,
+      original_goal: originalTargets[k],
+      percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
+    };
+  }
+  return {
+    id: p.id,
+    first_name: p.first_name,
+    cells,
+    score: percent,
+    available_days: avail.availableDays,
+    expected_percent: avail.expectedPercent,
+    is_holiday_week: avail.isHolidayWeek,
+  };
+}
+
+/**
+ * ONE AE's row of the activity report, for any AE — including a test
+ * account, which the team report (and every team aggregate) deliberately
+ * excludes. Same numerator window, goal resolution, availability and scoring
+ * (scoreActivityWeek); it just reads only this AE's entries and returns only
+ * this AE's row, so a test account's numbers can be shown on its own pages
+ * without ever entering a team calculation. FAILS CLOSED like the team
+ * report.
+ */
+export async function buildSingleAeActivityWeek(
+  supabase: SupabaseClient,
+  salesperson: { id: string; first_name: string },
+  since: string,
+  through: string,
+  goalAsOf: string,
+  today: string,
+): Promise<{ row: ActivityReportRow | null; error: string | null }> {
+  const activity = activityWindowForBusinessWeek(since, today);
+  // Only this AE's rows, filtered in the query and paged — so another
+  // account's volume (e.g. a test account's) can never displace them.
+  const [entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
+    selectAllPages<Partial<ActivityValues>>(() =>
+      supabase
+        .from("activity_entries")
+        .select(["id", "salesperson_id", ...ACTIVITY_KEYS].join(","))
+        .eq("salesperson_id", salesperson.id)
+        .gte("entry_date", activity.since)
+        .lte("entry_date", activity.through)
+        .order("id"),
+    ),
+    selectAllPages<WeeklyGoal>(() =>
+      supabase.from("weekly_goals").select("*").or(goalScopeOr([salesperson.id])).order("id"),
+    ),
+    fetchWeekAdjustments(supabase, since, [salesperson.id]),
+  ]);
+  if (entriesRes.error ?? goalsRes.error) {
+    const provider = entriesRes.error ?? goalsRes.error;
+    console.warn(
+      `[activity-report] single-AE read failed ae=${salesperson.id} business=[${since}..${through}] code=${provider?.code ?? "?"} msg=${provider?.message ?? "?"}`,
+    );
+    return { row: null, error: REPORT_READ_ERROR };
+  }
+  if (adjustmentsRes.error) return { row: null, error: adjustmentsRes.error };
+  const actual = { ...ZERO_ACTIVITY };
+  for (const e of entriesRes.data) {
+    for (const k of ACTIVITY_KEYS) actual[k] += Number(e[k] ?? 0);
+  }
+  return {
+    row: scoreActivityWeek({
+      salesperson,
+      actual,
+      goals: goalsRes.data,
+      adjustments: adjustmentsRes.adjustments,
+      since,
+      goalAsOf,
+      today,
+    }),
+    error: null,
+  };
+}
+
+/**
  * Builds the per-AE activity report for one week. `since` is the week's Monday
  * (the weekStart for available-day math AND goal resolution), `through` its
  * Mon-Fri end, `goalAsOf` resolves each AE's goal as of the week, and `today`
@@ -87,28 +207,51 @@ export async function buildActivityReport(
 ): Promise<{ rows: ActivityReportRow[]; error: string | null }> {
   // Numerator window = Sun-Sat activity week (weekend entries included).
   const activity = activityWindowForBusinessWeek(since, today);
-  const [peopleRes, entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
-    // This report can render prior weeks, so unlike the live roster cards we
-    // keep deactivated AEs in the base query and filter by the selected week's
-    // date window below. That preserves historical rows without putting former
-    // AEs back on current-only selectors elsewhere.
-    supabase
-      .from("salespeople")
-      .select("id, first_name, deactivated_at")
-      .eq("role", "ae")
-      .eq("is_test", false)
-      .order("first_name", { ascending: true }),
-    supabase
-      .from("activity_entries")
-      .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
-      .gte("entry_date", activity.since)
-      .lte("entry_date", activity.through),
-    supabase.from("weekly_goals").select("*"),
-    fetchWeekAdjustments(supabase, since),
+  // 1) The REPORTING roster first (real AEs only). This report can render
+  // prior weeks, so unlike the live roster cards we keep deactivated AEs in
+  // the base query and filter by the selected week's date window below. That
+  // preserves historical rows without putting former AEs back on
+  // current-only selectors elsewhere.
+  const peopleRes = await supabase
+    .from("salespeople")
+    .select("id, first_name, deactivated_at")
+    .eq("role", "ae")
+    .eq("is_test", false)
+    .order("first_name", { ascending: true });
+  if (peopleRes.error) {
+    console.warn(
+      `[activity-report] roster read failed business=[${since}..${through}] code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,
+    );
+    return { rows: [], error: REPORT_READ_ERROR };
+  }
+  const people = (peopleRes.data ?? []) as Array<{
+    id: string;
+    first_name: string;
+    deactivated_at: string | null;
+  }>;
+  const rosterIds = people.map((p) => p.id);
+
+  // 2) Only the roster's rows, filtered in the query and paged to completion.
+  const [entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
+    selectAllPagesForIds<Partial<ActivityValues> & { salesperson_id: string }>(
+      rosterIds,
+      (chunk) =>
+        supabase
+          .from("activity_entries")
+          .select(["id", "salesperson_id", ...ACTIVITY_KEYS].join(","))
+          .in("salesperson_id", chunk)
+          .gte("entry_date", activity.since)
+          .lte("entry_date", activity.through)
+          .order("id"),
+    ),
+    selectAllPages<WeeklyGoal>(() =>
+      supabase.from("weekly_goals").select("*").or(goalScopeOr(rosterIds)).order("id"),
+    ),
+    fetchWeekAdjustments(supabase, since, rosterIds),
   ]);
 
-  if (peopleRes.error ?? entriesRes.error ?? goalsRes.error) {
-    const provider = peopleRes.error ?? entriesRes.error ?? goalsRes.error;
+  if (entriesRes.error ?? goalsRes.error) {
+    const provider = entriesRes.error ?? goalsRes.error;
     console.warn(
       `[activity-report] read failed business=[${since}..${through}] activity=[${activity.since}..${activity.through}] code=${provider?.code ?? "?"} msg=${provider?.message ?? "?"}`,
     );
@@ -119,16 +262,8 @@ export async function buildActivityReport(
     return { rows: [], error: adjustmentsRes.error };
   }
   const adjustments = adjustmentsRes.adjustments;
-
-  const people = (peopleRes.data ?? []) as Array<{
-    id: string;
-    first_name: string;
-    deactivated_at: string | null;
-  }>;
-  const entries = (entriesRes.data ?? []) as unknown as Array<
-    Partial<ActivityValues> & { salesperson_id: string }
-  >;
-  const goals = (goalsRes.data ?? []) as WeeklyGoal[];
+  const entries = entriesRes.data;
+  const goals = goalsRes.data;
 
   const totals = new Map<string, ActivityValues>();
   for (const p of people) totals.set(p.id, { ...ZERO_ACTIVITY });
@@ -146,44 +281,17 @@ export async function buildActivityReport(
       // past reports still render correctly after offboarding.
       return appDateOnly(p.deactivated_at) >= activity.since;
     })
-    .map((p) => {
-      const actual = totals.get(p.id) ?? { ...ZERO_ACTIVITY };
-      const resolvedGoal = resolveActiveGoal(p.id, goals, goalAsOf);
-      const avail = weekAvailability({
-        weekStart: since,
-        salespersonId: p.id,
+    .map((p) =>
+      scoreActivityWeek({
+        salesperson: p,
+        actual: totals.get(p.id) ?? { ...ZERO_ACTIVITY },
+        goals,
         adjustments,
+        since,
+        goalAsOf,
         today,
-      });
-      // Score + adjusted targets from the SHARED helper — the same call the
-      // leaderboard makes, so the report % and leaderboard % are identical.
-      const { percent, adjustedTargets } = adjustedWeekScore(
-        actual,
-        resolvedGoal,
-        avail.availableDays,
-      );
-      // Original targets (DB, never mutated) for the "16 / 20" context.
-      const originalTargets = weeklyTargetsFrom(resolvedGoal);
-      const cells = {} as Record<ActivityKey, ActivityReportCell>;
-      for (const k of ACTIVITY_KEYS) {
-        const goal = adjustedTargets[k];
-        cells[k] = {
-          actual: actual[k],
-          goal,
-          original_goal: originalTargets[k],
-          percent: goal > 0 ? Math.round((actual[k] / goal) * 100) : null,
-        };
-      }
-      return {
-        id: p.id,
-        first_name: p.first_name,
-        cells,
-        score: percent,
-        available_days: avail.availableDays,
-        expected_percent: avail.expectedPercent,
-        is_holiday_week: avail.isHolidayWeek,
-      };
-    });
+      }),
+    );
 
   return { rows, error: null };
 }

@@ -5,8 +5,9 @@
 // ONLY way to read or write them.
 //
 // REUSE, NOT RE-IMPLEMENTATION
-//   * Activity & Results = buildActivityReport() (the admin activity report)
-//     run for last week and this week. That helper already resolves each
+//   * Activity & Results = the admin activity report's per-AE scoring
+//     (scoreActivityWeek, via buildSingleAeActivityWeek) run for last week
+//     and this week. That helper already resolves each
 //     week's goal AS OF that week's Monday (resolveActiveGoal), applies the
 //     PTO/holiday adjustment, and scores with adjustedWeekScore() — the same
 //     call the leaderboard makes. So last week's % uses last week's goals, and
@@ -67,7 +68,7 @@ import {
   WEEKLY_FOCUS_TABLE,
   type WeeklyFocusCommitment,
 } from "@/lib/one-on-ones";
-import { buildActivityReport } from "@/lib/server/activity-report";
+import { buildSingleAeActivityWeek } from "@/lib/server/activity-report";
 import {
   ApiError,
   notFound,
@@ -82,6 +83,7 @@ import {
   loadActivitySummaries,
 } from "@/lib/server/gold-list";
 import { GOLD_LIST_ACTIVITIES_TABLE } from "@/lib/gold-list";
+import { requireVisibleSalesperson } from "@/lib/server/roster";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Db = SupabaseClient<any, any, any>;
@@ -157,7 +159,7 @@ export async function startOrResumeMeeting(
   );
 }
 
-export async function requireMeeting(
+async function loadMeeting(
   supabase: Db,
   meetingId: string,
 ): Promise<OneOnOneMeeting> {
@@ -171,6 +173,23 @@ export async function requireMeeting(
   }
   if (!res.data) throw notFound("1:1 not found.");
   return res.data as OneOnOneMeeting;
+}
+
+/**
+ * Loads a meeting for `viewer` (the signed-in admin). A meeting whose AE is a
+ * private test account the viewer doesn't own is a 404, exactly like a
+ * meeting that doesn't exist — every /one-on-one-meetings/[id] route goes
+ * through here, so a meeting id can't be used to reach someone else's test
+ * AE.
+ */
+export async function requireMeeting(
+  supabase: Db,
+  meetingId: string,
+  viewer: { id: string },
+): Promise<OneOnOneMeeting> {
+  const meeting = await loadMeeting(supabase, meetingId);
+  await requireVisibleSalesperson(supabase, viewer, meeting.ae_id, "1:1 not found.");
+  return meeting;
 }
 
 /** Writes are only allowed while a meeting is in progress. */
@@ -232,7 +251,7 @@ export async function saveMeetingField(
   }
   if (res.data) return res.data as OneOnOneMeeting;
   // Nothing matched: completed, or a newer save exists. Say which.
-  const now = await requireMeeting(supabase, meetingId);
+  const now = await loadMeeting(supabase, meetingId);
   assertInProgress(now);
   throw new DraftRevisionConflict(now[field], now[rev]);
 }
@@ -324,15 +343,20 @@ async function weekResult(
   week: { since: string; through: string; goalAsOf: string },
   today: string,
 ): Promise<ActivityWeekResult> {
-  const report = await buildActivityReport(
+  // One AE's row, scored by the SAME scoreActivityWeek() the team activity
+  // report (and, via adjustedWeekScore, the leaderboard) uses. Reading just
+  // this AE means a private test account gets real numbers on its own 1:1
+  // without ever being added to a team report.
+  const report = await buildSingleAeActivityWeek(
     supabase,
+    { id: aeId, first_name: "" },
     week.since,
     week.through,
     week.goalAsOf,
     today,
   );
   if (report.error) throw new ApiError(500, report.error);
-  const row = report.rows.find((r) => r.id === aeId);
+  const row = report.row;
   const activity = activityWindowForBusinessWeek(week.since, today);
   return {
     week_start: week.since,
@@ -668,7 +692,7 @@ export async function loadWorkspace(
   ]);
   const [lastMeeting, notes, actionAgentIds, goldList] = await Promise.all([
     history.items[0]
-      ? requireMeeting(supabase, history.items[0].id)
+      ? loadMeeting(supabase, history.items[0].id)
       : Promise.resolve(null),
     meeting ? loadMeetingNotes(supabase, meeting.id) : Promise.resolve([]),
     meeting ? loadActionAgentIds(supabase, meeting.id) : Promise.resolve([]),
@@ -686,7 +710,7 @@ export async function loadWorkspace(
   );
 
   return {
-    ae,
+    ae: { id: ae.id, first_name: ae.first_name },
     today: denverDate(asOf),
     meeting,
     last_completed: lastMeeting
@@ -744,7 +768,7 @@ export async function loadMeetingRecord(
  * Completes `meeting`, freezing what was reviewed.
  *
  * The Last Week / This Week comparison is computed here, from LIVE activity
- * and goals (the same buildActivityReport() the workspace shows) — that's
+ * and goals (the same per-AE activity-report scoring the workspace shows) — that's
  * not meeting-scoped data. Everything meeting-scoped — Gold List discussion
  * snapshots, attributed Gold List actions, commitment reviews — plus the
  * status flip happens inside complete_one_on_one_meeting(), ONE transaction

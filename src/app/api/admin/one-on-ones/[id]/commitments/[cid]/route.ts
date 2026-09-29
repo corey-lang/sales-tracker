@@ -4,6 +4,7 @@ import {
   buildLegacyCommitmentPatch,
 } from "@/lib/legacy-commitments";
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleWeek } from "@/lib/server/roster";
 import {
   handleApiError,
   notFound,
@@ -59,8 +60,13 @@ async function writeLegacy(
   weekId: string,
   cid: string,
   patch: Record<string, unknown>,
+  me: { id: string },
 ): Promise<WeeklyFocusCommitment> {
-  const res = await getServerSupabase().rpc("update_legacy_commitment", {
+  const supabase = getServerSupabase();
+  // A private test account's commitments are reachable only by its owner —
+  // same 404 as a commitment that doesn't exist (contract unchanged).
+  await requireVisibleWeek(supabase, weekId, me, "Commitment not found.");
+  const res = await supabase.rpc("update_legacy_commitment", {
     p_week_id: weekId,
     p_commitment_id: cid,
     p_patch: patch,
@@ -78,7 +84,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id, cid } = await params;
     const body = await parseBody(req, LegacyCommitmentUpdateSchema);
 
@@ -87,7 +93,7 @@ export async function PATCH(
       return Response.json({ error: "No fields to update." }, { status: 400 });
     }
 
-    return Response.json({ commitment: await writeLegacy(id, cid, patch) });
+    return Response.json({ commitment: await writeLegacy(id, cid, patch, me) });
   } catch (err) {
     return handleApiError(err);
   }
@@ -98,13 +104,13 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id, cid } = await params;
     // Soft-delete: mark status='dropped' instead of removing the row.
     // Preserves coaching history; the UI's trash affordance is really
     // "remove from active focus", not "erase from history".
     return Response.json({
-      commitment: await writeLegacy(id, cid, { ...LEGACY_DROP_PATCH }),
+      commitment: await writeLegacy(id, cid, { ...LEGACY_DROP_PATCH }, me),
     });
   } catch (err) {
     return handleApiError(err);

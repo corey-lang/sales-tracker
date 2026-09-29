@@ -41,10 +41,11 @@ export const dynamic = "force-dynamic";
 async function apply(
   params: Promise<{ id: string; cid: string }>,
   patch: Record<string, unknown>,
+  me: { id: string },
 ): Promise<Response> {
   const { id, cid } = await params;
   const supabase = getServerSupabase();
-  const meeting = await requireMeeting(supabase, id);
+  const meeting = await requireMeeting(supabase, id, me);
   assertInProgress(meeting);
   const res = await supabase.rpc("update_legacy_commitment_in_one_on_one", {
     p_meeting_id: meeting.id,
@@ -65,11 +66,11 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const body = await parseBody(req, LegacyCommitmentUpdateSchema);
     const patch = buildLegacyCommitmentPatch(body);
     if (!patch) throw new ApiError(400, "No fields to update.");
-    return await apply(params, patch);
+    return await apply(params, patch, me);
   } catch (err) {
     return handleApiError(err);
   }
@@ -80,8 +81,8 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
-    return await apply(params, { ...LEGACY_DROP_PATCH });
+    const me = await requireAdmin(req);
+    return await apply(params, { ...LEGACY_DROP_PATCH }, me);
   } catch (err) {
     return handleApiError(err);
   }

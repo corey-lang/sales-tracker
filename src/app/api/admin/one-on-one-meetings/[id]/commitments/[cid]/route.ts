@@ -59,10 +59,13 @@ const UpdateSchema = z.object({
 });
 
 /** The in-progress meeting + one of its AE's commitments. Call after requireAdmin. */
-async function load(params: Promise<{ id: string; cid: string }>) {
+async function load(
+  params: Promise<{ id: string; cid: string }>,
+  me: { id: string },
+) {
   const { id, cid } = await params;
   const supabase = getServerSupabase();
-  const meeting = await requireMeeting(supabase, id);
+  const meeting = await requireMeeting(supabase, id, me);
   assertInProgress(meeting);
   // Pinned to the meeting's AE: a commitment belonging to anyone else 404s.
   const res = await supabase
@@ -83,9 +86,9 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const body = await parseBody(req, UpdateSchema);
-    const { supabase, meeting, commitment } = await load(params);
+    const { supabase, meeting, commitment } = await load(params, me);
     const isOwn = commitment.origin_meeting_id === meeting.id;
 
     const patch: Record<string, unknown> = {};
@@ -141,8 +144,8 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; cid: string }> },
 ) {
   try {
-    await requireAdmin(req);
-    const { supabase, meeting, commitment } = await load(params);
+    const me = await requireAdmin(req);
+    const { supabase, meeting, commitment } = await load(params, me);
     if (commitment.origin_meeting_id !== meeting.id) {
       throw new ApiError(
         409,

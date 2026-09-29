@@ -44,12 +44,12 @@ export async function PATCH(
   { params }: { params: Promise<{ ae_id: string; tid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id, tid } = await params;
     const body = await parseBody(req, UpdateSchema);
 
     const supabase = getServerSupabase();
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
 
     const patch: Record<string, unknown> = {};
     if (body.content !== undefined) patch.content = body.content;
@@ -82,10 +82,10 @@ export async function DELETE(
   { params }: { params: Promise<{ ae_id: string; tid: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id, tid } = await params;
     const supabase = getServerSupabase();
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
     const res = await supabase
       .from(TRAINING_COMMITMENTS_TABLE)
       .delete()

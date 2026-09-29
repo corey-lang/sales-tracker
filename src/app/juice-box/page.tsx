@@ -1045,6 +1045,8 @@ function JuiceBoxFeed({
     channel: JuiceBoxChannel,
   ) => boolean;
 }) {
+  // Test accounts can read but not post (enforced server-side).
+  const { salesperson } = useSalesperson();
   // Local cache read once at mount. Subsequent state initializers below
   // pull from this single shared object so we don't hit localStorage
   // three times (state + reactions + hasMore). Returns null on cache
@@ -2184,7 +2186,15 @@ function JuiceBoxFeed({
           </div>
         )}
         <div className="mx-auto w-full max-w-2xl px-3 py-2">
-          <Composer channel={channel} onPosted={handleSelfPosted} />
+          {salesperson?.is_test === true ? (
+            // Test accounts are private sandboxes: posting is refused
+            // server-side, so don't offer a composer that can't work.
+            <p className="px-4 py-3 text-center text-sm text-muted-foreground">
+              Test accounts can read the Juice Box but can&apos;t post to the team.
+            </p>
+          ) : (
+            <Composer channel={channel} onPosted={handleSelfPosted} />
+          )}
         </div>
       </div>
       {/* A conversation left this channel. Non-disruptive: sits above the

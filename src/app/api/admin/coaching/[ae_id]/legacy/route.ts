@@ -38,10 +38,10 @@ export async function GET(
   { params }: { params: Promise<{ ae_id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id } = await params;
     const supabase = getServerSupabase();
-    const ae = await requireCoachableAe(supabase, ae_id);
+    const ae = await requireCoachableAe(supabase, ae_id, me);
 
     const [relationshipsRes, archivedRes, trainingRes, weeksRes] =
       await Promise.all([

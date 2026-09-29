@@ -1,5 +1,10 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, requireReviewer } from "@/lib/server/auth";
+import { selectAllPages, selectAllPagesForIds } from "@/lib/server/paginate";
+import {
+  hiddenTestSalespersonIds,
+  ownedTestSalespersonIds,
+} from "@/lib/server/roster";
 import {
   CONTACT_DUP_COLUMNS,
   matchScanAgainstContacts,
@@ -52,28 +57,52 @@ function autoDupReasonLabel(match: DuplicateMatch | null): string {
 
 export async function GET(req: Request) {
   try {
-    await requireReviewer(req);
+    const me = await requireReviewer(req);
     const supabase = getServerSupabase();
+    // Test accounts' scans/contacts are shown only to the test account's
+    // owner (workflow visibility); other reviewers never see them.
+    const hidden = await hiddenTestSalespersonIds(supabase, me);
+    const visible = (row: Record<string, unknown>) =>
+      !(typeof row.salesperson_id === "string" && hidden.has(row.salesperson_id));
 
-    // 1. All scans, newest first.
-    const scansRes = await supabase
-      .from("business_card_scans")
-      .select(SCAN_COLUMNS)
-      .order("created_at", { ascending: false });
+    // In-query scope: real rows, plus rows of test accounts this reviewer OWNS.
+    // (Filtering AFTER a capped fetch would let test rows crowd real ones out.)
+    const ownTestIds = await ownedTestSalespersonIds(supabase, me);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inScope = (q: any) =>
+      ownTestIds.length
+        ? q.or(`is_test_data.eq.false,salesperson_id.in.(${ownTestIds.join(",")})`)
+        : q.eq("is_test_data", false);
+
+    // 1. All in-scope scans, newest first (paged to completion).
+    const scansRes = await selectAllPages<Record<string, unknown>>(() =>
+      inScope(supabase.from("business_card_scans").select(SCAN_COLUMNS))
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true }),
+    );
     if (scansRes.error) {
       throw new Error(`Failed to load scans: ${scansRes.error.message}`);
     }
-    const scans = (scansRes.data ?? []) as Record<string, unknown>[];
+    const scans = scansRes.data.filter(visible);
 
     // 2. CRM-ready contacts for the per-AE export summary. Non-fatal: an error
     //    here just yields an empty summary, matching the prior client behavior.
-    const exportRes = await supabase
-      .from("business_card_contacts")
-      .select("salesperson_id, salesperson_name, verification_status, exported_at")
-      .in("verification_status", ["auto_approved", "approved"]);
-    const exportContacts = exportRes.error ? [] : (exportRes.data ?? []);
+    const exportRes = await selectAllPages<Record<string, unknown>>(() =>
+      inScope(
+        supabase
+          .from("business_card_contacts")
+          .select(
+            "id, salesperson_id, salesperson_name, verification_status, exported_at",
+          )
+          .in("verification_status", ["auto_approved", "approved"]),
+      ).order("id", { ascending: true }),
+    );
+    const exportContacts = (exportRes.error ? [] : exportRes.data).filter(visible);
 
-    // 3. The contacts that flagged scans are duplicates of — one batched query.
+    // 3. The contacts that flagged scans are duplicates of. A STORED
+    //    duplicate_of_contact_id is never trusted on its own: the contact must
+    //    be visible to this reviewer AND on the same side of the test/real
+    //    line as the scan, or the link is dropped from the response.
     const matchedIds = [
       ...new Set(
         scans
@@ -85,16 +114,38 @@ export async function GET(req: Request) {
     ];
     let duplicateContacts: Record<string, unknown>[] = [];
     if (matchedIds.length > 0) {
-      const contactsRes = await supabase
-        .from("business_card_contacts")
-        .select(DUPLICATE_CONTACT_COLUMNS)
-        .in("id", matchedIds);
+      const contactsRes = await selectAllPagesForIds<Record<string, unknown>>(
+        matchedIds,
+        (chunk) =>
+          supabase
+            .from("business_card_contacts")
+            .select(`${DUPLICATE_CONTACT_COLUMNS}, salesperson_id, is_test_data`)
+            .in("id", chunk)
+            .order("id", { ascending: true }),
+      );
+      const byId = new Map<string, Record<string, unknown>>();
       if (!contactsRes.error) {
-        duplicateContacts = (contactsRes.data ?? []) as Record<
-          string,
-          unknown
-        >[];
+        for (const c of contactsRes.data) {
+          if (visible(c)) byId.set(c.id as string, c);
+        }
       }
+      const linked = new Set<string>();
+      for (const scan of scans) {
+        const id = scan.duplicate_of_contact_id;
+        if (typeof id !== "string" || id.length === 0) continue;
+        const c = byId.get(id);
+        if (c && (c.is_test_data === true) === (scan.is_test_data === true)) {
+          linked.add(id);
+        } else {
+          scan.duplicate_of_contact_id = null;
+        }
+      }
+      duplicateContacts = [...linked].map((id) => {
+        const { salesperson_id: _sp, is_test_data: _t, ...rest } = byId.get(id)!;
+        void _sp;
+        void _t;
+        return rest;
+      });
     }
 
     // 4. Re-classify auto-marked duplicates under the CURRENT conservative
@@ -109,16 +160,27 @@ export async function GET(req: Request) {
           : "") === "auto_duplicate",
     );
     if (autoDupScans.length > 0) {
-      const dupContactsRes = await supabase
-        .from("business_card_contacts")
-        .select(CONTACT_DUP_COLUMNS);
-      const dupRows = (
-        dupContactsRes.error ? [] : (dupContactsRes.data ?? [])
-      ) as ContactDupRow[];
+      // Auto-duplicates are re-classified against contacts on their own side
+      // of the test/real line only: real scans vs real contacts, this
+      // reviewer's own test scans vs their own test contacts.
+      const poolRes = await selectAllPages<ContactDupRow>(() =>
+        inScope(
+          supabase.from("business_card_contacts").select(`is_test_data, salesperson_id, ${CONTACT_DUP_COLUMNS}`),
+        ).order("id", { ascending: true }),
+      );
+      const pool = (poolRes.error ? [] : poolRes.data).filter((c) =>
+        visible(c as unknown as Record<string, unknown>),
+      );
+      const realPool = pool.filter(
+        (c) => (c as unknown as { is_test_data: boolean }).is_test_data !== true,
+      );
+      const testPool = pool.filter(
+        (c) => (c as unknown as { is_test_data: boolean }).is_test_data === true,
+      );
       for (const scan of autoDupScans) {
         const match = matchScanAgainstContacts(
           scan as unknown as DuplicateScanInput,
-          dupRows,
+          scan.is_test_data === true ? testPool : realPool,
         );
         // Strong = likely a real duplicate; anything weaker (or no current
         // match) = likely false, safe for the bulk send-back-to-review.

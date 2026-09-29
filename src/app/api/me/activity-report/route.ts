@@ -11,6 +11,7 @@ import {
   type ActivityValues,
 } from "@/lib/activities";
 import { averagePercent } from "@/lib/goals";
+import { selectAllPages } from "@/lib/server/paginate";
 import { calculateRangeTargets } from "@/lib/server/range-targets";
 
 // GET /api/me/activity-report?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -54,12 +55,17 @@ export async function GET(req: Request) {
     // each week's prorated, time-off-adjusted weekly goal). It throws a safe
     // error on read failure → fail closed.
     const [entriesRes, range] = await Promise.all([
-      supabase
-        .from("activity_entries")
-        .select(["entry_date", ...ACTIVITY_KEYS].join(","))
-        .eq("salesperson_id", me.id)
-        .gte("entry_date", from)
-        .lte("entry_date", to),
+      // Paged to completion: a long range can exceed one API response (the
+      // row cap truncates silently), which would undercount the report.
+      selectAllPages<Partial<ActivityValues> & { entry_date: string }>(() =>
+        supabase
+          .from("activity_entries")
+          .select(["id", "entry_date", ...ACTIVITY_KEYS].join(","))
+          .eq("salesperson_id", me.id)
+          .gte("entry_date", from)
+          .lte("entry_date", to)
+          .order("id", { ascending: true }),
+      ),
       calculateRangeTargets(supabase, me.id, from, to),
     ]);
 
@@ -75,9 +81,7 @@ export async function GET(req: Request) {
     // based via the Range Goal Engine, so weekend work counts toward what was
     // achieved without changing the working-day target.
     const actuals: ActivityValues = { ...ZERO_ACTIVITY };
-    for (const e of (entriesRes.data ?? []) as unknown as Array<
-      Partial<ActivityValues> & { entry_date: string }
-    >) {
+    for (const e of entriesRes.data) {
       for (const k of ACTIVITY_KEYS) actuals[k] += Number(e[k] ?? 0);
     }
 

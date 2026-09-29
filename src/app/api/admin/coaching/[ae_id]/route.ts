@@ -57,7 +57,7 @@ export async function GET(
     // Pin to role='ae' so juice_box_only / assistant / admin ids
     // returning here are treated as not-found rather than silently
     // returning empty coaching state for an unsupported role.
-    const ae = await requireCoachableAe(supabase, ae_id);
+    const ae = await requireCoachableAe(supabase, ae_id, me);
 
     // First: make sure the current week's focus row exists. Stamp the
     // signed-in admin as the manager on first creation.
@@ -73,7 +73,7 @@ export async function GET(
       privateNotesRes,
       goalsRes,
     ] = await Promise.all([
-      buildSnapshots(supabase, [ae.id]),
+      buildSnapshots(supabase, [ae.id], undefined, ae.is_test ? [ae.id] : []),
       supabase
         .from(COACHING_RELATIONSHIPS_TABLE)
         .select("*")
@@ -220,7 +220,7 @@ export async function GET(
       .map((w) => ({ ...w, commitments: byWeek.get(w.id) ?? [] }));
 
     const payload: CoachingDetail = {
-      ae,
+      ae: { id: ae.id, first_name: ae.first_name },
       snapshot:
         snapshots.get(ae.id) ??
         ({

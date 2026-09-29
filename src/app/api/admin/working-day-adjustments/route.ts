@@ -7,6 +7,11 @@ import {
   parseBody,
   requireAdmin,
 } from "@/lib/server/auth";
+import { selectAllPages } from "@/lib/server/paginate";
+import {
+  requireVisibleSalesperson,
+  visibleSalespersonIds,
+} from "@/lib/server/roster";
 
 // /api/admin/working-day-adjustments
 //
@@ -14,7 +19,10 @@ import {
 // supabase/working_day_adjustments.sql). All writes flow through here with the
 // service-role key — the table is RLS-locked so anon clients can only READ.
 //
-//   GET  → list every adjustment (newest date first), joined to AE first_name.
+//   GET  → list the adjustments the SIGNED-IN admin may see (company-wide ones
+//          plus those for real people and their OWN private test accounts —
+//          never another admin's), newest date first, joined to AE first_name.
+//          Scoped in the query and paged; private rows are never loaded.
 //   POST → create one global (applies_to_all) or individual adjustment.
 //
 // DELETE lives in ./[id]/route.ts.
@@ -53,16 +61,24 @@ const CreateSchema = z.union([GlobalSchema, IndividualSchema]);
 
 export async function GET(req: Request) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const supabase = getServerSupabase();
 
-    const res = await supabase
-      .from("working_day_adjustments")
-      .select(
-        "id, adjustment_date, salesperson_id, applies_to_all, day_value, reason, note, created_by, created_at, salespeople:salesperson_id(first_name)",
-      )
-      .order("adjustment_date", { ascending: false })
-      .order("created_at", { ascending: false });
+    const visibleIds = await visibleSalespersonIds(supabase, me);
+    const scope = visibleIds.length
+      ? `applies_to_all.eq.true,salesperson_id.in.(${visibleIds.join(",")})`
+      : "applies_to_all.eq.true";
+    const res = await selectAllPages<Record<string, unknown>>(() =>
+      supabase
+        .from("working_day_adjustments")
+        .select(
+          "id, adjustment_date, salesperson_id, applies_to_all, day_value, reason, note, created_by, created_at, salespeople:salesperson_id(first_name)",
+        )
+        .or(scope)
+        .order("adjustment_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true }),
+    );
 
     if (res.error) {
       // Raw provider text logged server-side only; caller gets a safe message.
@@ -73,7 +89,7 @@ export async function GET(req: Request) {
     }
 
     // Flatten the embedded AE name to a plain field for the client.
-    const adjustments = (res.data ?? []).map((row) => {
+    const adjustments = res.data.map((row) => {
       const rel = (row as { salespeople?: unknown }).salespeople;
       const first =
         Array.isArray(rel) && rel.length > 0
@@ -110,6 +126,11 @@ export async function POST(req: Request) {
     };
 
     const supabase = getServerSupabase();
+    // An individual adjustment may only target someone the signed-in admin can
+    // see (another admin's private test account is a 404).
+    if (!appliesToAll && body.salesperson_id) {
+      await requireVisibleSalesperson(supabase, me, body.salesperson_id);
+    }
     const insRes = await supabase
       .from("working_day_adjustments")
       .insert(payload)

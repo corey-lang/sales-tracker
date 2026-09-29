@@ -1,3 +1,4 @@
+import { buildSingleAeActivityWeek } from "@/lib/server/activity-report";
 import { format } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
@@ -91,10 +92,42 @@ export async function GET(req: Request) {
       return rest;
     });
 
-    // Only `standings` leaves the server. Sorting is intentionally left to
+    // A private test account is never in the team standings (so it can't
+    // appear in — or shift — anyone's leaderboard or rank). Its own "This week"
+    // tile gets its personal score instead, from the single-AE scoring path:
+    // same week windows, goal resolution, availability and scoring, computed
+    // over only this account and returned only to it.
+    let personal: Record<string, unknown> | undefined;
+    if (me.is_test) {
+      const single = await buildSingleAeActivityWeek(
+        getServerSupabase(),
+        { id: me.id, first_name: me.first_name },
+        since,
+        todayStr,
+        since,
+        todayStr,
+      );
+      if (single.error || !single.row) {
+        return Response.json(
+          { error: "Could not load leaderboard right now." },
+          { status: 500 },
+        );
+      }
+      personal = {
+        id: me.id,
+        first_name: me.first_name,
+        percent: single.row.score,
+        availableDays: single.row.available_days,
+        expectedPercent: single.row.expected_percent,
+        isHolidayWeek: single.row.is_holiday_week,
+      };
+    }
+
+    // Only `standings` (and, for a test account, its own `personal` row)
+    // leaves the server. Sorting is intentionally left to
     // each consumer so the full page and the mini card keep their own ranking.
     return Response.json(
-      { standings: sanitized },
+      personal ? { standings: sanitized, personal } : { standings: sanitized },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

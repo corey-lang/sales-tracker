@@ -84,7 +84,7 @@ function fakeSupabase(entries: Row[] = ENTRIES) {
         then: (onF: unknown, onR: unknown) =>
           resolve().then(onF as never, onR as never),
       };
-      for (const m of ["eq", "gte", "lte", "is", "order", "in"]) {
+      for (const m of ["eq", "gte", "lte", "is", "order", "in", "or", "range", "not"]) {
         self[m] = (col?: string, value?: unknown) => {
           if (col) filters[`${m}:${col}`] = String(value);
           return self;

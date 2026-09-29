@@ -7,6 +7,7 @@ import {
   notFound,
   parseBody,
   requireSalesperson,
+  forbidden,
 } from "@/lib/server/auth";
 import {
   isAllowedReaction,
@@ -59,6 +60,11 @@ export async function POST(
 ) {
   try {
     const me = await requireSalesperson(req);
+    // Test accounts (private production sandboxes) never post to the real
+    // team's Juice Box — reading is fine, writing is refused server-side.
+    if (me.is_test) {
+      throw forbidden("Test accounts can't post to the Juice Box.");
+    }
     const { id: messageId } = await params;
     const body = await parseBody(req, ToggleSchema);
 

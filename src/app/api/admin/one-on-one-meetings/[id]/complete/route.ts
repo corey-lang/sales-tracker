@@ -29,7 +29,7 @@ export async function POST(
     const me = await requireAdmin(req);
     const { id } = await params;
     const supabase = getServerSupabase();
-    const meeting = await requireMeeting(supabase, id);
+    const meeting = await requireMeeting(supabase, id, me);
     const completed = await completeMeeting(supabase, meeting, me);
     return Response.json(await loadMeetingRecord(supabase, completed));
   } catch (err) {

@@ -113,6 +113,13 @@ type SessionPayload = {
   name: string;
   /** Issued-at, epoch ms. */
   iat: number;
+  /**
+   * True only on a session minted by a PIN-verified sign-in to a TEST
+   * account (see /api/auth/login). requireSalesperson refuses a test
+   * account's session without it, so sessions issued before test accounts
+   * required a PIN stop working.
+   */
+  tp?: true;
 };
 
 function hmac(body: string): Buffer {
@@ -124,6 +131,8 @@ export function signSessionToken(input: {
   sub: string;
   role: UserRole;
   name: string;
+  /** Set by /api/auth/login after verifying a test account's PIN. */
+  tp?: true;
 }): string {
   const payload: SessionPayload = { ...input, iat: Date.now() };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -269,6 +278,14 @@ export async function requireSalesperson(
     throw unauthorized(
       "This account is no longer active. Please sign in again.",
     );
+  }
+
+  // A test account (private production sandbox) may only be used through a
+  // PIN-verified sign-in. A session without the `tp` claim — e.g. one issued
+  // when test accounts signed in by name alone — is refused, like a
+  // deactivated account.
+  if (row.is_test === true && payload.tp !== true) {
+    throw unauthorized("Please sign in to this test account again with its PIN.");
   }
 
   const role: UserRole = isUserRole(row.role) ? row.role : "ae";
@@ -432,6 +449,20 @@ export async function requireScanAccess(
     .select("id, salesperson_id")
     .eq("id", scanId)
     .maybeSingle();
+  // The scan's owner's test-account status (not a join: the table has no FK
+  // to salespeople).
+  type OwnerRow = { is_test: boolean | null; test_owner_id: string | null };
+  let ownerRow: OwnerRow | null = null;
+  const scanOwnerId = (res.data as { salesperson_id: string | null } | null)?.salesperson_id;
+  if (!res.error && scanOwnerId && scanOwnerId !== me.id) {
+    const owner = await supabase
+      .from("salespeople")
+      .select("is_test, test_owner_id")
+      .eq("id", scanOwnerId)
+      .maybeSingle();
+    if (owner.error) throw new ApiError(500, "Could not load that scan.");
+    ownerRow = owner.data as OwnerRow | null;
+  }
 
   if (res.error) {
     console.warn(
@@ -443,12 +474,25 @@ export async function requireScanAccess(
     throw notFound("Scan not found.");
   }
 
-  const scan = res.data as { id: string; salesperson_id: string | null };
+  const scan = {
+    ...(res.data as { id: string; salesperson_id: string | null }),
+    is_test: ownerRow?.is_test ?? null,
+    test_owner_id: ownerRow?.test_owner_id ?? null,
+  };
   if (!isReviewerRole(me.role) && scan.salesperson_id !== me.id) {
     throw forbidden("You can only act on your own business card scans.");
   }
+  // A reviewer acting on someone else's scan: a private test account's scan
+  // is reachable only by that account's owner — otherwise "not found".
+  if (
+    scan.salesperson_id !== me.id &&
+    scan.is_test === true &&
+    scan.test_owner_id !== me.id
+  ) {
+    throw notFound("Scan not found.");
+  }
 
-  return { me, scan };
+  return { me, scan: { id: scan.id, salesperson_id: scan.salesperson_id } };
 }
 
 // ---------------------------------------------------------------------------

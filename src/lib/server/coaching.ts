@@ -4,8 +4,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { appTimezoneMidnightUtc, todayInAppTimezone } from "@/lib/dates";
 import { GOAL_ACTIVITY_KEYS, ZERO_GOAL_VALUES } from "@/lib/goal-activities";
 import { mondayOfWeek, pairedBusinessMonday } from "@/lib/goals";
+import { canSeeSalesperson, visibleRosterOr } from "@/lib/roster";
 import { ApiError, notFound } from "@/lib/server/auth";
+import { buildSingleAeActivityWeek } from "@/lib/server/activity-report";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
+import {
+  goalScopeOr,
+  selectAllPages,
+  selectAllPagesForIds,
+} from "@/lib/server/paginate";
 import type {
   CoachingAeSummary,
   CoachingSnapshot,
@@ -68,24 +75,29 @@ export async function fetchAeWeeklyGoals(
 
   // One read covers both lookups: the personal/global resolution for
   // "current" AND the per-AE override scan for next Monday.
-  const res = await supabase
-    .from("weekly_goals")
-    .select(
-      [
-        "id",
-        "salesperson_id",
-        "effective_from",
-        ...GOAL_ACTIVITY_KEYS.map((a) => a.key),
-      ].join(","),
-    )
-    .or(`salesperson_id.eq.${aeId},salesperson_id.is.null`)
-    .order("effective_from", { ascending: false })
-    .order("created_at", { ascending: false });
+  // Paged: goal history only grows, and a truncated read would silently
+  // resolve an older row as "current".
+  const res = await selectAllPages<WeeklyGoalRow>(() =>
+    supabase
+      .from("weekly_goals")
+      .select(
+        [
+          "id",
+          "salesperson_id",
+          "effective_from",
+          ...GOAL_ACTIVITY_KEYS.map((a) => a.key),
+        ].join(","),
+      )
+      .or(goalScopeOr([aeId]))
+      .order("effective_from", { ascending: false })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true }),
+  );
 
   if (res.error) {
     throw new ApiError(500, `Weekly goal lookup failed: ${res.error.message}`);
   }
-  const rows = (res.data ?? []) as unknown as WeeklyGoalRow[];
+  const rows = res.data;
 
   // Personal first, then global — both filtered to effective_from <= today.
   // The DB-side ordering above already sorted by recency, so [0] is newest.
@@ -215,29 +227,39 @@ export async function ensureCurrentWeeklyFocus(
 
 /**
  * Resolves a salesperson by id and asserts they are a coachable AE
- * (role === 'ae'). Throws 404 (`notFound`) when the row doesn't exist
- * OR exists but isn't an AE — the two cases are intentionally
- * indistinguishable so a caller can't probe roles by id.
+ * (role === 'ae') that `viewer` may see. Throws 404 (`notFound`) when the
+ * row doesn't exist, isn't an AE, or is a private test account `viewer`
+ * doesn't own — the cases are intentionally indistinguishable so a caller
+ * can't probe roles or discover someone else's test account by id.
  *
  * Use this in every coaching route that pulls `ae_id` from the URL,
- * before any insert/update/select that depends on the AE.
+ * before any insert/update/select that depends on the AE. `viewer` is the
+ * signed-in admin (requireAdmin's result).
  */
 export async function requireCoachableAe(
   supabase: SupabaseClient,
   aeId: string,
-): Promise<{ id: string; first_name: string }> {
+  viewer: { id: string },
+): Promise<{ id: string; first_name: string; is_test: boolean }> {
   const res = await supabase
     .from("salespeople")
-    .select("id, first_name, role")
+    .select("id, first_name, role, is_test, test_owner_id")
     .eq("id", aeId)
     .maybeSingle();
   if (res.error) {
     throw new ApiError(500, `AE lookup failed: ${res.error.message}`);
   }
   if (!res.data) throw notFound("AE not found.");
-  const row = res.data as { id: string; first_name: string; role: string };
+  const row = res.data as {
+    id: string;
+    first_name: string;
+    role: string;
+    is_test: boolean | null;
+    test_owner_id: string | null;
+  };
   if (row.role !== COACHABLE_ROLE) throw notFound("AE not found.");
-  return { id: row.id, first_name: row.first_name };
+  if (!canSeeSalesperson(viewer, row)) throw notFound("AE not found.");
+  return { id: row.id, first_name: row.first_name, is_test: row.is_test === true };
 }
 
 // Server-side coaching helpers.
@@ -320,6 +342,8 @@ export async function businessCardCountsByAe(
   aeIds: readonly string[],
   since: string,
   through: string,
+  /** Only for a test account's OWN snapshot — never for team counts. */
+  opts: { includeTestData?: boolean } = {},
 ): Promise<Map<string, number>> {
   if (aeIds.length === 0) return new Map();
   // Build half-open [Mon-00:00, NextMon-00:00) bounds in APP_TIMEZONE.
@@ -335,16 +359,24 @@ export async function businessCardCountsByAe(
   );
   const startStamp = appTimezoneMidnightUtc(since);
   const endStamp = appTimezoneMidnightUtc(dayAfterThrough);
-  const res = await supabase
-    .from("business_card_scans")
-    .select("salesperson_id")
-    .in("salesperson_id", aeIds as string[])
-    .eq("is_test_data", false)
-    .gte("created_at", startStamp)
-    .lt("created_at", endStamp);
-  if (res.error || !res.data) return new Map();
+  // Paged per id chunk: a busy week can exceed the API row cap.
+  const res = await selectAllPagesForIds<{ salesperson_id: string }>(
+    aeIds,
+    (chunk) => {
+      let query = supabase
+        .from("business_card_scans")
+        .select("id, salesperson_id")
+        .in("salesperson_id", chunk);
+      if (!opts.includeTestData) query = query.eq("is_test_data", false);
+      return query
+        .gte("created_at", startStamp)
+        .lt("created_at", endStamp)
+        .order("id", { ascending: true });
+    },
+  );
+  if (res.error) return new Map();
   const counts = new Map<string, number>();
-  for (const row of res.data as Array<{ salesperson_id: string }>) {
+  for (const row of res.data) {
     counts.set(row.salesperson_id, (counts.get(row.salesperson_id) ?? 0) + 1);
   }
   return counts;
@@ -365,8 +397,16 @@ export async function buildSnapshots(
   supabase: SupabaseClient,
   aeIds: readonly string[],
   asOf: Date = todayInAppTimezone(),
+  /**
+   * Private test accounts among `aeIds`. They are NEVER part of the team
+   * standings (ranks, totals); each gets its own snapshot from the single-AE
+   * scoring path (same goals, availability, and scoring), with rank null.
+   */
+  testAeIds: readonly string[] = [],
 ): Promise<Map<string, CoachingSnapshot>> {
   if (aeIds.length === 0) return new Map();
+  const testIds = new Set(testAeIds);
+  const realIds = aeIds.filter((id) => !testIds.has(id));
   const weeks = recentWeekRanges(asOf);
   const currentWeek = weeks[weeks.length - 1];
   // Real Denver date — computeStandings needs it to cap the current week's
@@ -382,7 +422,7 @@ export async function buildSnapshots(
     ),
     businessCardCountsByAe(
       supabase,
-      aeIds,
+      realIds,
       currentWeek.since,
       currentWeek.through,
     ),
@@ -407,7 +447,10 @@ export async function buildSnapshots(
   }
 
   const snapshots = new Map<string, CoachingSnapshot>();
-  for (const aeId of aeIds) {
+  for (const aeId of testIds) {
+    snapshots.set(aeId, await testAeSnapshot(supabase, aeId, weeks, todayStr));
+  }
+  for (const aeId of realIds) {
     const row = current.find((s) => s.id === aeId);
     snapshots.set(aeId, {
       percent: row?.percent ?? null,
@@ -433,6 +476,63 @@ export async function buildSnapshots(
   return snapshots;
 }
 
+/**
+ * Snapshot for ONE private test account, from the single-AE scoring path —
+ * the same week windows, goal resolution, availability and scoring the team
+ * standings use, but computed only over this AE so it never enters a team
+ * ranking or total. Business cards count this AE's own (test) scans.
+ */
+async function testAeSnapshot(
+  supabase: SupabaseClient,
+  aeId: string,
+  weeks: ReturnType<typeof recentWeekRanges>,
+  todayStr: string,
+): Promise<CoachingSnapshot> {
+  const rows = await Promise.all(
+    weeks.map((w) =>
+      buildSingleAeActivityWeek(
+        supabase,
+        { id: aeId, first_name: "" },
+        w.since,
+        w.through,
+        w.goalAsOf,
+        todayStr,
+      ),
+    ),
+  );
+  const current = rows[rows.length - 1].row;
+  const currentWeek = weeks[weeks.length - 1];
+  const cards = await businessCardCountsByAe(
+    supabase,
+    [aeId],
+    currentWeek.since,
+    currentWeek.through,
+    { includeTestData: true },
+  );
+  const actual = (k: keyof CoachingSnapshot["week_totals"]) =>
+    k === "business_cards" ? cards.get(aeId) ?? 0 : current?.cells[k]?.actual ?? 0;
+  return {
+    percent: current?.score ?? null,
+    rank: null, // test accounts are never ranked against the team
+    total_ranked: 0,
+    week_totals: {
+      office_visits: actual("office_visits"),
+      service_requests: actual("service_requests"),
+      ones_scheduled: actual("ones_scheduled"),
+      ones_held: actual("ones_held"),
+      presentations: actual("presentations"),
+      impressions: actual("impressions"),
+      team_meetings: actual("team_meetings"),
+      gold_list_touches: actual("gold_list_touches"),
+      business_cards: actual("business_cards"),
+    },
+    trend: rows.map((r, i) => ({
+      week_start: weeks[i].week_start,
+      percent: r.row?.score ?? null,
+    })),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AE list summary — for the /admin/coaching index page
 // ---------------------------------------------------------------------------
@@ -448,27 +548,31 @@ export async function buildSnapshots(
  */
 export async function buildAeSummaries(
   supabase: SupabaseClient,
+  viewer: { id: string },
   asOf: Date = todayInAppTimezone(),
 ): Promise<{ summaries: CoachingAeSummary[]; error: string | null }> {
   // Coaching surface is AE-only. Filtering on `role = 'ae'` directly
   // (rather than excluding known non-AE roles) means a future role
-  // can't accidentally leak in. is_test stays as belt-and-suspenders
-  // against the seeded test account leaking into coaching summaries.
+  // can't accidentally leak in. Test accounts appear ONLY to their owner
+  // (workflow visibility, lib/roster.ts) and are never ranked against the
+  // team: their snapshot comes from the single-AE path and they sort last.
   // `deactivated_at IS NULL` keeps departed AEs off the coaching list.
   // requireCoachableAe (by explicit ae_id) deliberately does NOT filter on
   // it, so an admin can still open a former AE's past Weekly Focus record.
   const peopleRes = await supabase
     .from("salespeople")
-    .select("id, first_name")
+    .select("id, first_name, is_test")
     .eq("role", COACHABLE_ROLE)
-    .eq("is_test", false)
+    .or(visibleRosterOr(viewer.id))
     .is("deactivated_at", null)
     .order("first_name", { ascending: true });
   if (peopleRes.error) return { summaries: [], error: peopleRes.error.message };
   const people = (peopleRes.data ?? []) as Array<{
     id: string;
     first_name: string;
+    is_test: boolean | null;
   }>;
+  const testAeIds = people.filter((p) => p.is_test === true).map((p) => p.id);
   if (people.length === 0) return { summaries: [], error: null };
 
   const aeIds = people.map((p) => p.id);
@@ -491,26 +595,40 @@ export async function buildAeSummaries(
     meetingsRes,
     meetingCommitmentsRes,
   ] = await Promise.all([
-    supabase
-      .from(WEEKLY_FOCUS_TABLE)
-      .select("id, ae_id, week_start")
-      .in("ae_id", aeIds),
-    buildSnapshots(supabase, aeIds, asOf),
-    supabase
-      .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
-      .select("ae_id, one_on_one_id")
-      .in("ae_id", aeIds)
-      .eq("status", "open"),
+    // All paged: one AE's long history (e.g. a heavily exercised test
+    // account) must not push another AE's rows past the API row cap.
+    selectAllPagesForIds(aeIds, (chunk) =>
+      supabase
+        .from(WEEKLY_FOCUS_TABLE)
+        .select("id, ae_id, week_start")
+        .in("ae_id", chunk)
+        .order("id", { ascending: true }),
+    ),
+    buildSnapshots(supabase, aeIds, asOf, testAeIds),
+    selectAllPagesForIds(aeIds, (chunk) =>
+      supabase
+        .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
+        .select("id, ae_id, one_on_one_id")
+        .in("ae_id", chunk)
+        .eq("status", "open")
+        .order("id", { ascending: true }),
+    ),
     // 1:1 workspace state (added fields; see CoachingAeSummary).
-    supabase
-      .from(MEETINGS_TABLE)
-      .select("ae_id, status, meeting_date, completed_at")
-      .in("ae_id", aeIds),
-    supabase
-      .from(MEETING_COMMITMENTS_TABLE)
-      .select("ae_id")
-      .in("ae_id", aeIds)
-      .eq("status", "open"),
+    selectAllPagesForIds(aeIds, (chunk) =>
+      supabase
+        .from(MEETINGS_TABLE)
+        .select("id, ae_id, status, meeting_date, completed_at")
+        .in("ae_id", chunk)
+        .order("id", { ascending: true }),
+    ),
+    selectAllPagesForIds(aeIds, (chunk) =>
+      supabase
+        .from(MEETING_COMMITMENTS_TABLE)
+        .select("id, ae_id")
+        .in("ae_id", chunk)
+        .eq("status", "open")
+        .order("id", { ascending: true }),
+    ),
   ]);
 
   const lastCompletedByAe = new Map<string, { date: string; at: string }>();
@@ -595,7 +713,12 @@ export async function buildAeSummaries(
     };
   });
 
+  const isTestAe = new Set(testAeIds);
   summaries.sort((a, b) => {
+    // The owner's test account always sorts after the real team.
+    const ta = isTestAe.has(a.id) ? 1 : 0;
+    const tb = isTestAe.has(b.id) ? 1 : 0;
+    if (ta !== tb) return ta - tb;
     if (a.percent === null && b.percent === null)
       return a.first_name.localeCompare(b.first_name);
     if (a.percent === null) return 1;

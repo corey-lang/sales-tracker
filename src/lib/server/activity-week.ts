@@ -14,6 +14,7 @@ import {
   type WeeklyGoal,
 } from "@/lib/goals";
 import { ApiError, badRequest } from "@/lib/server/auth";
+import { goalScopeOr, selectAllPages } from "@/lib/server/paginate";
 
 // Server-side helpers for the AE's OWN activity week — the read/write path
 // behind /api/me/activity/*.
@@ -140,16 +141,20 @@ export async function fetchResolvedGoal(
   salespersonId: string,
   asOf: string,
 ): Promise<WeeklyGoal | null> {
-  const res = await supabase.from("weekly_goals").select("*");
+  // Own + global rows only, paged: the whole table would truncate silently
+  // at the API row cap and hand other people's rows to this code path.
+  const res = await selectAllPages<WeeklyGoal>(() =>
+    supabase
+      .from("weekly_goals")
+      .select("*")
+      .or(goalScopeOr([salespersonId]))
+      .order("id", { ascending: true }),
+  );
   if (res.error) {
     console.warn(
       `[my-activity-week] goal read failed sub=${salespersonId} as_of=${asOf} code=${res.error.code ?? "?"} msg=${res.error.message}`,
     );
     throw new ApiError(500, "Could not load your weekly targets.");
   }
-  return resolveActiveGoal(
-    salespersonId,
-    (res.data ?? []) as WeeklyGoal[],
-    asOf,
-  );
+  return resolveActiveGoal(salespersonId, res.data, asOf);
 }

@@ -3,10 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 
-import { supabase } from "@/lib/supabase/client";
+import { useVisibleRoster } from "@/lib/use-visible-roster";
 import { apiFetch } from "@/lib/api-client";
 import { formatDateMDY, todayInAppTimezone } from "@/lib/dates";
-import { fetchActiveGoalForScope } from "@/lib/goals";
+import { resolveActiveGoal, type WeeklyGoal } from "@/lib/goals";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -58,10 +58,9 @@ export function GoalsCard({ people }: Props) {
   // excludes admins and deactivated AEs. Filtering this lookup would turn a
   // past goal set by someone who has since left into "Unknown".
   const [allPeople, setAllPeople] = useState<Salesperson[]>([]);
-  const [goals, setGoals] = useState<GoalRow[]>([]);
   // Unfiltered copy of goals for computing active overrides + global, so the
   // overrides section stays accurate regardless of the history filter.
-  const [allGoals, setAllGoals] = useState<GoalRow[]>([]);
+  const [rawAllGoals, setAllGoals] = useState<GoalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -89,65 +88,60 @@ export function GoalsCard({ people }: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
+  // ONE server read of every goal row this admin may see (global + real
+  // people + their own private test accounts — /api/admin/goals scopes it in
+  // the query, so another admin's private rows never reach this browser).
+  // History filter, overrides and the "active goal" pre-fill are all derived
+  // from it locally.
   useEffect(() => {
     let cancelled = false;
-    let q = supabase
-      .from("weekly_goals")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (historyFilter === GLOBAL_SCOPE) {
-      q = q.is("salesperson_id", null);
-    } else if (historyFilter !== FILTER_ALL) {
-      q = q.eq("salesperson_id", historyFilter);
-    }
-    q.then(({ data, error }) => {
-      if (cancelled) return;
-      if (error) {
-        setError(error.message);
+    apiFetch("/api/admin/goals")
+      .then(async (res) => {
+        const body = (await res.json().catch(() => ({}))) as {
+          goals?: GoalRow[];
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok || !body.goals) {
+          setError(body.error ?? "Could not load goals.");
+          setLoading(false);
+          return;
+        }
+        setAllGoals(body.goals);
+        setError(null);
         setLoading(false);
-        return;
-      }
-      setGoals((data ?? []) as GoalRow[]);
-      setError(null);
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshTick, historyFilter]);
-
-  const refresh = () => setRefreshTick((n) => n + 1);
-
-  useEffect(() => {
-    let cancelled = false;
-    supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .then(({ data }) => {
+      })
+      .catch(() => {
         if (cancelled) return;
-        if (data) setAllPeople(data as Salesperson[]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Unfiltered fetch for the overrides + active global views.
-  useEffect(() => {
-    let cancelled = false;
-    supabase
-      .from("weekly_goals")
-      .select("*")
-      .order("effective_from", { ascending: false })
-      .order("created_at", { ascending: false })
-      .then(({ data }) => {
-        if (cancelled) return;
-        if (data) setAllGoals(data as GoalRow[]);
+        setError("Could not load goals.");
+        setLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [refreshTick]);
+
+  const refresh = () => setRefreshTick((n) => n + 1);
+
+  const allGoals = rawAllGoals;
+  const goals = useMemo(() => {
+    const rows =
+      historyFilter === FILTER_ALL
+        ? allGoals
+        : historyFilter === GLOBAL_SCOPE
+          ? allGoals.filter((g) => g.salesperson_id == null)
+          : allGoals.filter((g) => g.salesperson_id === historyFilter);
+    return [...rows].sort((a, b) =>
+      (b.created_at ?? "").localeCompare(a.created_at ?? ""),
+    );
+  }, [allGoals, historyFilter]);
+
+  // Name lookups: the roster as this admin may see it (server-scoped).
+  const { people: roster } = useVisibleRoster();
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (roster) setAllPeople(roster);
+  }, [roster]);
 
   // Denver business-day cutoff for "which goal row is currently active".
   // Matches the resolution server-side in fetchActiveGoalFor* and the
@@ -180,22 +174,31 @@ export function GoalsCard({ people }: Props) {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [allGoals, allPeople, todayIso]);
 
-  // On mount: pre-fill the form with the currently active Global default so
-  // the admin only has to type what they're changing.
+  // The goal in effect for a scope, resolved from the rows already loaded:
+  // a person's own row, else the global default (same rule the server uses).
+  const activeGoalFor = (scopeArg: string | null): GoalRow | null => {
+    if (scopeArg === null) return activeGlobal;
+    return resolveActiveGoal(
+      scopeArg,
+      allGoals as unknown as WeeklyGoal[],
+      todayIso,
+    ) as GoalRow | null;
+  };
+
+  // Once the first load lands: pre-fill the form with the currently active
+  // Global default so the admin only has to type what they're changing.
+  const [prefilled, setPrefilled] = useState(false);
   useEffect(() => {
-    let cancelled = false;
-    fetchActiveGoalForScope(null).then(({ data: goal }) => {
-      if (cancelled || !goal) return;
-      const next: AdminValues = { ...ZERO_ADMIN };
-      for (const a of ADMIN_ACTIVITY_KEYS) {
-        next[a.key] = Number(goal[a.key] ?? 0);
-      }
-      setValues(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (prefilled || loading) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPrefilled(true);
+    if (!activeGlobal) return;
+    const next: AdminValues = { ...ZERO_ADMIN };
+    for (const a of ADMIN_ACTIVITY_KEYS) {
+      next[a.key] = Number(activeGlobal[a.key] ?? 0);
+    }
+    setValues(next);
+  }, [prefilled, loading, activeGlobal]);
 
   // Auto-load current effective goal when the user changes the Scope picker.
   // Reset and "Use as template" bypass this by setting `scope` directly.
@@ -204,15 +207,14 @@ export function GoalsCard({ people }: Props) {
     setSaveError(null);
     setSavedMsg(null);
     const scopeArg = next === GLOBAL_SCOPE ? null : next;
-    fetchActiveGoalForScope(scopeArg).then(({ data: goal }) => {
-      const filled: AdminValues = { ...ZERO_ADMIN };
-      if (goal) {
-        for (const a of ADMIN_ACTIVITY_KEYS) {
-          filled[a.key] = Number(goal[a.key] ?? 0);
-        }
+    const goal = activeGoalFor(scopeArg);
+    const filled: AdminValues = { ...ZERO_ADMIN };
+    if (goal) {
+      for (const a of ADMIN_ACTIVITY_KEYS) {
+        filled[a.key] = Number(goal[a.key] ?? 0);
       }
-      setValues(filled);
-    });
+    }
+    setValues(filled);
   };
 
   const resetForm = () => {

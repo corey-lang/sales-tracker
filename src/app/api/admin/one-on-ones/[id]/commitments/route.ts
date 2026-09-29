@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleSalesperson } from "@/lib/server/roster";
 import {
   handleApiError,
   notFound,
@@ -43,7 +44,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { id } = await params;
     const body = await parseBody(req, CreateSchema);
 
@@ -56,6 +57,7 @@ export async function POST(
     if (parent.error) throw new Error(parent.error.message);
     if (!parent.data) throw notFound("Weekly focus not found.");
     const { ae_id } = parent.data as { id: string; ae_id: string };
+    await requireVisibleSalesperson(supabase, me, ae_id, "Weekly focus not found.");
 
     const res = await supabase
       .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)

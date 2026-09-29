@@ -1,6 +1,8 @@
 import { addDays, format } from "date-fns";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { selectAllPagesForIds } from "@/lib/server/paginate";
+
 import { appTimezoneMidnightUtc } from "@/lib/dates";
 import { computeStandings } from "@/lib/server/leaderboard-standings";
 
@@ -135,6 +137,7 @@ export async function buildScorecard(
       aeIds,
       startStamp,
       endStamp,
+      { is_test_data: false },
     ),
     countTimestampedByAe(
       supabase,
@@ -205,19 +208,23 @@ async function countTimestampedByAe(
   eqFilters: Record<string, string | boolean> = {},
 ): Promise<Map<string, number>> {
   if (aeIds.length === 0) return new Map();
-  let query = supabase
-    .from(table)
-    .select("salesperson_id")
-    .in("salesperson_id", aeIds as string[])
-    .gte(timestampColumn, startStamp)
-    .lt(timestampColumn, endStamp);
-  for (const [k, v] of Object.entries(eqFilters)) {
-    query = query.eq(k, v);
-  }
-  const res = await query;
-  if (res.error || !res.data) return new Map();
+  // Filtered to the real roster IN the query and paged to completion, so a
+  // busy week is never truncated and no other account's rows displace these.
+  const res = await selectAllPagesForIds<{ salesperson_id: string }>(aeIds, (chunk) => {
+    let query = supabase
+      .from(table)
+      .select("id, salesperson_id")
+      .in("salesperson_id", chunk)
+      .gte(timestampColumn, startStamp)
+      .lt(timestampColumn, endStamp);
+    for (const [k, v] of Object.entries(eqFilters)) {
+      query = query.eq(k, v);
+    }
+    return query.order("id");
+  });
+  if (res.error) return new Map();
   const counts = new Map<string, number>();
-  for (const row of res.data as Array<{ salesperson_id: string }>) {
+  for (const row of res.data) {
     counts.set(row.salesperson_id, (counts.get(row.salesperson_id) ?? 0) + 1);
   }
   return counts;
@@ -228,7 +235,6 @@ async function countTimestampedByAe(
 // than enough to include each AE's most recent row in any realistic
 // activity profile. If the team grows or activity spikes, switch this
 // to a SQL function returning MAX(...) GROUP BY salesperson_id.
-const LAST_ACTIVE_ROW_CAP = 500;
 
 /**
  * Most recent activity timestamp per AE across activity entries, office
@@ -245,35 +251,56 @@ async function lastActiveByAe(
   aeIds: readonly string[],
 ): Promise<Map<string, string>> {
   if (aeIds.length === 0) return new Map();
-  const [entriesRes, visitsRes, todosRes, scansRes] = await Promise.all([
-    supabase
-      .from("activity_entries")
-      .select("salesperson_id, updated_at")
-      .in("salesperson_id", aeIds as string[])
-      .order("updated_at", { ascending: false })
-      .limit(LAST_ACTIVE_ROW_CAP),
-    supabase
-      .from("office_visits")
-      .select("salesperson_id, visited_at")
-      .in("salesperson_id", aeIds as string[])
-      .order("visited_at", { ascending: false })
-      .limit(LAST_ACTIVE_ROW_CAP),
-    supabase
-      .from("ae_tasks")
-      .select("salesperson_id, completed_at")
-      .in("salesperson_id", aeIds as string[])
-      .eq("status", "done")
-      .not("completed_at", "is", null)
-      .order("completed_at", { ascending: false })
-      .limit(LAST_ACTIVE_ROW_CAP),
-    supabase
-      .from("business_card_scans")
-      .select("salesperson_id, created_at")
-      .in("salesperson_id", aeIds as string[])
-      .eq("is_test_data", false)
-      .order("created_at", { ascending: false })
-      .limit(LAST_ACTIVE_ROW_CAP),
-  ]);
+  // Newest row PER AE per source (limit 1 each). A shared "newest N rows"
+  // window would let busy AEs push a quieter AE's last activity out of the
+  // window entirely; per-AE lookups can't be displaced by anyone's volume.
+  const perAe = await Promise.all(
+    aeIds.map((aeId) =>
+      Promise.all([
+        supabase
+          .from("activity_entries")
+          .select("salesperson_id, updated_at")
+          .eq("salesperson_id", aeId)
+          .order("updated_at", { ascending: false })
+          .limit(1),
+        supabase
+          .from("office_visits")
+          .select("salesperson_id, visited_at")
+          .eq("salesperson_id", aeId)
+          .order("visited_at", { ascending: false })
+          .limit(1),
+        supabase
+          .from("ae_tasks")
+          .select("salesperson_id, completed_at")
+          .eq("salesperson_id", aeId)
+          .eq("status", "done")
+          .not("completed_at", "is", null)
+          .order("completed_at", { ascending: false })
+          .limit(1),
+        supabase
+          .from("business_card_scans")
+          .select("salesperson_id, created_at")
+          .eq("salesperson_id", aeId)
+          .eq("is_test_data", false)
+          .order("created_at", { ascending: false })
+          .limit(1),
+      ]),
+    ),
+  );
+  const merge = (i: number) => {
+    const rows: Array<Record<string, unknown>> = [];
+    let error: unknown = null;
+    for (const set of perAe) {
+      const r = set[i] as { data: unknown; error: unknown };
+      if (r.error) error = r.error;
+      rows.push(...((r.data ?? []) as Array<Record<string, unknown>>));
+    }
+    return { data: rows, error };
+  };
+  const entriesRes = merge(0);
+  const visitsRes = merge(1);
+  const todosRes = merge(2);
+  const scansRes = merge(3);
 
   const latest = new Map<string, string>();
   const consider = (

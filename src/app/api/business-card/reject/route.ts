@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleScans } from "@/lib/server/roster";
 import {
   handleApiError,
   parseBody,
@@ -24,11 +25,13 @@ const RejectSchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    await requireReviewer(req);
+    const me = await requireReviewer(req);
     const { scanId, reason } = await parseBody(req, RejectSchema);
     const trimmedReason = reason?.trim() ? reason.trim() : null;
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, me, [scanId]);
 
     // Update only the workflow columns. The scan row and image are preserved.
     const upd = await supabase

@@ -14,8 +14,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    await requireAdmin(req);
-    const { summaries, error } = await buildAeSummaries(getServerSupabase());
+    const me = await requireAdmin(req);
+    // Includes the caller's own private test account (never another
+    // admin's), ranked separately from the real team.
+    const { summaries, error } = await buildAeSummaries(getServerSupabase(), me);
     if (error) {
       return Response.json({ error }, { status: 500 });
     }

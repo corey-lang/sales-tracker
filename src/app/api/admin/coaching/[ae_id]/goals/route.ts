@@ -102,7 +102,7 @@ export async function PUT(
     const body = await parseBody(req, RequestSchema);
 
     const supabase = getServerSupabase();
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
 
     // Both helpers anchor on the Denver business calendar so a write at
     // 11pm Denver doesn't drift to the wrong Monday in UTC.

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { requireVisibleScans } from "@/lib/server/roster";
 import { handleApiError, parseBody, requireReviewer } from "@/lib/server/auth";
 
 // Bulk-send auto-marked duplicates back to MANUAL duplicate review.
@@ -41,11 +42,13 @@ const REOPEN_NOTE =
 
 export async function POST(req: Request) {
   try {
-    await requireReviewer(req);
+    const me = await requireReviewer(req);
     const { scanIds } = await parseBody(req, ReopenBulkSchema);
     const uniqueIds = [...new Set(scanIds)];
 
     const supabase = getServerSupabase();
+    // A private test account's scans are reachable only by its owner.
+    await requireVisibleScans(supabase, me, scanIds);
 
     // The status + verified_contact_id filters are the safety boundary: only
     // genuine auto-duplicates with no contact are ever updated.

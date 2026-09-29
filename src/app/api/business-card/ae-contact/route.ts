@@ -78,7 +78,7 @@ export async function POST(req: Request) {
     const scanRes = await supabase
       .from("business_card_scans")
       .select(
-        "id, salesperson_id, salesperson_name, image_url, storage_path, ai_confidence, extracted_contact_type, extracted_title, extracted_company, extracted_full_name, raw_ocr_text, ai_notes",
+        "id, is_test_data, salesperson_id, salesperson_name, image_url, storage_path, ai_confidence, extracted_contact_type, extracted_title, extracted_company, extracted_full_name, raw_ocr_text, ai_notes",
       )
       .eq("id", scanId)
       .single();
@@ -120,6 +120,7 @@ export async function POST(req: Request) {
     // this same scan, so the AE's own row (on a re-save) is never self-matched.
     const dupScan: ContactScan = {
       id: scan.id,
+      is_test_data: scan.is_test_data === true,
       salesperson_id: scan.salesperson_id,
       salesperson_name: scan.salesperson_name,
       image_url: scan.image_url,

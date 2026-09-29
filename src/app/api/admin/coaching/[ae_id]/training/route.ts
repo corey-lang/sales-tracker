@@ -41,12 +41,12 @@ export async function POST(
   { params }: { params: Promise<{ ae_id: string }> },
 ) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const { ae_id } = await params;
     const body = await parseBody(req, CreateSchema);
 
     const supabase = getServerSupabase();
-    await requireCoachableAe(supabase, ae_id);
+    await requireCoachableAe(supabase, ae_id, me);
 
     const res = await supabase
       .from(TRAINING_COMMITMENTS_TABLE)

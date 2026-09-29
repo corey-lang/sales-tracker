@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { selectAllPages } from "@/lib/server/paginate";
+
 import {
   availableDaysForWeek,
   businessDaysOfWeek,
@@ -26,16 +28,41 @@ export const ADJUSTMENTS_READ_ERROR =
  * wrongly restore a full 5-day week for everyone). Raw provider messages are
  * logged with safe metadata only.
  */
+/** Company-wide adjustments + the given people's own (filtered in-query). */
+function scoped<Q extends { or: (f: string) => Q }>(
+  query: Q,
+  salespersonIds: readonly string[] | undefined,
+): Q {
+  if (!salespersonIds) return query;
+  return query.or(
+    salespersonIds.length
+      ? `applies_to_all.eq.true,salesperson_id.in.(${salespersonIds.join(",")})`
+      : "applies_to_all.eq.true",
+  );
+}
+
 export async function fetchWeekAdjustments(
   supabase: SupabaseClient,
   weekStart: string,
+  /**
+   * Only adjustments that can affect these salespeople (their own + company-
+   * wide), filtered IN the query so other people's rows — e.g. a test
+   * account's — can never crowd real ones out of a capped response. Omit for
+   * every row (still paged to completion).
+   */
+  salespersonIds?: readonly string[],
 ): Promise<{ adjustments: WorkingDayAdjustment[]; error: string | null }> {
   const days = businessDaysOfWeek(weekStart);
-  const res = await supabase
-    .from("working_day_adjustments")
-    .select("*")
-    .gte("adjustment_date", days[0])
-    .lte("adjustment_date", days[days.length - 1]);
+  const res = await selectAllPages<WorkingDayAdjustment>(() =>
+    scoped(
+      supabase
+        .from("working_day_adjustments")
+        .select("*")
+        .gte("adjustment_date", days[0])
+        .lte("adjustment_date", days[days.length - 1]),
+      salespersonIds,
+    ).order("id"),
+  );
   if (res.error) {
     console.warn(
       `[working-days] week fetch failed week=${weekStart} code=${res.error.code ?? "?"} msg=${res.error.message}`,
@@ -56,7 +83,9 @@ export async function getAvailableDaysForWeek(
   salespersonId: string,
   weekStart: string,
 ): Promise<number> {
-  const { adjustments, error } = await fetchWeekAdjustments(supabase, weekStart);
+  const { adjustments, error } = await fetchWeekAdjustments(supabase, weekStart, [
+    salespersonId,
+  ]);
   if (error) throw new Error(error);
   return availableDaysForWeek(weekStart, salespersonId, adjustments);
 }
@@ -73,12 +102,19 @@ export async function fetchRangeAdjustments(
   supabase: SupabaseClient,
   startDate: string,
   endDate: string,
+  /** See fetchWeekAdjustments. */
+  salespersonIds?: readonly string[],
 ): Promise<{ adjustments: WorkingDayAdjustment[]; error: string | null }> {
-  const res = await supabase
-    .from("working_day_adjustments")
-    .select("*")
-    .gte("adjustment_date", startDate)
-    .lte("adjustment_date", endDate);
+  const res = await selectAllPages<WorkingDayAdjustment>(() =>
+    scoped(
+      supabase
+        .from("working_day_adjustments")
+        .select("*")
+        .gte("adjustment_date", startDate)
+        .lte("adjustment_date", endDate),
+      salespersonIds,
+    ).order("id"),
+  );
   if (res.error) {
     console.warn(
       `[working-days] range fetch failed [${startDate}..${endDate}] code=${res.error.code ?? "?"} msg=${res.error.message}`,

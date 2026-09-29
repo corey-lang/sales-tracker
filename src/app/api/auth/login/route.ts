@@ -84,12 +84,19 @@ export async function POST(req: Request) {
     // gate in the app on the same signal. The PIN is compared here and
     // never returned. The error is deliberately generic — it does not
     // reveal whether a PIN is set or how long it is.
-    if (role === "admin") {
+    // Admins AND test accounts need a PIN (salespeople.admin_pin, never
+    // readable by the anon key). A test account is a private production
+    // sandbox: it must not be usable by anyone who merely knows its name.
+    // Real AEs still sign in by name alone — unchanged.
+    const isTest = row.is_test === true;
+    if (role === "admin" || isTest) {
       const dbPin =
         row.admin_pin == null ? "" : String(row.admin_pin).trim();
       if (!dbPin) {
         throw unauthorized(
-          "This admin account has no PIN set. Ask another admin to set one.",
+          isTest
+            ? "This test account has no PIN set."
+            : "This admin account has no PIN set. Ask another admin to set one.",
         );
       }
       if ((pin ?? "").trim() !== dbPin) {
@@ -101,6 +108,7 @@ export async function POST(req: Request) {
       sub: row.id,
       role,
       name: row.first_name,
+      ...(isTest ? { tp: true as const } : {}),
     });
 
     return Response.json({

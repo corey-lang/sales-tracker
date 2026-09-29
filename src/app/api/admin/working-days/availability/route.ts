@@ -47,14 +47,11 @@ export async function GET(req: Request) {
     const monday = format(startOfWeek(parsed, { weekStartsOn: 1 }), "yyyy-MM-dd");
 
     const supabase = getServerSupabase();
-    const { adjustments, error } = await fetchWeekAdjustments(supabase, monday);
-    if (error) {
-      // Already a user-safe string (raw provider text logged in the helper).
-      throw new ApiError(502, error);
-    }
 
-    // Active AEs only (`deactivated_at IS NULL`) — a departed AE has no
-    // working days to compute.
+    // Active REAL AEs only (`deactivated_at IS NULL`) — a departed AE has no
+    // working days to compute. Resolved FIRST so the adjustment read below
+    // is scoped to these ids in the query (test accounts' rows can't crowd
+    // real rows out of a capped response).
     const peopleRes = await supabase
       .from("salespeople")
       .select("id")
@@ -66,6 +63,19 @@ export async function GET(req: Request) {
         `[working-days] availability roster read failed code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,
       );
       throw new ApiError(500, "Could not load working day availability.");
+    }
+
+    const rosterIds = ((peopleRes.data ?? []) as Array<{ id: string }>).map(
+      (p) => p.id,
+    );
+    const { adjustments, error } = await fetchWeekAdjustments(
+      supabase,
+      monday,
+      rosterIds,
+    );
+    if (error) {
+      // Already a user-safe string (raw provider text logged in the helper).
+      throw new ApiError(502, error);
     }
 
     const availableDays: Record<string, number> = {};

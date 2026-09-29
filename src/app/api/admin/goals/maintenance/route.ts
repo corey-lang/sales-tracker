@@ -7,6 +7,8 @@ import {
   parseBody,
   requireAdmin,
 } from "@/lib/server/auth";
+import { goalScopeOr, selectAllPages } from "@/lib/server/paginate";
+import { visibleSalespersonIds } from "@/lib/server/roster";
 
 // POST /api/admin/goals/maintenance
 //
@@ -43,22 +45,46 @@ const MATCH_ALL_DATE = "1900-01-01";
 
 export async function POST(req: Request) {
   try {
-    await requireAdmin(req);
+    const me = await requireAdmin(req);
     const body = await parseBody(req, RequestSchema);
     const supabase = getServerSupabase();
 
+    // Both actions act ONLY on goal rows the signed-in admin may see: global
+    // rows, real people, and their own private test accounts. Another admin's
+    // private test-account goals are never read, counted or deleted.
+    const visibleIds = await visibleSalespersonIds(supabase, me);
+    const visibleFilter = goalScopeOr(visibleIds);
+
     if (body.action === "clear_all") {
-      const res = await supabase
-        .from("weekly_goals")
-        .delete({ count: "exact" })
-        .gte("effective_from", MATCH_ALL_DATE);
-      if (res.error) {
-        throw new ApiError(
-          500,
-          `Could not clear goals: ${res.error.message}`,
-        );
+      const found = await selectAllPages<{ id: string }>(() =>
+        supabase
+          .from("weekly_goals")
+          .select("id")
+          .gte("effective_from", MATCH_ALL_DATE)
+          .or(visibleFilter)
+          .order("id", { ascending: true }),
+      );
+      if (found.error) {
+        throw new ApiError(500, `Could not load goals: ${found.error.message}`);
       }
-      return Response.json({ deleted: res.count ?? 0 });
+      let deleted = 0;
+      for (let i = 0; i < found.data.length; i += 200) {
+        const res = await supabase
+          .from("weekly_goals")
+          .delete({ count: "exact" })
+          .in(
+            "id",
+            found.data.slice(i, i + 200).map((r) => r.id),
+          );
+        if (res.error) {
+          throw new ApiError(
+            500,
+            `Could not clear goals: ${res.error.message}`,
+          );
+        }
+        deleted += res.count ?? 0;
+      }
+      return Response.json({ deleted });
     }
 
     // clear_old_versions: SELECT all rows newest-first, walk per scope,
@@ -66,21 +92,25 @@ export async function POST(req: Request) {
     // queries (no transactional guarantee) but the worst-case race is a
     // simultaneous goal save — that race would already be caught by
     // the partial UNIQUE indexes on the table.
-    const fetchRes = await supabase
-      .from("weekly_goals")
-      .select("id, salesperson_id, effective_from, created_at")
-      .order("effective_from", { ascending: false })
-      .order("created_at", { ascending: false });
+    const fetchRes = await selectAllPages<{
+      id: string;
+      salesperson_id: string | null;
+    }>(() =>
+      supabase
+        .from("weekly_goals")
+        .select("id, salesperson_id, effective_from, created_at")
+        .or(visibleFilter)
+        .order("effective_from", { ascending: false })
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true }),
+    );
     if (fetchRes.error) {
       throw new ApiError(
         500,
         `Could not load goal history: ${fetchRes.error.message}`,
       );
     }
-    const all = (fetchRes.data ?? []) as Array<{
-      id: string;
-      salesperson_id: string | null;
-    }>;
+    const all = fetchRes.data;
     const seenScope = new Set<string>();
     const idsToDelete: string[] = [];
     for (const row of all) {
@@ -96,17 +126,21 @@ export async function POST(req: Request) {
     if (idsToDelete.length === 0) {
       return Response.json({ deleted: 0 });
     }
-    const delRes = await supabase
-      .from("weekly_goals")
-      .delete({ count: "exact" })
-      .in("id", idsToDelete);
-    if (delRes.error) {
-      throw new ApiError(
-        500,
-        `Could not delete old goal versions: ${delRes.error.message}`,
-      );
+    let deleted = 0;
+    for (let i = 0; i < idsToDelete.length; i += 200) {
+      const delRes = await supabase
+        .from("weekly_goals")
+        .delete({ count: "exact" })
+        .in("id", idsToDelete.slice(i, i + 200));
+      if (delRes.error) {
+        throw new ApiError(
+          500,
+          `Could not delete old goal versions: ${delRes.error.message}`,
+        );
+      }
+      deleted += delRes.count ?? 0;
     }
-    return Response.json({ deleted: delRes.count ?? idsToDelete.length });
+    return Response.json({ deleted });
   } catch (err) {
     return handleApiError(err);
   }

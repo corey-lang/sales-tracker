@@ -14,6 +14,11 @@ import {
 } from "@/lib/goals";
 import { weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
+import {
+  goalScopeOr,
+  selectAllPages,
+  selectAllPagesForIds,
+} from "@/lib/server/paginate";
 
 // Shared leaderboard aggregation — used by GET /api/leaderboard (current week,
 // AE-facing) and GET /api/admin/leaderboard (prior weeks, admin-only).
@@ -77,37 +82,62 @@ export async function computeStandings(
 ): Promise<{ standings: LeaderboardStanding[]; error: string | null }> {
   // Numerator window = the Sun-Sat activity week containing this Mon-Fri week.
   const activity = activityWindowForBusinessWeek(since, today);
-  const [peopleRes, entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
-    // Only true AEs compete. Filtering positively on `role = 'ae'` (vs.
-    // excluding known non-AE roles) keeps juice_box_only guests (Travis,
-    // Rizz, …) off every leaderboard surface and means any future role
-    // can't accidentally leak in. is_test stays as belt-and-suspenders
-    // against the seeded test account leaking into team standings.
-    // `deactivated_at IS NULL` drops people who have left the company —
-    // they no longer compete, but their historical entries are untouched.
-    supabase
-      .from("salespeople")
-      .select("id, first_name")
-      .eq("role", "ae")
-      .eq("is_test", false)
-      .is("deactivated_at", null),
+  // 1) The REPORTING roster first. Only true AEs compete. Filtering
+  // positively on `role = 'ae'` (vs. excluding known non-AE roles) keeps
+  // juice_box_only guests (Travis, Rizz, …) off every leaderboard surface and
+  // means any future role can't accidentally leak in. `is_test = false`
+  // keeps test accounts (private sandboxes) out for EVERY viewer.
+  // `deactivated_at IS NULL` drops people who have left the company — they
+  // no longer compete, but their historical entries are untouched.
+  const peopleRes = await supabase
+    .from("salespeople")
+    .select("id, first_name")
+    .eq("role", "ae")
+    .eq("is_test", false)
+    .is("deactivated_at", null);
+  if (peopleRes.error) {
+    console.error(
+      `[leaderboard] standings roster read failed since=${since} through=${through} code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,
+    );
+    return { standings: [], error: "Could not load leaderboard right now." };
+  }
+  const rosterIds = ((peopleRes.data ?? []) as Person[]).map((p) => p.id);
+
+  // 2) Everything else is fetched ONLY for those ids and paged to
+  // completion, so no volume of test (or other non-roster) rows can push a
+  // real row out of a capped response, and a large real dataset is never
+  // truncated either.
+  const [entriesRes, goalsRes, adjustmentsRes] = await Promise.all([
     // Activity numerator: Sun-Sat window (weekend entries included), NOT the
     // Mon-Fri [since, through]. Targets/availability below stay Mon-Fri.
-    supabase
-      .from("activity_entries")
-      .select(["salesperson_id", ...ACTIVITY_KEYS].join(","))
-      .gte("entry_date", activity.since)
-      .lte("entry_date", activity.through),
-    supabase.from("weekly_goals").select("*"),
+    selectAllPagesForIds<Partial<ActivityValues> & { salesperson_id: string }>(
+      rosterIds,
+      (chunk) =>
+        supabase
+          .from("activity_entries")
+          .select(["id", "salesperson_id", ...ACTIVITY_KEYS].join(","))
+          .in("salesperson_id", chunk)
+          .gte("entry_date", activity.since)
+          .lte("entry_date", activity.through)
+          .order("id"),
+    ),
+    // Goal rows that can apply to the roster: global + their own.
+    selectAllPages<GoalRow>(() =>
+      supabase
+        .from("weekly_goals")
+        .select("*")
+        .or(goalScopeOr(rosterIds))
+        .order("id"),
+    ),
     // `since` is the week's Monday everywhere this is called, so it doubles
     // as the weekStart for available-day math. Fetched once, reused per AE.
-    fetchWeekAdjustments(supabase, since),
+    fetchWeekAdjustments(supabase, since, rosterIds),
   ]);
 
   // FAIL CLOSED on any read error — never compute pace as if there were no
   // adjustments. Raw provider text is logged server-side ONLY; callers receive
   // a safe, generic, application-level message.
-  const provider = peopleRes.error ?? entriesRes.error ?? goalsRes.error;
+  const provider = entriesRes.error ?? goalsRes.error;
   if (provider) {
     console.error(
       `[leaderboard] standings read failed since=${since} through=${through} code=${provider.code ?? "?"} msg=${provider.message}`,
@@ -122,10 +152,8 @@ export async function computeStandings(
   const adjustments = adjustmentsRes.adjustments;
 
   const people = (peopleRes.data ?? []) as Person[];
-  const entries = (entriesRes.data ?? []) as unknown as Array<
-    Partial<ActivityValues> & { salesperson_id: string }
-  >;
-  const allGoals = (goalsRes.data ?? []) as GoalRow[];
+  const entries = entriesRes.data;
+  const allGoals = goalsRes.data;
 
   const totalsByPerson = new Map<string, ActivityValues>();
   for (const p of people) totalsByPerson.set(p.id, { ...ZERO_ACTIVITY });
