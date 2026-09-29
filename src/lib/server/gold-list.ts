@@ -239,29 +239,19 @@ export async function decorateAgents(
   supabase: Db,
   agents: GoldListAgent[],
   me: AuthedSalesperson,
+  /** Summaries the caller already loaded with `loadActivitySummaries`, so a
+   *  caller that also needs the raw rows doesn't query twice. */
+  preloaded?: GoldListActivitySummary[],
 ): Promise<GoldListAgentWithFollowUp[]> {
   if (agents.length === 0) return [];
 
-  const activities: GoldListActivitySummary[] = [];
-  // Bound the IN-list as well as paging the result: thousands of UUIDs in
-  // one PostgREST URL exceed gateway URL limits before pagination can run.
-  for (let offset = 0; offset < agents.length; offset += 100) {
-    const agentIds = agents.slice(offset, offset + 100).map((a) => a.id);
-    const res = await allGoldListRows<GoldListActivitySummary>(
-      supabase
-        .from(GOLD_LIST_ACTIVITIES_TABLE)
-        .select(ACTIVITY_SUMMARY_COLUMNS)
-        .in("agent_id", agentIds)
-        .order("id", { ascending: true }),
-    );
-    if (res.error) {
-      console.warn(
-        `[gold-list] activity summary failed caller=${me.id} code=${res.error.code ?? "?"}`,
-      );
-      throw new ApiError(500, "Could not load Gold List activity.");
-    }
-    activities.push(...res.data);
-  }
+  const activities =
+    preloaded ??
+    (await loadActivitySummaries(
+      supabase,
+      agents.map((a) => a.id),
+      me,
+    ));
 
   const nextByAgent = new Map<string, GoldListActivitySummary>();
   const completedCount = new Map<string, number>();
@@ -302,6 +292,263 @@ export async function decorateAgents(
         }).format(new Date(lastCompleted.get(agent.id)!))
       : null,
   }));
+}
+
+/**
+ * Every activity (summary columns) for the given agents, batched and paged.
+ * Bounds the IN-list as well as paging the result: thousands of UUIDs in one
+ * PostgREST URL exceed gateway URL limits before pagination can run.
+ */
+export async function loadActivitySummaries(
+  supabase: Db,
+  agentIds: readonly string[],
+  me: AuthedSalesperson,
+  columns: string = ACTIVITY_SUMMARY_COLUMNS,
+): Promise<GoldListActivitySummary[]> {
+  const activities: GoldListActivitySummary[] = [];
+  for (let offset = 0; offset < agentIds.length; offset += 100) {
+    const batch = agentIds.slice(offset, offset + 100) as string[];
+    const res = await allGoldListRows<GoldListActivitySummary>(
+      supabase
+        .from(GOLD_LIST_ACTIVITIES_TABLE)
+        .select(columns)
+        .in("agent_id", batch)
+        .order("id", { ascending: true }),
+    );
+    if (res.error) {
+      console.warn(
+        `[gold-list] activity summary failed caller=${me.id} code=${res.error.code ?? "?"}`,
+      );
+      throw new ApiError(500, "Could not load Gold List activity.");
+    }
+    activities.push(...res.data);
+  }
+  return activities;
+}
+
+// ---------------------------------------------------------------------------
+// Activity writes — ONE implementation shared by the AE routes
+// (/api/gold-list/agents/:id/activities*) and the manager 1:1 routes
+// (/api/admin/one-on-one-meetings/:id/gold-list/*). Callers authorize first
+// (owner-only for AEs; admin + in-progress 1:1 + agent belongs to that
+// meeting's AE for managers) and pass the already-authorized agent. Every
+// write below is pinned to `agent.salesperson_id`, so the denormalized owner
+// can never drift from the agent row.
+//
+// `manager` is passed ONLY by the manager 1:1 path. It stamps the actor
+// (`created_by` / `completed_by`) AND the 1:1 the action was taken from
+// (`created_in_meeting_id` / `closed_in_meeting_id` /
+// `rescheduled_in_meeting_id`) IN THE SAME STATEMENT as the Gold List change,
+// so the change and its attribution commit together. A DB trigger locks that
+// meeting and refuses the write if it has completed (the error carries
+// "1:1", mapped to a read-only 409). The AE path names none of these columns,
+// so AE writes never take the meeting lock and keep working even before
+// one_on_one_meetings.sql adds the columns.
+// ---------------------------------------------------------------------------
+
+export type ScheduleActivityInput = {
+  activity_type: GoldListActivity["activity_type"];
+  description: string;
+  activity_note?: string | null;
+  request_id?: string;
+  scheduled_for: string;
+};
+
+export type UpdateActivityInput = {
+  status?: GoldListActivity["status"];
+  outcome_note?: string | null;
+  activity_note?: string | null;
+  activity_type?: GoldListActivity["activity_type"];
+  description?: string;
+  scheduled_for?: string;
+};
+
+/** Who acted and from which in-progress 1:1 — manager path only. */
+export type ManagerMeetingAction = { actorId: string; meetingId: string };
+
+/** 23514 from the meeting-attribution trigger vs. the Gold List's own guards. */
+function activityConflict(error: { code?: string; message?: string }): ApiError {
+  if (error.code === "55P03") {
+    // The 1:1 this action is attributed to is being completed right now.
+    return new ApiError(409, "This 1:1 is being completed right now.");
+  }
+  return new ApiError(
+    409,
+    error.message?.includes("1:1")
+      ? "This 1:1 is completed and read-only."
+      : "This agent or activity changed. Refresh before trying again.",
+  );
+}
+
+export async function scheduleAgentActivity(
+  supabase: Db,
+  agent: GoldListAgent,
+  body: ScheduleActivityInput,
+  logCaller: string,
+  manager: ManagerMeetingAction | null = null,
+): Promise<{ activity: GoldListActivity; created: boolean }> {
+  if (agent.archived_at !== null) {
+    throw new ApiError(
+      409,
+      "That agent is archived. Restore them before scheduling new activity.",
+    );
+  }
+
+  if (body.request_id) {
+    const previous = await supabase
+      .from(GOLD_LIST_ACTIVITIES_TABLE)
+      .select(ACTIVITY_COLUMNS)
+      .eq("id", body.request_id)
+      .eq("agent_id", agent.id)
+      .eq("salesperson_id", agent.salesperson_id)
+      .maybeSingle();
+    if (previous.error)
+      throw new ApiError(500, "Could not check this activity request.");
+    // A retried request replays the original row (200), never a duplicate.
+    if (previous.data)
+      return { activity: previous.data as GoldListActivity, created: false };
+  }
+
+  const res = await supabase
+    .from(GOLD_LIST_ACTIVITIES_TABLE)
+    .insert({
+      agent_id: agent.id,
+      // Denormalized owner. Taken from the AGENT row (which the caller just
+      // authorized), never from the request — and the composite FK would
+      // reject it anyway if the pair didn't match.
+      salesperson_id: agent.salesperson_id,
+      activity_type: body.activity_type,
+      description: body.description,
+      // "" and null both mean "no note"; store NULL so the column has one
+      // empty representation.
+      activity_note: body.activity_note || null,
+      ...(body.request_id ? { id: body.request_id } : {}),
+      ...(manager
+        ? { created_by: manager.actorId, created_in_meeting_id: manager.meetingId }
+        : {}),
+      scheduled_for: body.scheduled_for,
+      status: "scheduled",
+    })
+    .select(ACTIVITY_COLUMNS)
+    .single();
+
+  if (res.error) {
+    if (res.error.code === "23514" || res.error.code === "55P03")
+      throw activityConflict(res.error);
+    if (isUniqueViolation(res.error)) {
+      throw new ApiError(
+        409,
+        "This agent already has an activity scheduled. Complete or reschedule it first.",
+      );
+    }
+    console.warn(
+      `[gold-list] activity insert failed agent_id=${agent.id} caller=${logCaller} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not schedule that activity.");
+  }
+  return { activity: res.data as GoldListActivity, created: true };
+}
+
+export async function updateAgentActivity(
+  supabase: Db,
+  agent: GoldListAgent,
+  activityId: string,
+  body: UpdateActivityInput,
+  logCaller: string,
+  manager: ManagerMeetingAction | null = null,
+): Promise<GoldListActivity> {
+  if (agent.archived_at)
+    throw new ApiError(409, "Restore this agent before changing activities.");
+
+  // Pin BOTH the activity id and its parent agent (and owner), so a
+  // mismatched agent segment in the URL 404s instead of updating a row that
+  // hangs off a different agent.
+  const lookup = await supabase
+    .from(GOLD_LIST_ACTIVITIES_TABLE)
+    .select(ACTIVITY_COLUMNS)
+    .eq("id", activityId)
+    .eq("agent_id", agent.id)
+    .eq("salesperson_id", agent.salesperson_id)
+    .maybeSingle();
+  if (lookup.error) {
+    console.warn(
+      `[gold-list] activity lookup failed activity_id=${activityId} caller=${logCaller} code=${lookup.error.code ?? "?"} msg=${lookup.error.message}`,
+    );
+    throw new ApiError(500, "Could not load that activity.");
+  }
+  if (!lookup.data) throw notFound("Activity not found.");
+  if ((lookup.data as GoldListActivity).status !== "scheduled") {
+    throw new ApiError(
+      409,
+      "This activity is already finished. Refresh to see its preserved history.",
+    );
+  }
+
+  const patch: Record<string, unknown> = {};
+  if (body.description !== undefined) patch.description = body.description;
+  if (body.activity_note !== undefined) {
+    patch.activity_note = body.activity_note || null;
+  }
+  if (body.activity_type !== undefined) {
+    patch.activity_type = body.activity_type;
+  }
+  if (body.scheduled_for !== undefined) {
+    patch.scheduled_for = body.scheduled_for;
+  }
+  if (body.outcome_note !== undefined) {
+    patch.outcome_note = body.outcome_note || null;
+  }
+  if (body.status !== undefined) {
+    patch.status = body.status;
+    // Kept consistent with gold_list_activities_completed_at_matches_status.
+    patch.completed_at =
+      body.status === "completed" ? new Date().toISOString() : null;
+    if (manager && body.status === "completed") patch.completed_by = manager.actorId;
+  }
+  if (manager) {
+    // Attribute the action to the 1:1: closing (complete/cancel) or editing
+    // the open activity. Reopening to "scheduled" isn't a manager action.
+    if (body.status === "completed" || body.status === "cancelled") {
+      patch.closed_in_meeting_id = manager.meetingId;
+    } else if (Object.keys(patch).some((k) => k !== "status" && k !== "completed_at")) {
+      patch.rescheduled_in_meeting_id = manager.meetingId;
+    }
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new ApiError(400, "No fields to update.");
+  }
+
+  const res = await supabase
+    .from(GOLD_LIST_ACTIVITIES_TABLE)
+    .update(patch)
+    .eq("id", activityId)
+    .eq("agent_id", agent.id)
+    .eq("salesperson_id", agent.salesperson_id)
+    .eq("status", "scheduled")
+    .select(ACTIVITY_COLUMNS)
+    .maybeSingle();
+
+  if (res.error) {
+    if (res.error.code === "23514" || res.error.code === "55P03")
+      throw activityConflict(res.error);
+    // A concurrent scheduled-activity write violated the one-open rule.
+    if (isUniqueViolation(res.error)) {
+      throw new ApiError(
+        409,
+        "This agent already has an activity scheduled. Complete or reschedule that one first.",
+      );
+    }
+    console.warn(
+      `[gold-list] activity update failed activity_id=${activityId} caller=${logCaller} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not update that activity.");
+  }
+  if (!res.data)
+    throw new ApiError(
+      409,
+      "This activity changed. Refresh to see its preserved history.",
+    );
+  return res.data as GoldListActivity;
 }
 
 /**

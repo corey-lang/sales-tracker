@@ -53,6 +53,9 @@ import { Input } from "@/components/ui/input";
 //   * `outcome_note`           — OPTIONAL record of what happened, written in
 //                                the completion form, shown in history only.
 //
+// The schedule / complete forms and the history list are exported so the
+// manager 1:1 workspace renders the SAME controls against its own routes.
+//
 // WRITE AFFORDANCES ARE GATED ON `agent.can_edit`, which the server computes
 // (owner-only). An admin viewing another AE's Gold List sees the same card in
 // read-only form — and the API would reject the write anyway; this is the UX
@@ -790,7 +793,7 @@ function ToneLabel({ tone }: { tone: ReturnType<typeof scheduleToneFor> }) {
  * Activity (required, short free text — no category dropdown), Note (optional,
  * the plan for this touch), Due date (required).
  */
-function ScheduleActivityForm({
+export function ScheduleActivityForm({
   title,
   defaultDate,
   busy,
@@ -880,7 +883,7 @@ function ScheduleActivityForm({
   );
 }
 
-function CompleteActivityForm({
+export function CompleteActivityForm({
   busy,
   onCancel,
   onSubmit,
@@ -931,7 +934,7 @@ function CompleteActivityForm({
 }
 
 /** The preserved timeline. Completed rows carry their outcome note. */
-function ActivityHistoryList({
+export function ActivityHistoryList({
   activities,
   creator,
 }: {

@@ -177,7 +177,14 @@ export type TrainingCommitment = {
 // Aggregate response shapes returned by the API
 // ---------------------------------------------------------------------------
 
-/** Quick snapshot row used on the coaching index (AE picker list). */
+/**
+ * One row of GET /api/admin/coaching (the AE picker).
+ *
+ * CONTRACT: the original Weekly Focus fields (`latest_week_start`,
+ * `open_commitments`, `carried_commitments`) keep their original meaning so
+ * a client built before the 1:1 workspace (e.g. a stale open tab) still
+ * works. The 1:1 workspace fields are ADDED alongside them.
+ */
 export type CoachingAeSummary = {
   id: string;
   first_name: string;
@@ -204,6 +211,12 @@ export type CoachingAeSummary = {
    * index can render "+2 carried" without inflating `open_commitments`.
    */
   carried_commitments: number;
+  /** Date of the AE's most recently COMPLETED 1:1, or null if none yet. */
+  last_one_on_one_date: string | null;
+  /** True while a 1:1 with this AE has been started but not completed. */
+  one_on_one_in_progress: boolean;
+  /** Open 1:1 commitments/follow-ups (they surface in the next 1:1). */
+  open_one_on_one_commitments: number;
 };
 
 /** Single-AE snapshot used in the detail-page header. */
@@ -244,6 +257,13 @@ export type CoachingSnapshot = {
  * UX targets the recent quarter.
  */
 export const WEEKLY_FOCUS_HISTORY_LIMIT = 12;
+
+/**
+ * Weekly Focus weeks returned by the read-only legacy view
+ * (/api/admin/coaching/[ae_id]/legacy). A year covers everything recorded
+ * before the 1:1 workspace replaced Weekly Focus.
+ */
+export const LEGACY_WEEKS_LIMIT = 52;
 
 /** Most recently archived relationships to surface in the "Archived" section. */
 export const ARCHIVED_RELATIONSHIPS_LIMIT = 50;
@@ -314,7 +334,11 @@ export type NextWeekGoalOverride = {
   values: WeeklyGoalValues;
 };
 
-/** What the detail page GET returns under the Weekly Focus model. */
+/**
+ * GET /api/admin/coaching/[ae_id] — the ORIGINAL Weekly Focus detail
+ * contract, preserved unchanged for any client built against it (the 1:1
+ * workspace uses /meetings and /legacy instead).
+ */
 export type CoachingDetail = {
   ae: { id: string; first_name: string };
   snapshot: CoachingSnapshot;
@@ -377,4 +401,29 @@ export type CoachingDetail = {
   weekly_goal_next_override: NextWeekGoalOverride | null;
   /** Monday (YYYY-MM-DD) of next business week — convenience for the UI. */
   next_week_start: string;
+};
+
+/**
+ * GET /api/admin/coaching/[ae_id]/legacy — the legacy Weekly Focus record for
+ * one AE, READ-ONLY (never auto-creates a week row). Rendered under "Legacy
+ * Weekly Focus" on the 1:1 workspace page.
+ */
+export type LegacyWeeklyFocusDetail = {
+  /** Persistent coaching relationships (legacy) — archived rows excluded. */
+  relationships: CoachingRelationship[];
+  /** Recently archived relationships, for the Restore affordance. */
+  archived_relationships: CoachingRelationship[];
+  /** Standing per-AE training assignments — not tied to any single week. */
+  training: TrainingCommitment[];
+  /**
+   * Every Weekly Focus row, newest week first, capped to
+   * `LEGACY_WEEKS_LIMIT`, each with its commitments and its
+   * manager-only private notes (from `weekly_focus_private_notes`).
+   */
+  weeks: Array<
+    WeeklyFocus & {
+      commitments: WeeklyFocusCommitment[];
+      manager_notes: string | null;
+    }
+  >;
 };

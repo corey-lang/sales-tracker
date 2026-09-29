@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { addDays, format, parseISO } from "date-fns";
+import { format, parseISO } from "date-fns";
 import { ArrowRight, ClipboardList, Repeat, Trophy } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-client";
-import { mondayOfWeek, progressColor } from "@/lib/goals";
+import { progressColor } from "@/lib/goals";
 import { cn } from "@/lib/utils";
 import type { CoachingAeSummary } from "@/lib/one-on-ones";
 
@@ -20,11 +20,10 @@ import {
 
 // Admin → Coaching (Weekly Focus) index. One row per AE:
 //   * current week % + rank from the leaderboard
-//   * "This week" / "Week of …" label derived from the AE's latest Weekly
-//     Focus row's week_start (or "New this week" when none yet)
-//   * count of open commitments on the current week + carryover from prior
-//     weeks (motivational, not punitive)
-//   * link into the per-AE Weekly Focus detail page
+//   * last COMPLETED 1:1 date (1:1s are irregular, so this is a date, not a
+//     week), or "1:1 in progress" when a draft is open
+//   * open 1:1 commitments, plus legacy Weekly Focus commitments still open
+//   * link into the per-AE 1:1 workspace
 //
 // Tone is coaching/momentum first — not HR. Layout reads like a team
 // momentum board, with the active percent doing the visual heavy lifting.
@@ -63,8 +62,8 @@ export default function CoachingIndexPage() {
         <CardHeader>
           <CardTitle>Weekly Focus</CardTitle>
           <CardDescription>
-            Pick an AE to set this week&apos;s focus, capture wins, and carry
-            commitments forward. Sorted by this week&apos;s pace.
+            Pick an AE to open their 1:1 workspace. Sorted by this
+            week&apos;s pace.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -94,7 +93,14 @@ function AeRow({ summary }: { summary: CoachingAeSummary }) {
     summary.percent === null
       ? "text-muted-foreground"
       : progressColor(summary.percent).text;
-  const weekLabel = describeWeek(summary.latest_week_start);
+  // Weekly Focus commitments still open (current week + carried) — they
+  // surface as carryover in the next 1:1.
+  const legacyOpen = summary.open_commitments + summary.carried_commitments;
+  const statusLabel = summary.one_on_one_in_progress
+    ? "1:1 in progress"
+    : summary.last_one_on_one_date
+      ? `Last 1:1 ${format(parseISO(summary.last_one_on_one_date), "MMM d")}`
+      : "No 1:1 yet";
   return (
     <li>
       <Link
@@ -106,7 +112,14 @@ function AeRow({ summary }: { summary: CoachingAeSummary }) {
             <p className="truncate text-base font-semibold">
               {summary.first_name}
             </p>
-            <p className="text-xs text-muted-foreground">{weekLabel}</p>
+            <p
+              className={cn(
+                "text-xs",
+                summary.one_on_one_in_progress ? "font-medium text-primary" : "text-muted-foreground",
+              )}
+            >
+              {statusLabel}
+            </p>
           </div>
           <span
             className={cn(
@@ -125,15 +138,15 @@ function AeRow({ summary }: { summary: CoachingAeSummary }) {
             </span>
             <span className="inline-flex items-center gap-1">
               <ClipboardList aria-hidden="true" className="size-3.5" />
-              {summary.open_commitments} open
+              {summary.open_one_on_one_commitments} open
             </span>
-            {summary.carried_commitments > 0 && (
+            {legacyOpen > 0 && (
               <span
                 className="inline-flex items-center gap-1 text-primary"
-                title="Open commitments carried forward from prior weeks"
+                title="Open Weekly Focus commitments — shown as carryover in the next 1:1"
               >
                 <Repeat aria-hidden="true" className="size-3.5" />
-                +{summary.carried_commitments} carried
+                +{legacyOpen} Weekly Focus
               </span>
             )}
           </div>
@@ -145,23 +158,4 @@ function AeRow({ summary }: { summary: CoachingAeSummary }) {
       </Link>
     </li>
   );
-}
-
-/**
- * Describes an AE's latest Weekly Focus row in human terms.
- *   * `null`            → "New this week" (manager hasn't opened them yet)
- *   * current week      → "This week"
- *   * any past week     → "Week of MMM d – MMM d"
- *
- * Compared against `mondayOfWeek()` rather than today so a Saturday-night
- * load still shows the just-closed Mon-Fri week as "this week" until the
- * next Monday rolls over.
- */
-function describeWeek(weekStart: string | null): string {
-  if (!weekStart) return "New this week";
-  const current = mondayOfWeek();
-  if (weekStart === current) return "This week";
-  const monday = parseISO(weekStart);
-  const friday = addDays(monday, 4);
-  return `Week of ${format(monday, "MMM d")} – ${format(friday, "MMM d")}`;
 }

@@ -1,22 +1,16 @@
-import {
-  activityNoteSchema,
-  descriptionSchema,
-  dateSchema,
-} from "@/lib/gold-list-validation";
+import { createActivitySchema } from "@/lib/gold-list-validation";
 import { allGoldListRows, requireGoldListAccess } from "@/lib/server/gold-list";
-import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { ApiError, handleApiError, parseBody } from "@/lib/server/auth";
 import {
   ACTIVITY_COLUMNS,
-  isUniqueViolation,
   requireOwnedAgent,
   requireViewableAgent,
+  scheduleAgentActivity,
 } from "@/lib/server/gold-list";
 import {
   GOLD_LIST_ACTIVITIES_TABLE,
-  GOLD_LIST_ACTIVITY_TYPE_KEYS,
   type GoldListActivity,
 } from "@/lib/gold-list";
 
@@ -43,19 +37,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** A yyyy-mm-dd date that also parses to a real calendar date (matches /api/tasks). */
-const scheduledForSchema = dateSchema;
-
-const CreateActivitySchema = z.object({
-  activity_type: z.enum(GOLD_LIST_ACTIVITY_TYPE_KEYS).default("other"),
-  description: descriptionSchema,
-  /** OPTIONAL plan note for this touch. Never the completion outcome — that is
-   *  written later, to `outcome_note`, by the PATCH route. */
-  activity_note: activityNoteSchema,
-  request_id: z.string().uuid().optional(),
-  scheduled_for: scheduledForSchema,
-});
 
 export async function GET(
   req: Request,
@@ -101,71 +82,17 @@ export async function POST(
   try {
     const me = await requireGoldListAccess(req);
     const { id } = await params;
-    const body = await parseBody(req, CreateActivitySchema);
+    const body = await parseBody(req, createActivitySchema);
     const supabase = getServerSupabase();
 
     const agent = await requireOwnedAgent(supabase, id, me);
-    if (agent.archived_at !== null) {
-      throw new ApiError(
-        409,
-        "That agent is archived. Restore them before scheduling new activity.",
-      );
-    }
-
-    if (body.request_id) {
-      const previous = await supabase
-        .from(GOLD_LIST_ACTIVITIES_TABLE)
-        .select(ACTIVITY_COLUMNS)
-        .eq("id", body.request_id)
-        .eq("agent_id", id)
-        .eq("salesperson_id", me.id)
-        .maybeSingle();
-      if (previous.error)
-        throw new ApiError(500, "Could not check this activity request.");
-      if (previous.data) return Response.json({ activity: previous.data });
-    }
-
-    const res = await supabase
-      .from(GOLD_LIST_ACTIVITIES_TABLE)
-      .insert({
-        agent_id: agent.id,
-        // Denormalized owner. Taken from the AGENT row (which was just
-        // ownership-checked), never from the request — and the composite FK
-        // would reject it anyway if the pair didn't match.
-        salesperson_id: agent.salesperson_id,
-        activity_type: body.activity_type,
-        description: body.description,
-        // "" and null both mean "no note"; store NULL so the column has one
-        // empty representation.
-        activity_note: body.activity_note || null,
-        ...(body.request_id ? { id: body.request_id } : {}),
-        scheduled_for: body.scheduled_for,
-        status: "scheduled",
-      })
-      .select(ACTIVITY_COLUMNS)
-      .single();
-
-    if (res.error) {
-      if (res.error.code === "23514")
-        throw new ApiError(
-          409,
-          "This agent or activity changed. Refresh before trying again.",
-        );
-      if (isUniqueViolation(res.error)) {
-        throw new ApiError(
-          409,
-          "This agent already has an activity scheduled. Complete or reschedule it first.",
-        );
-      }
-      console.warn(
-        `[gold-list] activity insert failed agent_id=${id} caller=${me.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
-      );
-      throw new ApiError(500, "Could not schedule that activity.");
-    }
-    return Response.json(
-      { activity: res.data as GoldListActivity },
-      { status: 201 },
+    const { activity, created } = await scheduleAgentActivity(
+      supabase,
+      agent,
+      body,
+      me.id,
     );
+    return Response.json({ activity }, { status: created ? 201 : 200 });
   } catch (err) {
     return handleApiError(err);
   }

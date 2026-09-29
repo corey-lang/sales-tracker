@@ -1,5 +1,8 @@
-import { z } from "zod";
-
+import {
+  LEGACY_DROP_PATCH,
+  LegacyCommitmentUpdateSchema,
+  buildLegacyCommitmentPatch,
+} from "@/lib/legacy-commitments";
 import { getServerSupabase } from "@/lib/supabase/server";
 import {
   handleApiError,
@@ -7,12 +10,7 @@ import {
   parseBody,
   requireAdmin,
 } from "@/lib/server/auth";
-import {
-  COMMITMENT_CONTENT_MAX_LENGTH,
-  COMMITMENT_STATUSES,
-  WEEKLY_FOCUS_COMMITMENTS_TABLE,
-  type WeeklyFocusCommitment,
-} from "@/lib/one-on-ones";
+import type { WeeklyFocusCommitment } from "@/lib/one-on-ones";
 
 // PATCH /api/admin/one-on-ones/[id]/commitments/[cid]   -> { commitment: ... }
 // DELETE /api/admin/one-on-ones/[id]/commitments/[cid]  -> { commitment: ... }
@@ -35,59 +33,44 @@ import {
 // parent segment is enforced as a real ownership check — a mismatched
 // pair returns 404 instead of silently editing a commitment that lives
 // on a different week.
+//
+// CONSISTENCY WITH 1:1s: the write goes through update_legacy_commitment(),
+// which takes the AE's in-progress 1:1 lock (meeting row, then commitment
+// row) before updating, so even an old client can't change a commitment
+// "through" a 1:1's completion snapshot. With no 1:1 in progress it behaves
+// exactly as the plain UPDATE did. The request/response contract is
+// unchanged.
+//
+// The 1:1 workspace does NOT use this route for legacy carryover — it uses
+// /api/admin/one-on-one-meetings/[id]/legacy-commitments/[cid], which applies
+// the same rules (lib/legacy-commitments.ts) under the 1:1's lock.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const UpdateSchema = z
-  .object({
-    content: z
-      .string()
-      .trim()
-      .min(1, "Commitment cannot be empty.")
-      .max(COMMITMENT_CONTENT_MAX_LENGTH)
-      .optional(),
-    status: z.enum(COMMITMENT_STATUSES).optional(),
-    completed: z.boolean().optional(),
-    due_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/, "due_date must be YYYY-MM-DD.")
-      .nullish(),
-  })
-  .refine(
-    // Disallow both fields at once — they describe the same lifecycle
-    // axis and an inconsistent pair (status=dropped + completed=true)
-    // would be ambiguous. Status is authoritative; clients should send
-    // that going forward.
-    (b) => !(b.status !== undefined && b.completed !== undefined),
-    { message: "Send either `status` or `completed`, not both." },
-  );
-
 /**
- * Translates a PATCH body into the columns to write. Status is the
- * authoritative lifecycle field; the legacy `completed` boolean and
- * `completed_at` timestamp are kept in sync from it so any external
- * report query that still filters on `completed = true` stays correct.
+ * The write, via update_legacy_commitment() (supabase/one_on_one_meetings.sql):
+ * pinned to `cid` + week `id` exactly as before, but at the database boundary
+ * it first takes the AE's in-progress 1:1 lock (if there is one), so it can't
+ * race that 1:1's completion snapshot. Same result + errors as the direct
+ * UPDATE it replaces.
  */
-function buildLifecyclePatch(input: {
-  status?: (typeof COMMITMENT_STATUSES)[number];
-  completed?: boolean;
-}): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  let nextStatus: (typeof COMMITMENT_STATUSES)[number] | undefined;
-  if (input.status !== undefined) {
-    nextStatus = input.status;
-  } else if (input.completed !== undefined) {
-    nextStatus = input.completed ? "completed" : "open";
+async function writeLegacy(
+  weekId: string,
+  cid: string,
+  patch: Record<string, unknown>,
+): Promise<WeeklyFocusCommitment> {
+  const res = await getServerSupabase().rpc("update_legacy_commitment", {
+    p_week_id: weekId,
+    p_commitment_id: cid,
+    p_patch: patch,
+  });
+  if (res.error) {
+    if (res.error.code === "P0002") throw notFound("Commitment not found.");
+    throw new Error(res.error.message);
   }
-  if (nextStatus === undefined) return out;
-  out.status = nextStatus;
-  out.completed = nextStatus === "completed";
-  // Stamp completed_at on the transition so an undone item drops the
-  // timestamp too. Dropped commitments never set completed_at.
-  out.completed_at =
-    nextStatus === "completed" ? new Date().toISOString() : null;
-  return out;
+  if (!res.data) throw notFound("Commitment not found.");
+  return res.data as WeeklyFocusCommitment;
 }
 
 export async function PATCH(
@@ -97,28 +80,14 @@ export async function PATCH(
   try {
     await requireAdmin(req);
     const { id, cid } = await params;
-    const body = await parseBody(req, UpdateSchema);
+    const body = await parseBody(req, LegacyCommitmentUpdateSchema);
 
-    const patch: Record<string, unknown> = {
-      ...buildLifecyclePatch(body),
-    };
-    if (body.content !== undefined) patch.content = body.content;
-    if (body.due_date !== undefined) patch.due_date = body.due_date ?? null;
-    if (Object.keys(patch).length === 0) {
+    const patch = buildLegacyCommitmentPatch(body);
+    if (!patch) {
       return Response.json({ error: "No fields to update." }, { status: 400 });
     }
 
-    const supabase = getServerSupabase();
-    const res = await supabase
-      .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
-      .update(patch)
-      .eq("id", cid)
-      .eq("one_on_one_id", id)
-      .select("*")
-      .maybeSingle();
-    if (res.error) throw new Error(res.error.message);
-    if (!res.data) throw notFound("Commitment not found.");
-    return Response.json({ commitment: res.data as WeeklyFocusCommitment });
+    return Response.json({ commitment: await writeLegacy(id, cid, patch) });
   } catch (err) {
     return handleApiError(err);
   }
@@ -131,20 +100,12 @@ export async function DELETE(
   try {
     await requireAdmin(req);
     const { id, cid } = await params;
-    const supabase = getServerSupabase();
     // Soft-delete: mark status='dropped' instead of removing the row.
     // Preserves coaching history; the UI's trash affordance is really
     // "remove from active focus", not "erase from history".
-    const res = await supabase
-      .from(WEEKLY_FOCUS_COMMITMENTS_TABLE)
-      .update({ status: "dropped", completed: false, completed_at: null })
-      .eq("id", cid)
-      .eq("one_on_one_id", id)
-      .select("*")
-      .maybeSingle();
-    if (res.error) throw new Error(res.error.message);
-    if (!res.data) throw notFound("Commitment not found.");
-    return Response.json({ commitment: res.data as WeeklyFocusCommitment });
+    return Response.json({
+      commitment: await writeLegacy(id, cid, { ...LEGACY_DROP_PATCH }),
+    });
   } catch (err) {
     return handleApiError(err);
   }

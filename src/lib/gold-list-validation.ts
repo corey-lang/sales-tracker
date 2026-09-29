@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  GOLD_LIST_ACTIVITY_TYPE_KEYS,
+  OUTCOME_NOTE_MAX_LENGTH,
+} from "@/lib/gold-list";
+
 export const descriptionSchema = z
   .string()
   .trim()
@@ -72,3 +77,38 @@ export function possibleDuplicate(a: Contact, b: Contact): boolean {
           (name.includes(other) || other.includes(name))))),
   );
 }
+
+/**
+ * Body of "schedule an activity" — shared by the AE route
+ * (POST /api/gold-list/agents/:id/activities) and the manager 1:1 route, so
+ * both accept exactly the same fields and limits.
+ */
+export const createActivitySchema = z.object({
+  activity_type: z.enum(GOLD_LIST_ACTIVITY_TYPE_KEYS).default("other"),
+  description: descriptionSchema,
+  /** OPTIONAL plan note for this touch. Never the completion outcome — that is
+   *  written later, to `outcome_note`, by the PATCH route. */
+  activity_note: activityNoteSchema,
+  request_id: z.string().uuid().optional(),
+  /** A yyyy-mm-dd date that also parses to a real calendar date. */
+  scheduled_for: dateSchema,
+});
+
+/**
+ * Body of "complete / reschedule / cancel an activity" — shared by the AE
+ * route (PATCH /api/gold-list/agents/:id/activities/:aid) and the manager 1:1
+ * route.
+ */
+export const updateActivitySchema = z.object({
+  status: z.enum(["scheduled", "completed", "cancelled"]).optional(),
+  /** Optional outcome captured on completion; null clears a previous note. */
+  outcome_note: z.string().trim().max(OUTCOME_NOTE_MAX_LENGTH).nullish(),
+  /** The scheduled activity's plan note. Editable only while the activity is
+   *  still scheduled — the shared writer and the DB's
+   *  `protect_gold_list_activity_history` trigger both refuse a finished row,
+   *  so a completed activity's note is as immutable as its outcome. */
+  activity_note: activityNoteSchema,
+  activity_type: z.enum(GOLD_LIST_ACTIVITY_TYPE_KEYS).optional(),
+  description: descriptionSchema.optional(),
+  scheduled_for: dateSchema.optional(),
+});

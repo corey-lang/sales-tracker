@@ -19,6 +19,10 @@ import {
   WEEKLY_FOCUS_TABLE,
   WEEKLY_FOCUS_COMMITMENTS_TABLE,
 } from "@/lib/one-on-ones";
+import {
+  MEETING_COMMITMENTS_TABLE,
+  MEETINGS_TABLE,
+} from "@/lib/one-on-one-meetings";
 
 /** Pulls the numeric goal values off a row, defaulting nulls to 0. */
 function pickGoalValues(row: WeeklyGoalRow): WeeklyGoalValues {
@@ -437,7 +441,10 @@ export async function buildSnapshots(
  * Builds the index-page summary list:
  *   * one row per non-admin, non-assistant, non-test AE
  *   * sorted by percent desc (null last), name as tiebreaker
- *   * each row carries percent, rank, latest 1:1 date, open-commitment count
+ *   * each row carries percent, rank, latest Weekly Focus week + open /
+ *     carried Weekly Focus commitments (the original contract), plus the
+ *     1:1 workspace's last completed 1:1 date, in-progress flag, and open 1:1
+ *     commitments
  */
 export async function buildAeSummaries(
   supabase: SupabaseClient,
@@ -477,7 +484,13 @@ export async function buildAeSummaries(
   // the focus rows only to translate `one_on_one_id -> week_start` on
   // each commitment; the bucket math itself just compares week_start to
   // currentWeekStart.
-  const [focusRowsRes, snapshots, openCommitmentsRes] = await Promise.all([
+  const [
+    focusRowsRes,
+    snapshots,
+    openCommitmentsRes,
+    meetingsRes,
+    meetingCommitmentsRes,
+  ] = await Promise.all([
     supabase
       .from(WEEKLY_FOCUS_TABLE)
       .select("id, ae_id, week_start")
@@ -488,7 +501,46 @@ export async function buildAeSummaries(
       .select("ae_id, one_on_one_id")
       .in("ae_id", aeIds)
       .eq("status", "open"),
+    // 1:1 workspace state (added fields; see CoachingAeSummary).
+    supabase
+      .from(MEETINGS_TABLE)
+      .select("ae_id, status, meeting_date, completed_at")
+      .in("ae_id", aeIds),
+    supabase
+      .from(MEETING_COMMITMENTS_TABLE)
+      .select("ae_id")
+      .in("ae_id", aeIds)
+      .eq("status", "open"),
   ]);
+
+  const lastCompletedByAe = new Map<string, { date: string; at: string }>();
+  const inProgressByAe = new Set<string>();
+  if (!meetingsRes.error && meetingsRes.data) {
+    for (const m of meetingsRes.data as Array<{
+      ae_id: string;
+      status: string;
+      meeting_date: string;
+      completed_at: string | null;
+    }>) {
+      if (m.status === "in_progress") {
+        inProgressByAe.add(m.ae_id);
+        continue;
+      }
+      const prev = lastCompletedByAe.get(m.ae_id);
+      if (m.completed_at && (!prev || m.completed_at > prev.at)) {
+        lastCompletedByAe.set(m.ae_id, { date: m.meeting_date, at: m.completed_at });
+      }
+    }
+  }
+  const openMeetingCommitmentsByAe = new Map<string, number>();
+  if (!meetingCommitmentsRes.error && meetingCommitmentsRes.data) {
+    for (const row of meetingCommitmentsRes.data as Array<{ ae_id: string }>) {
+      openMeetingCommitmentsByAe.set(
+        row.ae_id,
+        (openMeetingCommitmentsByAe.get(row.ae_id) ?? 0) + 1,
+      );
+    }
+  }
 
   // Latest week_start per AE (for the index's "Week of …" label).
   const latestWeekByAe = new Map<string, string>();
@@ -537,6 +589,9 @@ export async function buildAeSummaries(
       latest_week_start: latestWeekByAe.get(p.id) ?? null,
       open_commitments: openByAe.get(p.id) ?? 0,
       carried_commitments: carriedByAe.get(p.id) ?? 0,
+      last_one_on_one_date: lastCompletedByAe.get(p.id)?.date ?? null,
+      one_on_one_in_progress: inProgressByAe.has(p.id),
+      open_one_on_one_commitments: openMeetingCommitmentsByAe.get(p.id) ?? 0,
     };
   });
 
