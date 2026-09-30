@@ -34,24 +34,55 @@ describe("follow-up email system prompt: voice", () => {
   const prompt = FOLLOWUP_SYSTEM_PROMPT;
   const lower = prompt.toLowerCase();
 
-  it("asks for the target voice: positive, energetic, conversational, warm, supportive, confident in the AE", () => {
-    for (const trait of ["warm", "conversational", "upbeat", "encouraging", "energy", "supportive", "confident in the ae", "natural"]) {
+  it("asks for the target voice: a warm, upbeat, conversational coach confident in the AE", () => {
+    for (const trait of ["warm", "conversational", "upbeat", "encouraging", "supportive", "confident in the ae", "natural"]) {
       expect(lower, trait).toContain(trait);
     }
-    expect(lower).toMatch(/celebrate real wins with genuine enthusiasm/);
+    expect(lower).toMatch(/a positive coach who believes in the ae, not a cheerleader or a motivational speaker/);
+    expect(lower).toMatch(/grounded and restrained/);
+  });
+
+  it("keeps praise proportional: no escalation of ordinary wins, no generic superlatives or personal praise", () => {
+    expect(lower).toMatch(/keep the praise proportional to what actually happened/);
+    expect(lower).toMatch(/never inflate a small win into a big one/);
+    expect(lower).toMatch(/praise about the work, not about the person/);
+    expect(lower).toMatch(/avoid generic superlatives and sweeping compliments/);
+    expect(lower).toMatch(/unless the meeting data clearly supports/);
+  });
+
+  it("uses plain language: no business jargon, and no leaning on 'momentum'", () => {
+    expect(lower).toMatch(/plain, simple language/);
+    expect(lower).toMatch(/simple word over the business one/);
+    for (const jargon of ["boosting engagement", "going forward", "it is crucial"]) {
+      expect(lower, jargon).toContain(`"${jargon}"`); // named only as things to avoid
+    }
+    expect(lower).toMatch(/don't lean on generic coaching words like "momentum"/);
+  });
+
+  it("puts encouragement on what the AE can DO next, with a low-key, proportional ending", () => {
+    expect(lower).toMatch(/confidence in what the ae can do next/);
+    expect(lower).toMatch(/rather than broad statements about how great they are/);
+    expect(lower).toMatch(/proportional to the meeting/);
+    expect(lower).toMatch(/never grand, sentimental or emotional/);
+  });
+
+  it('treats "Gold List" as a proper feature name', () => {
+    expect(prompt).toMatch(/always write it as "Gold List", capitalized, never "gold list"/);
+    // The only lowercase mention is the one telling the model not to use it.
+    expect(prompt.match(/gold list/g)).toHaveLength(1);
   });
 
   it("coaches directly without sugarcoating, framed around confidence and what to do next — never as criticism", () => {
     expect(lower).toMatch(/do not skip it, hide it or sugarcoat it/);
     expect(lower).toMatch(/what the ae can do next and your confidence/);
     expect(lower).toMatch(/coaching, never criticism/);
-    expect(lower).toMatch(/specific/);
+    expect(lower).toMatch(/clear and specific: which activity, which week, and what to focus on/);
   });
 
   it("keeps it concise and avoids fake enthusiasm, exclamation pile-ups, clichés and motivational-speaker language", () => {
     expect(lower).toMatch(/120-220 words/);
     expect(lower).toMatch(/fake enthusiasm/);
-    expect(lower).toMatch(/exclamation points/);
+    expect(lower).toMatch(/exclamation points \(one or two at most/);
     expect(lower).toMatch(/clich/);
     expect(lower).toMatch(/motivational-speaker/);
     expect(lower).toMatch(/not every paragraph needs to be upbeat/);
@@ -61,7 +92,7 @@ describe("follow-up email system prompt: voice", () => {
   it("varies structure and ending instead of templating", () => {
     expect(lower).toMatch(/do not use the same shape every time/);
     expect(lower).toMatch(/never fall back on a fixed template or stock phrases/);
-    expect(lower).toMatch(/usually finish with a short, natural line of confidence, encouragement, excitement or support/);
+    expect(lower).toMatch(/usually finish positively with one short, natural line that fits this meeting/);
     expect(lower).toMatch(/fresh each time in your own words/);
   });
 
