@@ -45,7 +45,7 @@ describe("follow-up email system prompt: voice", () => {
   it("keeps praise proportional: no escalation of ordinary wins, no generic superlatives or personal praise", () => {
     expect(lower).toMatch(/keep the praise proportional to what actually happened/);
     expect(lower).toMatch(/never inflate a small win into a big one/);
-    expect(lower).toMatch(/praise about the work, not about the person/);
+    expect(lower).toMatch(/praise actions and wins, not the person/);
     expect(lower).toMatch(/avoid generic superlatives and sweeping compliments/);
     expect(lower).toMatch(/unless the meeting data clearly supports/);
   });
@@ -61,6 +61,7 @@ describe("follow-up email system prompt: voice", () => {
 
   it("puts encouragement on what the AE can DO next, with a low-key, proportional ending", () => {
     expect(lower).toMatch(/confidence in what the ae can do next/);
+    expect(lower).toMatch(/things already on their plate or an area they can move/);
     expect(lower).toMatch(/rather than broad statements about how great they are/);
     expect(lower).toMatch(/proportional to the meeting/);
     expect(lower).toMatch(/never grand, sentimental or emotional/);
@@ -76,7 +77,10 @@ describe("follow-up email system prompt: voice", () => {
     expect(lower).toMatch(/do not skip it, hide it or sugarcoat it/);
     expect(lower).toMatch(/what the ae can do next and your confidence/);
     expect(lower).toMatch(/coaching, never criticism/);
-    expect(lower).toMatch(/clear and specific: which activity, which week, and what to focus on/);
+    // Specificity is about the AREA and the WEEK; how much / what to do comes
+    // only from the data (see the "no invented action items" tests).
+    expect(lower).toMatch(/name the area that has room to grow and which week you mean/);
+    expect(lower).toMatch(/keep the rest as specific as the data is/);
   });
 
   it("keeps it concise and avoids fake enthusiasm, exclamation pile-ups, clichés and motivational-speaker language", () => {
@@ -103,6 +107,18 @@ describe("follow-up email system prompt: voice", () => {
       expect(prompt, formal).toContain(formal); // named only as closings to avoid
     }
     expect(lower).toMatch(/do not use formal or corporate closings/);
+  });
+
+  it("adds a little warmth: believes in the AE and is coaching them forward", () => {
+    expect(lower).toMatch(/my manager believes in me and is coaching me forward/);
+    expect(lower).toMatch(/personal warmth/);
+    expect(lower).toMatch(/friendly opening, a genuine thank-you, a nod to the effort/);
+  });
+
+  it("praises actions and wins, not the person", () => {
+    expect(lower).toMatch(/praise actions and wins, not the person/);
+    expect(lower).toMatch(/credit the specific thing the data shows they did/);
+    expect(lower).toMatch(/rather than making broad statements about who they are/);
   });
 
   it("does NOT hard-code the illustrative phrases", () => {
@@ -140,4 +156,55 @@ describe("follow-up email system prompt: voice", () => {
     const req = buildFollowupRequest({ hello: "world" } as never);
     expect(req.messages[0]).toEqual({ role: "system", content: FOLLOWUP_SYSTEM_PROMPT });
   });
+
+  // ---- STRICT GROUNDING: no invented commitments, targets, numbers or action items ----
+
+  it("forbids creating new commitments, targets, numbers, deadlines, activity goals or action items", () => {
+    expect(lower).toMatch(/no new commitments, targets or action items — the most important rule/);
+    expect(lower).toMatch(/never create a new commitment, target, number, deadline, activity goal or to-do/);
+    expect(lower).toMatch(/do not infer specific activities from general themes/);
+    expect(lower).toMatch(/no made-up counts of visits, meetings, calls, agents or anything else/);
+    expect(lower).toMatch(/no made-up dates or deadlines/);
+  });
+
+  it("limits next steps to what the meeting recorded, set or assigned", () => {
+    expect(lower).toMatch(/commitments explicitly recorded in this 1:1, goals already present in <meeting_data>, and next steps that were specifically discussed or assigned/);
+    expect(lower).toMatch(/nothing else counts as a next step/);
+    expect(lower).toMatch(/unless that exact number or date appears in <meeting_data>/);
+    expect(lower).toMatch(/if no commitments or next steps were recorded, do not add a next-steps list/);
+    expect(lower).toMatch(/next steps that were actually recorded/);
+  });
+
+  it("every number written must come from the data — no derived 'how many more' arithmetic", () => {
+    expect(lower).toMatch(/every number you write must come straight from <meeting_data>/);
+    expect(lower).toMatch(/never calculate new ones, such as how many more/);
+  });
+
+  it("keeps improvement coaching general when the data holds no specific target", () => {
+    expect(lower).toMatch(/holds no specific target or plan, keep it general/);
+    expect(lower).toMatch(/name the area, say you know they can pick it up, and stop there/);
+    expect(lower).toMatch(/stating a general focus the data supports is fine; stating a number, date or task the data does not contain is not/);
+  });
+
+  it("contains no example numbers or sample action items the model could copy", () => {
+    // The only digits allowed are the length guidance and the "1:1" meeting name.
+    const digits = prompt.replace(/120-220|1:1/g, "").match(/\d/g);
+    expect(digits).toBeNull();
+    for (const seed of [
+      "schedule 2", "complete 5", "add 10", "by friday", "1-on-1s", "office visits", "continuing to build your gold list",
+    ]) {
+      expect(lower, seed).not.toContain(seed);
+    }
+    // Nothing in the prompt asks for a fixed number of anything.
+    expect(lower).not.toMatch(/\b(at least|a minimum of|aim for|target of)\b/);
+  });
+
+  it("the user message the model receives labels the data as information, and the strict rule travels with every request", () => {
+    const req = buildFollowupRequest({ wins: "x" } as never);
+    const system = req.messages[0].content;
+    expect(system.indexOf("NO NEW COMMITMENTS")).toBeGreaterThan(-1);
+    expect(system.indexOf("NO NEW COMMITMENTS")).toBeLessThan(system.indexOf("OUTPUT"));
+    expect(req.messages[1].content).toMatch(/^<meeting_data>[\s\S]*<\/meeting_data>/);
+  });
 });
+
