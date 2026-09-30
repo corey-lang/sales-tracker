@@ -201,4 +201,43 @@ describe("follow-up email system prompt", () => {
       expect(system, kept).toContain(kept);
     }
   });
+
+  // ---- Refinement: no awkward personal compliments; no doubled thank-you ----
+
+  it("keeps encouragement about what the AE does, not broad compliments about their talent, character or abilities — as a principle, not a blacklist", () => {
+    expect(lower).toMatch(/keep it simple and conversational: confidence in the ae is fine, but point it at what they are doing or can get done, not at compliments about their talent, character or abilities/);
+    // Confidence and natural encouragement are still invited.
+    expect(lower).toMatch(/natural encouragement is good; don't hold back from it/);
+    expect(lower).toMatch(/confidence in the ae is fine/);
+    // A principle: it adds no example compliments to avoid (none quoted, none named).
+    expect(lower).not.toMatch(/talent to|got what it takes|natural ability|gifted|rock ?star/);
+    const quoted = prompt.slice(0, prompt.indexOf("OUTPUT")).match(/"[^"]+"/g) ?? [];
+    expect(quoted.filter((q) => /talent|abilit|character/i.test(q))).toEqual([]);
+  });
+
+  it("asks for ONE closing thought and then the sign-off — no second thank-you right before it", () => {
+    const ending = prompt.slice(prompt.indexOf("ENDING"), prompt.indexOf("OUTPUT")).toLowerCase();
+    expect(ending).toMatch(/use one closing thought, then the sign-off/);
+    expect(ending).toMatch(/don't add a thank-you of your own right before it, because the sign-off is the thank-you/);
+    // The sign-off itself is unchanged, and the closing thought stays natural (no stock line supplied).
+    expect(ending).toMatch(/natural, warm and short/);
+    expect(prompt).toContain('"Thanks!"');
+    expect(lower).not.toContain("thanks for all that you do");
+    // The ending guidance supplies no thank-you line of its own (only the sign-off).
+    const withoutTheRuleAndSignoff = ending
+      .replace(/don't add a thank-you of your own right before it, because the sign-off is the thank-you\./, "")
+      .replace('"thanks!"', "");
+    expect(withoutTheRuleAndSignoff).not.toMatch(/thank/);
+    // Still short: the ending section did not grow into a rule stack.
+    expect(ending.split("\n").filter((l) => l.trim()).length).toBeLessThanOrEqual(3);
+  });
+
+  it("still includes recorded to-dos and follow-ups from the meeting (the grounding rule only blocks invented ones)", () => {
+    expect(lower).toMatch(/only mention commitments that were recorded, goals already in the data, and next steps that were actually discussed or assigned/);
+    expect(lower).toMatch(/include the commitments and next steps that were recorded, clearly/);
+    // Nothing tells the model to omit or soften recorded follow-ups.
+    expect(lower).not.toMatch(/do not (include|mention) (the )?(commitments|next steps|follow-ups)/);
+    expect(lower).not.toMatch(/leave out (the )?(commitments|next steps|follow-ups)/);
+  });
 });
+
