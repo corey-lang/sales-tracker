@@ -278,6 +278,45 @@ export class DraftAutosave {
     }
   }
 
+  /**
+   * Runs a background operation whose result is NOT part of the record if it
+   * fails — e.g. AI email generation. Completion still WAITS for it (so its
+   * result can't land half-way through completing), but unlike `mutate()` a
+   * failure here is not counted against completion: an AI outage must never
+   * stop a manager from completing the 1:1. Refused while locked.
+   */
+  async track<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.lockedFlag) throw new DraftLockedError();
+    const p = fn();
+    this.pending.add(p);
+    this.emit();
+    try {
+      return await p;
+    } finally {
+      this.pending.delete(p);
+      this.emit();
+    }
+  }
+
+  /**
+   * Replaces a field with text the SERVER just wrote (e.g. a generated email
+   * saved by the generate route), as already-saved at `revision`. Waits for any
+   * save already in flight for the field first, so an older response can't
+   * land on top of it. The one deliberate exception to "a server response is
+   * never written back into a field" — callers only use it after an explicit
+   * user action that replaces the text.
+   */
+  async adopt(key: string, value: string, revision: number): Promise<void> {
+    const f = this.fields.get(key);
+    if (!f) return;
+    if (f.timer) {
+      clearTimeout(f.timer);
+      f.timer = null;
+    }
+    await f.chain;
+    this.patch(key, { value, saved: value, revision, conflict: null, status: "idle" });
+  }
+
   // ---- completion -------------------------------------------------------------
 
   lock(): void {

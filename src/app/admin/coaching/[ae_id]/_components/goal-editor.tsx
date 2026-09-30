@@ -4,7 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { addDays, format, parseISO } from "date-fns";
 import { ChevronRight } from "lucide-react";
 
+import { useOptionalDraft } from "./autosave-text";
 import { apiFetch } from "@/lib/api-client";
+import { interpretGoalSaveResponse } from "@/lib/goal-save-outcome";
 import { GOAL_ACTIVITY_KEYS } from "@/lib/goal-activities";
 import type {
   CurrentWeeklyGoal,
@@ -41,6 +43,8 @@ export function goalSummaryLine(goal: CurrentWeeklyGoal): string {
 
 export function UpdateGoalsDisclosure(props: {
   aeId: string;
+  /** The in-progress 1:1 — goal changes are recorded on it. */
+  meetingId?: string | null;
   currentGoal: CurrentWeeklyGoal;
   nextOverride: NextWeekGoalOverride | null;
   nextWeekStart: string;
@@ -101,17 +105,21 @@ export function UpdateGoalsDisclosure(props: {
  */
 export function NextWeekGoalsCard({
   aeId,
+  meetingId = null,
   currentGoal,
   nextOverride,
   nextWeekStart,
   onChange,
 }: {
   aeId: string;
+  meetingId?: string | null;
   currentGoal: CurrentWeeklyGoal;
   nextOverride: NextWeekGoalOverride | null;
   nextWeekStart: string;
   onChange: () => void;
 }) {
+  // Inside a 1:1 the save is tracked by the draft so Complete waits for it.
+  const draft = useOptionalDraft();
   // Default to "next_week" — the safer choice. "This week" retroactively
   // changes the in-flight leaderboard percent, so make it an explicit
   // pick rather than the default.
@@ -163,16 +171,23 @@ export function NextWeekGoalsCard({
     setError(null);
     setSaved(false);
     try {
-      const res = await apiFetch(`/api/admin/coaching/${aeId}/goals`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ start, values }),
-      });
-      if (!res.ok) {
-        const reason = (await res.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        setError(reason?.error ?? `Couldn't save (${res.status}).`);
+      const send = () =>
+        apiFetch(`/api/admin/coaching/${aeId}/goals`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start,
+            values,
+            ...(meetingId ? { meeting_id: meetingId } : {}),
+          }),
+        });
+      const res = await (draft ? draft.mutate(send) : send());
+      // "Saved" only for a change the server confirms — inside a 1:1 that
+      // means it was recorded on the meeting too.
+      const outcome = await interpretGoalSaveResponse(res, Boolean(meetingId));
+      if (!outcome.saved) {
+        setError(outcome.error);
+        if (outcome.resync) onChange();
         return;
       }
       setSaved(true);
@@ -205,8 +220,10 @@ export function NextWeekGoalsCard({
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
         Change the AE&apos;s ongoing goals and pick when the change takes
-        effect — manager only. Goal changes are operational: they are not
-        part of the 1:1 record.
+        effect — manager only.
+        {meetingId
+          ? " Changes made here are also recorded on this 1:1."
+          : " Goal changes are operational: they are not part of any 1:1 record."}
       </p>
         <fieldset className="space-y-2">
           <legend className="text-xs uppercase tracking-wide text-muted-foreground">

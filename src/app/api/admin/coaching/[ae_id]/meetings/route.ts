@@ -1,6 +1,7 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, requireAdmin } from "@/lib/server/auth";
 import { requireCoachableAe } from "@/lib/server/coaching";
+import { isFollowupStale, loadFollowupContext } from "@/lib/server/followup-context";
 import {
   loadWorkspace,
   startOrResumeMeeting,
@@ -35,6 +36,12 @@ export async function GET(
     const supabase = getServerSupabase();
     const ae = await requireCoachableAe(supabase, ae_id, me);
     const workspace = await loadWorkspace(supabase, ae, me);
+    // Has the generated follow-up email drifted from the meeting's shareable
+    // content? (Only worth computing when there is a generated email.)
+    if (workspace.meeting?.followup_body && workspace.meeting.followup_context_hash) {
+      const { contentHash } = await loadFollowupContext(supabase, workspace.meeting.id);
+      workspace.followup_stale = isFollowupStale(workspace.meeting, contentHash);
+    }
     return Response.json(workspace, {
       headers: { "Cache-Control": "private, no-store" },
     });

@@ -9,7 +9,7 @@
  * dropping the rules that keep a completed 1:1 immutable.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -189,5 +189,66 @@ describe("one_on_one_meetings.sql — the rules the app relies on", () => {
     expect(sql).toMatch(/UNIQUE \(meeting_id, agent_id\)/);
     expect(sql).toMatch(/UNIQUE \(meeting_id, commitment_id\)/);
     expect(sql).toMatch(/UNIQUE \(meeting_id, legacy_commitment_id\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Goal-change consistency check: no completion path may skip it
+// ---------------------------------------------------------------------------
+
+describe("every completion path is checked against goal changes", () => {
+  const v2 = readFileSync(join(process.cwd(), "supabase", "one_on_one_workspace_v2.sql"), "utf8");
+  const fnBodies = (sql: string) =>
+    [...sql.matchAll(/CREATE OR REPLACE FUNCTION complete_one_on_one_meeting\(([\s\S]*?)\n\$\$;/g)].map((m) => m[0]);
+
+  it("V2 defines exactly two signatures: the checked 4-arg implementation and a 3-arg wrapper that passes 0", () => {
+    const bodies = fnBodies(v2);
+    expect(bodies).toHaveLength(2);
+    const [four, three] = bodies;
+    expect(four).toContain("p_goal_changes_seen INTEGER");
+    // Unconditional: NULL is rejected, and the comparison has no NULL escape hatch.
+    expect(four).toMatch(/IF p_goal_changes_seen IS NULL THEN\s+RAISE EXCEPTION[\s\S]*?22004/);
+    expect(four).toMatch(/IF jsonb_array_length\(m\.goal_changes\) <> p_goal_changes_seen THEN/);
+    expect(four).not.toMatch(/p_goal_changes_seen IS NOT NULL/);
+    // The wrapper only delegates, with a literal 0 — never NULL, never a variable.
+    expect(three).not.toContain("p_goal_changes_seen INTEGER");
+    expect(three).toMatch(/RETURN complete_one_on_one_meeting\(\s*p_meeting_id, p_completed_by, p_activity_snapshot, 0\);/);
+    expect(three).not.toMatch(/NULL::integer|, NULL\)/);
+    expect(three).not.toMatch(/UPDATE one_on_one_meetings/); // no second implementation
+  });
+
+  it("the original (3-arg) body is replaced by V2 — the only other definition is the deployed migration it supersedes", () => {
+    const original = readFileSync(join(process.cwd(), "supabase", "one_on_one_meetings.sql"), "utf8");
+    expect(fnBodies(original)).toHaveLength(1);
+    // Applied in README order, V2 (#49) always runs after it (#47).
+    const readme = readFileSync(join(process.cwd(), "supabase", "README.md"), "utf8");
+    expect(readme.indexOf("`one_on_one_meetings.sql`")).toBeLessThan(readme.indexOf("`one_on_one_workspace_v2.sql`"));
+  });
+
+  it("no other SQL file defines or calls completion", () => {
+    const dir = join(process.cwd(), "supabase");
+    const others = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql") && f !== "one_on_one_meetings.sql" && f !== "one_on_one_workspace_v2.sql")
+      .filter((f) => readFileSync(join(dir, f), "utf8").includes("complete_one_on_one_meeting"));
+    expect(others).toEqual([]);
+  });
+
+  it("the ONLY application call passes p_goal_changes_seen (and nothing calls the 3-arg form)", () => {
+    const hits: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const full = join(d, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(e.name) && !/\.test\.tsx?$/.test(e.name) && !full.includes("/src/test/")) {
+          const text = readFileSync(full, "utf8");
+          for (const m of text.matchAll(/rpc\(\s*["']complete_one_on_one_meeting["']\s*,\s*\{([\s\S]*?)\}\s*\)/g)) {
+            hits.push(`${full}: ${m[1].includes("p_goal_changes_seen") ? "checked" : "UNCHECKED"}`);
+          }
+        }
+      }
+    };
+    walk(join(process.cwd(), "src"));
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatch(/one-on-one-meetings\.ts: checked$/);
   });
 });

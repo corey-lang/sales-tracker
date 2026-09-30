@@ -42,7 +42,7 @@ export function useDraft(): DraftAutosave {
 }
 
 /** Re-renders whenever the draft changes (lock state, any field). */
-function useDraftVersion(draft: DraftAutosave): number {
+export function useDraftVersion(draft: DraftAutosave): number {
   return useSyncExternalStore(draft.subscribe, draft.getVersion, draft.getVersion);
 }
 

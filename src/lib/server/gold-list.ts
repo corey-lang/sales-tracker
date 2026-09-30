@@ -33,6 +33,12 @@ import {
 } from "@/lib/roster";
 import { requireVisibleSalesperson } from "@/lib/server/roster";
 import {
+  possibleDuplicate,
+  type createAgentSchema,
+  type updateAgentSchema,
+} from "@/lib/gold-list-validation";
+import type { z } from "zod";
+import {
   GOLD_LIST_ACTIVITIES_TABLE,
   GOLD_LIST_AGENTS_TABLE,
   type GoldListActivity,
@@ -566,6 +572,164 @@ export async function updateAgentActivity(
       "This activity changed. Refresh to see its preserved history.",
     );
   return res.data as GoldListActivity;
+}
+
+// ---------------------------------------------------------------------------
+// Agent writes — ONE implementation for the AE routes and the manager 1:1
+// routes. The manager path differs only in WHO owns the row (the 1:1's AE,
+// authorized by the caller) and in the attribution columns stamped in the
+// same statement.
+// ---------------------------------------------------------------------------
+
+export type CreateAgentInput = z.infer<typeof createAgentSchema>;
+export type UpdateAgentInput = Partial<
+  Pick<z.infer<typeof updateAgentSchema>, "agent_name" | "brokerage" | "phone" | "email" | "notes" | "archived">
+>;
+
+export type CreateAgentResult =
+  | { kind: "duplicates"; duplicates: Array<{ id: string; agent_name: string; archived: boolean }> }
+  | { kind: "replay"; agent: GoldListAgent }
+  | { kind: "created"; agent: GoldListAgent };
+
+/** 23514 / 55P03 from the meeting-attribution trigger, as a 409. */
+function agentConflict(error: { code?: string; message?: string }): ApiError {
+  if (error.code === "55P03") {
+    return new ApiError(409, "This 1:1 is being completed right now.");
+  }
+  return new ApiError(409, "This 1:1 is completed and read-only.");
+}
+
+/**
+ * Adds an agent to `ownerId`'s Gold List. `manager` (an in-progress 1:1 and
+ * its actor) stamps `created_by` / `created_in_meeting_id` in the same INSERT;
+ * the DB refuses it if that meeting is completing/completed.
+ */
+export async function createGoldListAgent(
+  supabase: Db,
+  ownerId: string,
+  body: CreateAgentInput,
+  logCaller: string,
+  manager: ManagerMeetingAction | null = null,
+): Promise<CreateAgentResult> {
+  const existing = await allGoldListRows<GoldListAgent>(
+    supabase
+      .from(GOLD_LIST_AGENTS_TABLE)
+      .select(AGENT_COLUMNS)
+      .eq("salesperson_id", ownerId)
+      .order("id"),
+  );
+  if (existing.error)
+    throw new ApiError(500, "Could not check your existing agents.");
+  const ownAgents = existing.data ?? [];
+  const previous = body.request_id
+    ? ownAgents.find((a) => a.id === body.request_id)
+    : undefined;
+  if (previous) return { kind: "replay", agent: previous };
+
+  const duplicates = ownAgents.filter((a) => possibleDuplicate(body, a));
+  if (!body.confirm_duplicate && duplicates.length) {
+    return {
+      kind: "duplicates",
+      duplicates: duplicates.map((a) => ({
+        id: a.id,
+        agent_name: a.agent_name,
+        archived: a.archived_at !== null,
+      })),
+    };
+  }
+  const res = await supabase
+    .from(GOLD_LIST_AGENTS_TABLE)
+    .insert({
+      // The owner is decided by the CALLER's authorization, never the body.
+      salesperson_id: ownerId,
+      ...(body.request_id ? { id: body.request_id } : {}),
+      agent_name: body.agent_name,
+      brokerage: body.brokerage || null,
+      phone: body.phone || null,
+      email: body.email || null,
+      notes: body.notes || null,
+      ...(manager
+        ? { created_by: manager.actorId, created_in_meeting_id: manager.meetingId }
+        : {}),
+    })
+    .select(AGENT_COLUMNS)
+    .single();
+
+  if (res.error) {
+    if (res.error.code === "23514" || res.error.code === "55P03")
+      throw agentConflict(res.error);
+    // A concurrent retry may have inserted this request UUID already.
+    if (isUniqueViolation(res.error)) {
+      throw new ApiError(
+        409,
+        "This request has already been saved. Refresh your Gold List before retrying.",
+      );
+    }
+    console.warn(
+      `[gold-list] agent insert failed caller=${logCaller} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not add that agent.");
+  }
+  return { kind: "created", agent: res.data as GoldListAgent };
+}
+
+/**
+ * Edits an agent's details (and, on the AE route only, archive state).
+ * `manager` stamps `edited_by` / `edited_in_meeting_id` / `edited_at` in the
+ * same UPDATE. Returns null when the row is gone.
+ */
+export async function updateGoldListAgent(
+  supabase: Db,
+  agent: GoldListAgent,
+  body: UpdateAgentInput,
+  logCaller: string,
+  manager: ManagerMeetingAction | null = null,
+): Promise<GoldListAgent | null> {
+  const patch: Record<string, unknown> = {};
+  if (body.agent_name !== undefined) patch.agent_name = body.agent_name;
+  if (body.brokerage !== undefined) patch.brokerage = body.brokerage || null;
+  if (body.phone !== undefined) patch.phone = body.phone || null;
+  if (body.email !== undefined) patch.email = body.email || null;
+  if (body.notes !== undefined) patch.notes = body.notes || null;
+  if (body.archived !== undefined) {
+    patch.archived_at = body.archived ? new Date().toISOString() : null;
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new ApiError(400, "No fields to update.");
+  }
+  if (manager) {
+    patch.edited_by = manager.actorId;
+    patch.edited_in_meeting_id = manager.meetingId;
+    patch.edited_at = new Date().toISOString();
+  }
+
+  const res = await supabase
+    .from(GOLD_LIST_AGENTS_TABLE)
+    .update(patch)
+    .eq("id", agent.id)
+    .eq("salesperson_id", agent.salesperson_id)
+    .select(AGENT_COLUMNS)
+    .maybeSingle();
+
+  if (res.error) {
+    if (res.error.code === "23514" || res.error.code === "55P03")
+      throw agentConflict(res.error);
+    // Renaming into a collision with another ACTIVE agent, or restoring an
+    // archived agent whose name is now taken by an active one.
+    if (isUniqueViolation(res.error)) {
+      throw new ApiError(
+        409,
+        manager
+          ? "Another active agent on this Gold List already has that name and brokerage."
+          : "Another active agent on your Gold List already has that name and brokerage.",
+      );
+    }
+    console.warn(
+      `[gold-list] agent update failed agent_id=${agent.id} caller=${logCaller} code=${res.error.code ?? "?"} msg=${res.error.message}`,
+    );
+    throw new ApiError(500, "Could not save that agent.");
+  }
+  return (res.data as GoldListAgent | null) ?? null;
 }
 
 /**

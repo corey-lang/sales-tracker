@@ -59,8 +59,10 @@ import {
   type MeetingHistoryItem,
   type MeetingRecord,
   type MeetingTextField,
+  type GoalChange,
   type OneOnOneMeeting,
   type OneOnOneWorkspace,
+  type PreviousMeetingSummary,
   type WorkspaceGoldListAgent,
 } from "@/lib/one-on-one-meetings";
 import {
@@ -214,8 +216,32 @@ export class DraftRevisionConflict extends Error {
   }
 }
 
+/**
+ * Regenerating the follow-up email replaces subject AND body together, so a
+ * stale save names both revisions; either one having moved on (another tab
+ * edited the email) refuses the whole replacement and reports both.
+ */
+export class FollowupRevisionConflict extends Error {
+  constructor(
+    readonly subject: { value: string | null; revision: number },
+    readonly body: { value: string | null; revision: number },
+  ) {
+    super("The email was changed in another tab or device.");
+    this.name = "FollowupRevisionConflict";
+  }
+}
+
 /** 409 body for a DraftRevisionConflict, or null for any other error. */
 export function toConflictResponse(err: unknown): Response | null {
+  if (err instanceof FollowupRevisionConflict) {
+    return Response.json(
+      {
+        error: err.message,
+        followup_conflict: { subject: err.subject, body: err.body },
+      },
+      { status: 409 },
+    );
+  }
   if (!(err instanceof DraftRevisionConflict)) return null;
   const body: DraftConflictBody = {
     error: err.message,
@@ -539,7 +565,7 @@ async function loadActiveAgents(
   return res.data;
 }
 
-async function loadMeetingNotes(
+export async function loadMeetingNotes(
   supabase: Db,
   meetingId: string,
 ): Promise<GoldListDiscussionNote[]> {
@@ -627,6 +653,52 @@ async function loadActionAgentIds(
   return [...new Set((res.data ?? []).map((r: { agent_id: string }) => r.agent_id))];
 }
 
+/** First non-empty line of the 1:1 Notes, trimmed for a one-line preview. */
+export function notesPreview(notes: string | null): string | null {
+  const line = (notes ?? "").split("\n").map((l) => l.trim()).find(Boolean);
+  if (!line) return null;
+  return line.length > 90 ? `${line.slice(0, 89)}…` : line;
+}
+
+/**
+ * The shareable subset of a completed meeting the workspace shows as "From
+ * last 1:1". Built FIELD BY FIELD from an allowlist so the private manager
+ * notes (or any column added to the meeting later) can never ride along on
+ * a meeting row spread into this payload.
+ */
+export function toPreviousMeeting(m: OneOnOneMeeting): PreviousMeetingSummary {
+  return {
+    id: m.id,
+    meeting_date: m.meeting_date,
+    completed_at: m.completed_at,
+    coaching_focus: m.coaching_focus,
+    coaching_notes: m.coaching_notes,
+  };
+}
+
+/** Agents ADDED to / EDITED on the live Gold List from this 1:1. */
+async function loadAgentAttribution(
+  supabase: Db,
+  meetingId: string,
+): Promise<{ added: string[]; edited: string[] }> {
+  const res = await supabase
+    .from(GOLD_LIST_AGENTS_TABLE)
+    .select("id, created_in_meeting_id, edited_in_meeting_id")
+    .or(`created_in_meeting_id.eq.${meetingId},edited_in_meeting_id.eq.${meetingId}`);
+  if (res.error) {
+    throw new ApiError(500, `Could not load 1:1 Gold List agents: ${res.error.message}`);
+  }
+  const rows = (res.data ?? []) as Array<{
+    id: string;
+    created_in_meeting_id: string | null;
+    edited_in_meeting_id: string | null;
+  }>;
+  return {
+    added: rows.filter((r) => r.created_in_meeting_id === meetingId).map((r) => r.id),
+    edited: rows.filter((r) => r.edited_in_meeting_id === meetingId).map((r) => r.id),
+  };
+}
+
 /**
  * Completed meetings for the history list, newest first, keyset-paged on the
  * composite (completed_at, id) — deterministic even when several meetings
@@ -641,7 +713,9 @@ export async function loadMeetingHistory(
 ): Promise<{ items: MeetingHistoryItem[]; has_more: boolean }> {
   let query = supabase
     .from(MEETINGS_TABLE)
-    .select("id, meeting_date, completed_at, coaching_focus, manager_name")
+    // Explicit columns: the 1:1 Notes (for a one-line preview) but NEVER
+    // private_notes.
+    .select("id, meeting_date, completed_at, coaching_focus, coaching_notes, manager_name")
     .eq("ae_id", aeId)
     .eq("status", "completed");
   if (before) {
@@ -659,8 +733,18 @@ export async function loadMeetingHistory(
   if (res.error) {
     throw new ApiError(500, `Could not load 1:1 history: ${res.error.message}`);
   }
-  const rows = (res.data ?? []) as MeetingHistoryItem[];
-  return { items: rows.slice(0, limit), has_more: rows.length > limit };
+  const rows = (res.data ?? []) as Array<
+    Omit<MeetingHistoryItem, "notes_preview"> & { coaching_notes: string | null }
+  >;
+  const items: MeetingHistoryItem[] = rows.slice(0, limit).map((r) => ({
+    id: r.id,
+    meeting_date: r.meeting_date,
+    completed_at: r.completed_at,
+    coaching_focus: r.coaching_focus,
+    notes_preview: notesPreview(r.coaching_notes),
+    manager_name: r.manager_name,
+  }));
+  return { items, has_more: rows.length > limit };
 }
 
 // ---------------------------------------------------------------------------
@@ -690,12 +774,15 @@ export async function loadWorkspace(
     buildActivityComparison(supabase, ae.id, asOf),
     loadActiveAgents(supabase, ae.id),
   ]);
-  const [lastMeeting, notes, actionAgentIds, goldList] = await Promise.all([
+  const [lastMeeting, notes, actionAgentIds, attribution, goldList] = await Promise.all([
     history.items[0]
       ? loadMeeting(supabase, history.items[0].id)
       : Promise.resolve(null),
     meeting ? loadMeetingNotes(supabase, meeting.id) : Promise.resolve([]),
     meeting ? loadActionAgentIds(supabase, meeting.id) : Promise.resolve([]),
+    meeting
+      ? loadAgentAttribution(supabase, meeting.id)
+      : Promise.resolve({ added: [], edited: [] }),
     loadWorkspaceGoldList(supabase, agents, me, meeting !== null),
   ]);
 
@@ -715,7 +802,8 @@ export async function loadWorkspace(
     meeting,
     last_completed: lastMeeting
       ? {
-          meeting: lastMeeting,
+          // Allowlisted fields only — never the previous meeting's private notes.
+          meeting: toPreviousMeeting(lastMeeting),
           commitments: commitments.filter(
             (c) => c.origin_meeting_id === lastMeeting.id && c.status !== "dropped",
           ),
@@ -726,7 +814,14 @@ export async function loadWorkspace(
     activity,
     gold_list: goldList,
     gold_list_notes: notes,
-    gold_list_action_agent_ids: actionAgentIds,
+    gold_list_action_agent_ids: [
+      ...new Set([...actionAgentIds, ...attribution.added, ...attribution.edited]),
+    ],
+    gold_list_added_agent_ids: attribution.added,
+    gold_list_edited_agent_ids: attribution.edited,
+    // Filled in by the workspace route (followup-context.ts), which owns the
+    // shareable-content fingerprint.
+    followup_stale: false,
     carryover,
     legacy_carryover: legacy,
     new_commitments: meeting
@@ -777,6 +872,16 @@ export async function loadMeetingRecord(
  *
  * Idempotent: completing an already-completed meeting returns it unchanged
  * (so a retry after a lost response succeeds instead of erroring).
+ *
+ * GOAL-CHANGE ORDERING. The comparison is computed here, BEFORE the function
+ * takes the meeting lock, so a goal change made from this 1:1 could land in
+ * between (it commits the live goal + the meeting's history together, see
+ * updateGoalInMeeting). Each attempt therefore reads how many goal changes the
+ * meeting holds BEFORE computing the snapshot and passes that count to the
+ * function, which re-checks it under the lock and raises 40001 if it moved.
+ * On 40001 the snapshot is recomputed against the new goals and the attempt
+ * repeats, so a completed meeting can never hold history for a goal its frozen
+ * comparison did not use.
  */
 export async function completeMeeting(
   supabase: Db,
@@ -785,21 +890,135 @@ export async function completeMeeting(
   asOf: Date = todayInAppTimezone(),
 ): Promise<OneOnOneMeeting> {
   if (meeting.status === "completed") return meeting;
-  const activity = await buildActivityComparison(supabase, meeting.ae_id, asOf);
-  const res = await supabase.rpc("complete_one_on_one_meeting", {
-    p_meeting_id: meeting.id,
-    p_completed_by: me.id,
-    p_activity_snapshot: activity,
+  for (let attempt = 1; attempt <= COMPLETION_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const current = await loadMeeting(supabase, meeting.id);
+    // A concurrent completion already finished: its record, unchanged.
+    if (current.status === "completed") return current;
+    const goalChangesSeen = (current.goal_changes ?? []).length;
+    const activity = await buildActivityComparison(supabase, meeting.ae_id, asOf);
+    const res = await supabase.rpc("complete_one_on_one_meeting", {
+      p_meeting_id: meeting.id,
+      p_completed_by: me.id,
+      p_activity_snapshot: activity,
+      p_goal_changes_seen: goalChangesSeen,
+    });
+    if (res.error) {
+      // A goal change landed after the count was read: recompute and retry.
+      if (res.error.code === SERIALIZATION_FAILURE) continue;
+      if (res.error.code === "P0002") throw notFound("1:1 not found.");
+      throwIfFrozen(res.error);
+      throw new ApiError(500, `Could not complete the 1:1: ${res.error.message}`);
+    }
+    const done = res.data as OneOnOneMeeting | null;
+    if (!done || done.status !== "completed") {
+      throw new ApiError(500, "Could not complete the 1:1.");
+    }
+    // If a concurrent completion won the lock, this is its (unchanged) record.
+    return done;
+  }
+  throw new ApiError(
+    409,
+    "Goals were changed while the 1:1 was being completed. Please try completing again.",
+  );
+}
+
+/** A goal change landed after completion read the meeting's goal history. */
+const SERIALIZATION_FAILURE = "40001";
+const COMPLETION_SNAPSHOT_ATTEMPTS = 4;
+
+// ---------------------------------------------------------------------------
+// Goal changes + generated follow-up email
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes an AE's weekly goal FROM an in-progress 1:1: the live weekly_goals
+ * row and the meeting's goal-change history commit together, in ONE database
+ * transaction (update_weekly_goal_in_one_on_one), after taking the meeting
+ * lock — so completion either waits for this (and snapshots it) or this is
+ * refused outright.
+ *
+ * It never degrades to "saved but not recorded": every refusal THROWS and the
+ * transaction has already rolled the live goal back —
+ *   * 23514 — the meeting is completed, or isn't this AE's  -> 409
+ *   * 55P03 — completion holds the meeting this very moment  -> 409
+ *   * 23503 — no such meeting                                -> 404
+ *   * 23505 — a concurrent save claimed this Monday first    -> 409
+ */
+export async function updateGoalInMeeting(
+  supabase: Db,
+  args: {
+    meetingId: string;
+    aeId: string;
+    start: GoalChange["start"];
+    effectiveFrom: string;
+    values: Record<string, number>;
+    createdBy: string;
+  },
+): Promise<OneOnOneMeeting> {
+  const res = await supabase.rpc("update_weekly_goal_in_one_on_one", {
+    p_meeting_id: args.meetingId,
+    p_ae_id: args.aeId,
+    p_start: args.start,
+    p_effective_from: args.effectiveFrom,
+    p_values: args.values,
+    p_created_by: args.createdBy,
   });
   if (res.error) {
-    if (res.error.code === "P0002") throw notFound("1:1 not found.");
     throwIfFrozen(res.error);
-    throw new ApiError(500, `Could not complete the 1:1: ${res.error.message}`);
+    if (res.error.code === "23503") throw notFound("1:1 not found.");
+    if (isUniqueViolation(res.error)) {
+      throw new ApiError(
+        409,
+        "Another save just landed for this week. Reload and try again.",
+      );
+    }
+    throw new ApiError(500, `Could not save goals: ${res.error.message}`);
   }
-  const done = res.data as OneOnOneMeeting | null;
-  if (!done || done.status !== "completed") {
-    throw new ApiError(500, "Could not complete the 1:1.");
+  const meeting = res.data as OneOnOneMeeting | null;
+  if (!meeting) throw new ApiError(500, "Could not save goals.");
+  return meeting;
+}
+
+/**
+ * Stores a freshly GENERATED follow-up email: subject + body replaced
+ * together (each revision + 1), with the generation metadata, in ONE
+ * compare-and-set UPDATE. It lands only if both revisions are still the ones
+ * the client saw and the meeting is in progress — so a regeneration can
+ * never overwrite an edit made in another tab, and never lands after
+ * completion (the DB freeze trigger refuses it too).
+ */
+export async function saveGeneratedFollowup(
+  supabase: Db,
+  meetingId: string,
+  generated: { subject: string; body: string; model: string; contextHash: string },
+  expected: { subject: number; body: number },
+): Promise<OneOnOneMeeting> {
+  const res = await supabase
+    .from(MEETINGS_TABLE)
+    .update({
+      followup_subject: generated.subject,
+      followup_body: generated.body,
+      followup_subject_rev: expected.subject + 1,
+      followup_body_rev: expected.body + 1,
+      followup_generated_at: new Date().toISOString(),
+      followup_context_hash: generated.contextHash,
+      followup_model: generated.model,
+    })
+    .eq("id", meetingId)
+    .eq("status", "in_progress")
+    .eq("followup_subject_rev", expected.subject)
+    .eq("followup_body_rev", expected.body)
+    .select("*")
+    .maybeSingle();
+  throwIfFrozen(res.error);
+  if (res.error) {
+    throw new ApiError(500, `Could not save the email: ${res.error.message}`);
   }
-  // If a concurrent completion won the lock, this is its (unchanged) record.
-  return done;
+  if (res.data) return res.data as OneOnOneMeeting;
+  const now = await loadMeeting(supabase, meetingId);
+  assertInProgress(now);
+  throw new FollowupRevisionConflict(
+    { value: now.followup_subject, revision: now.followup_subject_rev },
+    { value: now.followup_body, revision: now.followup_body_rev },
+  );
 }

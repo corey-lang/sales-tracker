@@ -2,7 +2,15 @@
 
 import { useMemo, useRef, useState } from "react";
 import { format, parseISO } from "date-fns";
-import { Check, ChevronDown, ChevronUp, History, MessageSquare, Plus } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  History,
+  MessageSquare,
+  Pencil,
+  Plus,
+} from "lucide-react";
 
 import { apiFetchJson } from "@/lib/api-client";
 import { formatDateMDY } from "@/lib/dates";
@@ -25,6 +33,10 @@ import {
   CompleteActivityForm,
   ScheduleActivityForm,
 } from "@/components/gold-list-agent-card";
+import {
+  AddAgentForm,
+  EditAgentForm,
+} from "@/components/gold-list-agent-forms";
 import { Button } from "@/components/ui/button";
 
 import {
@@ -46,6 +58,13 @@ import {
 //      in one_on_one_gold_list_notes — never on the Gold List itself. Its
 //      text lives in the page's draft coordinator, so collapsing a card
 //      never loses it or drops it from Complete 1:1.
+//
+// MANAGING THE LIST FROM THE 1:1
+//   The manager can also ADD an agent to the AE's real Gold List and EDIT an
+//   agent's details from here (same shared writers and forms as the AE's own
+//   /gold-list; the server stamps the 1:1 on the row). An agent added during
+//   this 1:1 is labelled "Added during this 1:1"; the completed record keeps
+//   that label from the snapshot taken at completion.
 //
 // An agent counts as "discussed" when it has a note or a Gold List action
 // EXPLICITLY attributed to this 1:1 (the server stamps the meeting on the
@@ -77,7 +96,11 @@ export function GoldListReview({
   todayIso,
   meetingId,
   actionAgentIds,
+  addedAgentIds,
+  editedAgentIds,
   onAgentChange,
+  onAgentAdded,
+  onAgentEdited,
   onNoteChange,
   onAction,
 }: {
@@ -88,12 +111,16 @@ export function GoldListReview({
   meetingId: string | null;
   /** Agents with a Gold List action attributed to this 1:1. */
   actionAgentIds: ReadonlySet<string>;
+  /** Agents added to / edited on the live list from this 1:1. */
+  addedAgentIds: ReadonlySet<string>;
+  editedAgentIds: ReadonlySet<string>;
   onAgentChange: (agent: WorkspaceGoldListAgent) => void;
+  onAgentAdded: (agent: WorkspaceGoldListAgent) => void;
+  onAgentEdited: (agentId: string) => void;
   onNoteChange: (note: GoldListDiscussionNote) => void;
   onAction: (agentId: string) => void;
 }) {
   const draft = useDraft();
-  useDraftLocked(); // re-render on draft changes (typed notes count as discussed)
   const summary = useMemo(
     () => summarizeGoldListForReview(agents, todayIso),
     [agents, todayIso],
@@ -122,6 +149,8 @@ export function GoldListReview({
       ),
     [agents, filter, todayIso, opened],
   );
+  const locked = useDraftLocked();
+  const [addOpen, setAddOpen] = useState(false);
   const noteText = (agentId: string) =>
     meetingId
       ? (draft.get(noteKey(meetingId, agentId))?.value ??
@@ -148,6 +177,35 @@ export function GoldListReview({
         <SummaryStat label="No next activity" value={summary.no_next} tone="warn" />
         <SummaryStat label="Due this week" value={summary.due_this_week} />
       </dl>
+
+      {meetingId && !locked ? (
+        addOpen ? (
+          <div className="mb-3">
+            <AddAgentForm<WorkspaceGoldListAgent>
+              endpoint={`/api/admin/one-on-one-meetings/${meetingId}/gold-list`}
+              listLabel="this Gold List"
+              // Tracked by the draft so Complete 1:1 waits for it.
+              run={(fn) => draft.mutate(fn)}
+              onCancel={() => setAddOpen(false)}
+              onAdded={(agent) => {
+                onAgentAdded(agent);
+                // Keep the new card on screen whatever the filter says.
+                setOpened((prev) => new Set(prev).add(agent.id));
+                setAddOpen(false);
+              }}
+            />
+          </div>
+        ) : (
+          <Button
+            variant="outline"
+            className="mb-3 min-h-10"
+            onClick={() => setAddOpen(true)}
+          >
+            <Plus aria-hidden="true" />
+            Add agent
+          </Button>
+        )
+      ) : null}
 
       <div
         role="tablist"
@@ -207,7 +265,10 @@ export function GoldListReview({
               todayIso={todayIso}
               meetingId={meetingId}
               discussed={isDiscussed(agent.id)}
+              added={addedAgentIds.has(agent.id)}
+              edited={editedAgentIds.has(agent.id)}
               onAgentChange={onAgentChange}
+              onEdited={() => onAgentEdited(agent.id)}
               onNoteChange={onNoteChange}
               onAction={() => onAction(agent.id)}
               onOpen={() =>
@@ -250,7 +311,7 @@ function SummaryStat({
   );
 }
 
-type Mode = "idle" | "complete" | "schedule" | "edit";
+type Mode = "idle" | "complete" | "schedule" | "edit" | "details";
 
 /** Draft coordinator key for one agent's discussion note in one meeting. */
 export function noteKey(meetingId: string, agentId: string): string {
@@ -263,7 +324,10 @@ function ReviewAgentCard({
   todayIso,
   meetingId,
   discussed,
+  added,
+  edited,
   onAgentChange,
+  onEdited,
   onNoteChange,
   onAction,
   onOpen,
@@ -273,7 +337,12 @@ function ReviewAgentCard({
   todayIso: string;
   meetingId: string | null;
   discussed: boolean;
+  /** Added to the live Gold List during this 1:1. */
+  added: boolean;
+  /** Details edited during this 1:1. */
+  edited: boolean;
   onAgentChange: (agent: WorkspaceGoldListAgent) => void;
+  onEdited: () => void;
   onNoteChange: (note: GoldListDiscussionNote) => void;
   onAction: () => void;
   onOpen: () => void;
@@ -396,6 +465,11 @@ function ReviewAgentCard({
               </span>
             ) : null}
           </p>
+          {added || edited ? (
+            <p className="text-[11px] font-medium text-primary/80">
+              {added ? "Added during this 1:1" : "Details updated in this 1:1"}
+            </p>
+          ) : null}
           <p className="text-sm text-muted-foreground">
             <span className="text-foreground/70">Last:</span>{" "}
             {agent.last_completed
@@ -471,7 +545,49 @@ function ReviewAgentCard({
                   Add next activity
                 </Button>
               )}
+              <Button
+                size="lg"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => setMode("details")}
+              >
+                <Pencil aria-hidden="true" />
+                Edit agent
+              </Button>
             </div>
+          ) : null}
+
+          {canEdit && !locked && mode === "details" ? (
+            <EditAgentForm
+              agent={agent}
+              busy={busy}
+              onCancel={() => setMode("idle")}
+              onSave={async (patch) => {
+                if (busy) return;
+                setBusy(true);
+                setError(null);
+                try {
+                  // Tracked by the draft so Complete 1:1 waits for it.
+                  const res = await draft.mutate(() =>
+                    apiFetchJson<{ agent: WorkspaceGoldListAgent }>(base!, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(patch),
+                    }),
+                  );
+                  onAgentChange(res.agent);
+                  onEdited();
+                  onAction();
+                  setMode("idle");
+                } catch (err) {
+                  setError(
+                    err instanceof Error ? err.message : "Couldn't save — please retry.",
+                  );
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            />
           ) : null}
 
           {canEdit && !locked && mode === "complete" && next ? (

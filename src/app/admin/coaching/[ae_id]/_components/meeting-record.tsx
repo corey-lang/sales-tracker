@@ -1,13 +1,17 @@
 "use client";
 
+import { useState } from "react";
 import { format, parseISO } from "date-fns";
-import { Check, Circle, Minus } from "lucide-react";
+import { Check, Circle, Copy, Lock, Minus } from "lucide-react";
 
 import { formatTaskMoment } from "@/lib/dates";
-import type {
-  CommitmentReview,
-  GoldListDiscussionNote,
-  MeetingRecord,
+import { GOAL_ACTIVITY_KEYS } from "@/lib/goal-activities";
+import {
+  formatEmailForCopy,
+  type CommitmentReview,
+  type GoalChange,
+  type GoldListDiscussionNote,
+  type MeetingRecord,
 } from "@/lib/one-on-one-meetings";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +22,10 @@ import { Section } from "./autosave-text";
 // completion: the activity snapshot, the Gold List note snapshots, and the
 // commitment reviews. Nothing here reads live goals, activity, or Gold List
 // rows, so later changes to any of them can't rewrite what this meeting shows.
+//
+// PRIVATE MANAGER NOTES render here because this record is served only to
+// admins (GET /api/admin/one-on-one-meetings/[id] is requireAdmin); they are
+// styled as private and are never part of the follow-up email.
 
 function longDate(iso: string): string {
   return format(parseISO(iso), "MMM d, yyyy");
@@ -92,20 +100,106 @@ export function MeetingRecordView({ record }: { record: MeetingRecord }) {
         )}
       </Section>
 
-      <Section title="Coaching">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Coaching focus
-        </p>
-        <Prose text={meeting.coaching_focus} empty="No coaching focus set." />
-        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Coaching / discussion notes
-        </p>
-        <Prose text={meeting.coaching_notes} empty="No coaching notes." />
+      <Section title="1:1 Notes">
+        <Prose text={meeting.coaching_notes} empty="No notes recorded." />
+        {meeting.coaching_focus ? (
+          // Meetings completed before the notes rework carry a coaching focus.
+          <p className="mt-3 text-sm">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Coaching focus
+            </span>
+            <br />
+            {meeting.coaching_focus}
+          </p>
+        ) : null}
       </Section>
+
+      <section
+        aria-label="Private Manager Notes"
+        className="rounded-xl border-2 border-dashed border-amber-500/50 bg-amber-500/5 p-4 sm:p-5"
+      >
+        <div className="mb-2 flex items-center gap-2">
+          <Lock aria-hidden="true" className="size-4 text-amber-700 dark:text-amber-400" />
+          <h3 className="text-base font-semibold">Private Manager Notes</h3>
+          <span className="text-xs text-muted-foreground">Admins only</span>
+        </div>
+        <Prose text={meeting.private_notes} empty="No private notes." />
+      </section>
 
       <Section title="Commitments & Next Steps">
         <ReviewedCommitments reviews={record.commitment_reviews} />
       </Section>
+
+      {(meeting.goal_changes ?? []).length > 0 ? (
+        <Section title="Goal changes">
+          <ul className="space-y-1.5 text-sm">
+            {meeting.goal_changes.map((g, i) => (
+              <li key={i}>
+                <span className="font-medium">
+                  {g.start === "this_week" ? "From this week" : "From next week"}
+                </span>{" "}
+                (Mon {format(parseISO(g.effective_from), "MMM d")}):{" "}
+                <span className="text-muted-foreground">{goalSummary(g)}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
+      <Section
+        title="AE Follow-Up Email"
+        description="The final version prepared for the AE — not sent from the app."
+      >
+        {meeting.followup_subject || meeting.followup_body ? (
+          <FollowupEmailView
+            subject={meeting.followup_subject ?? ""}
+            body={meeting.followup_body ?? ""}
+          />
+        ) : (
+          <p className="text-sm text-muted-foreground">No follow-up email was prepared.</p>
+        )}
+      </Section>
+    </div>
+  );
+}
+
+function goalSummary(change: GoalChange): string {
+  return GOAL_ACTIVITY_KEYS.filter((a) => Number(change.values[a.key] ?? 0) > 0)
+    .map((a) => `${a.label} ${change.values[a.key]}`)
+    .join(" · ");
+}
+
+function FollowupEmailView({ subject, body }: { subject: string; body: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(formatEmailForCopy(subject, body));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      /* clipboard blocked: the text is on screen to select */
+    }
+  };
+  return (
+    <div className="space-y-2">
+      <p className="text-sm">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Subject
+        </span>
+        <br />
+        {subject || "—"}
+      </p>
+      <p className="whitespace-pre-wrap rounded-md bg-muted/40 px-3 py-2 text-sm leading-relaxed">
+        {body}
+      </p>
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border px-3 text-sm hover:bg-muted"
+      >
+        {copied ? <Check aria-hidden="true" className="size-4" /> : <Copy aria-hidden="true" className="size-4" />}
+        {copied ? "Copied" : "Copy Email"}
+      </button>
     </div>
   );
 }
@@ -119,6 +213,11 @@ function DiscussedAgent({ note }: { note: GoldListDiscussionNote }) {
           <span className="font-normal text-muted-foreground"> · {note.brokerage}</span>
         ) : null}
       </p>
+      {note.agent_added || note.agent_edited ? (
+        <p className="text-[11px] font-medium text-primary/80">
+          {note.agent_added ? "Added during this 1:1" : "Details updated in this 1:1"}
+        </p>
+      ) : null}
       <p className="text-sm text-muted-foreground">
         Last:{" "}
         {note.last_activity_on

@@ -44,6 +44,9 @@ export const MEETING_COMMITMENT_REVIEWS_TABLE =
 /** Mirrors the CHECK constraints in one_on_one_meetings.sql. */
 export const MEETING_NOTES_MAX_LENGTH = 5000;
 export const COACHING_FOCUS_MAX_LENGTH = 300;
+export const PRIVATE_NOTES_MAX_LENGTH = 5000;
+export const FOLLOWUP_SUBJECT_MAX_LENGTH = 300;
+export const FOLLOWUP_BODY_MAX_LENGTH = 10000;
 export const MEETING_COMMITMENT_MAX_LENGTH = 500;
 export const GOLD_LIST_DISCUSSION_NOTE_MAX_LENGTH = 2000;
 
@@ -56,12 +59,27 @@ export const MEETING_HISTORY_PAGE_SIZE = 20;
 
 export type MeetingStatus = "in_progress" | "completed";
 
-/** The editable free-text fields on a meeting. */
+/**
+ * The editable free-text fields on a meeting.
+ *
+ *   coaching_notes   — the "1:1 Notes" (shareable meeting notes; the column
+ *                      predates the rename, so earlier meetings' notes carry
+ *                      over unchanged);
+ *   coaching_focus   — legacy: no longer edited in the workspace, still
+ *                      readable on older records;
+ *   private_notes    — PRIVATE MANAGER NOTES. Never shared: excluded from the
+ *                      AI follow-up email and from every summary of a meeting
+ *                      (see PreviousMeetingSummary, followup-context.ts);
+ *   followup_subject / followup_body — the AE follow-up email draft.
+ */
 export const MEETING_TEXT_FIELDS = [
   "wins",
   "activity_notes",
   "coaching_focus",
   "coaching_notes",
+  "private_notes",
+  "followup_subject",
+  "followup_body",
 ] as const;
 export type MeetingTextField = (typeof MEETING_TEXT_FIELDS)[number];
 
@@ -80,6 +98,15 @@ export type DraftConflictBody = {
   conflict: { value: string | null; revision: number };
 };
 
+/** One goal change made from a 1:1 (recorded by the goals route). */
+export type GoalChange = {
+  start: "this_week" | "next_week";
+  /** Monday the new goal takes effect, yyyy-mm-dd. */
+  effective_from: string;
+  values: Record<string, number>;
+  at: string;
+};
+
 export type OneOnOneMeeting = {
   id: string;
   ae_id: string;
@@ -95,12 +122,27 @@ export type OneOnOneMeeting = {
   wins: string | null;
   activity_notes: string | null;
   coaching_focus: string | null;
+  /** The "1:1 Notes". */
   coaching_notes: string | null;
+  /** PRIVATE MANAGER NOTES — never shared, never sent to the AI. */
+  private_notes: string | null;
+  followup_subject: string | null;
+  followup_body: string | null;
+  /** When the email was last generated, and the fingerprint of the shareable
+   *  meeting content it was generated from (staleness detection). */
+  followup_generated_at: string | null;
+  followup_context_hash: string | null;
+  followup_model: string | null;
+  /** Goal changes made from this 1:1. */
+  goal_changes: GoalChange[];
   /** Per-field save revisions (optimistic concurrency across tabs). */
   wins_rev: number;
   activity_notes_rev: number;
   coaching_focus_rev: number;
   coaching_notes_rev: number;
+  private_notes_rev: number;
+  followup_subject_rev: number;
+  followup_body_rev: number;
   /** Null while in progress; frozen at completion. */
   activity_snapshot: ActivitySnapshot | null;
   created_at: string;
@@ -177,6 +219,10 @@ export type GoldListDiscussionNote = {
   /** Save revision of `note` (optimistic concurrency across tabs). */
   revision: number;
   action_taken: boolean;
+  /** The agent was ADDED to the live Gold List during this 1:1. */
+  agent_added: boolean;
+  /** The agent's details were edited during this 1:1. */
+  agent_edited: boolean;
   agent_name: string;
   brokerage: string | null;
   last_activity_on: string | null;
@@ -238,8 +284,28 @@ export type MeetingHistoryItem = {
   meeting_date: string;
   completed_at: string;
   coaching_focus: string | null;
+  /** First line of the 1:1 Notes (never the private notes). */
+  notes_preview: string | null;
   manager_name: string | null;
 };
+
+/**
+ * What the workspace shows of the previous completed 1:1: an explicit
+ * ALLOWLIST of shareable fields. It deliberately has no private notes — the
+ * server builds it field by field (toPreviousMeeting), never by passing a
+ * meeting row through.
+ */
+export type PreviousMeetingSummary = Pick<
+  OneOnOneMeeting,
+  "id" | "meeting_date" | "completed_at" | "coaching_focus" | "coaching_notes"
+>;
+
+/** "Subject: …" then a blank line then the body — paste-ready for Outlook. */
+export function formatEmailForCopy(subject: string, body: string): string {
+  const s = subject.trim();
+  const b = body.trim();
+  return s ? `Subject: ${s}\n\n${b}` : b;
+}
 
 /** GET /api/admin/coaching/[ae_id]/meetings */
 export type OneOnOneWorkspace = {
@@ -249,7 +315,7 @@ export type OneOnOneWorkspace = {
   /** The single in-progress draft, if one exists. */
   meeting: OneOnOneMeeting | null;
   last_completed: {
-    meeting: OneOnOneMeeting;
+    meeting: PreviousMeetingSummary;
     /** Commitments created in that meeting, with their LIVE status. */
     commitments: MeetingCommitment[];
   } | null;
@@ -267,6 +333,16 @@ export type OneOnOneWorkspace = {
    * meeting (scheduled / completed / cancelled / rescheduled from the 1:1).
    */
   gold_list_action_agent_ids: string[];
+  /** Agents ADDED to the live Gold List during the in-progress 1:1. */
+  gold_list_added_agent_ids: string[];
+  /** Agents whose details were edited during the in-progress 1:1. */
+  gold_list_edited_agent_ids: string[];
+  /**
+   * The generated follow-up email no longer matches the shareable meeting
+   * content (something changed since it was generated). False when there is
+   * no generated email.
+   */
+  followup_stale: boolean;
   /** Open (or resolved-in-this-meeting) commitments from earlier meetings. */
   carryover: MeetingCommitmentWithOrigin[];
   /** Open legacy Weekly Focus commitments. */

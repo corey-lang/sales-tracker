@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 import {
+  AGENT_FIELD_MAX_LENGTH,
+  AGENT_NAME_MAX_LENGTH,
+  AGENT_NOTES_MAX_LENGTH,
   GOLD_LIST_ACTIVITY_TYPE_KEYS,
   OUTCOME_NOTE_MAX_LENGTH,
 } from "@/lib/gold-list";
@@ -112,3 +115,48 @@ export const updateActivitySchema = z.object({
   description: descriptionSchema.optional(),
   scheduled_for: dateSchema.optional(),
 });
+
+const optionalAgentField = z.string().trim().max(AGENT_FIELD_MAX_LENGTH).nullish();
+
+/**
+ * Body of "add an agent" — shared by the AE route (POST /api/gold-list/agents)
+ * and the manager 1:1 route, so both accept exactly the same fields and limits.
+ * The owner is never in the body: the AE route uses the caller, the manager
+ * route the 1:1's AE.
+ */
+export const createAgentSchema = z.object({
+  confirm_duplicate: z.boolean().default(false),
+  request_id: z.string().uuid().optional(),
+  agent_name: z
+    .string()
+    .trim()
+    .min(1, "Agent name is required.")
+    .max(AGENT_NAME_MAX_LENGTH),
+  brokerage: optionalAgentField,
+  phone: phoneSchema,
+  email: emailSchema,
+  notes: z.string().trim().max(AGENT_NOTES_MAX_LENGTH).nullish(),
+});
+
+/**
+ * Body of "edit an agent". Omitted field = leave as-is; explicit null (or "")
+ * = clear it; only `agent_name` cannot be cleared. `archived` exists on the AE
+ * route only — the manager 1:1 route uses `managerUpdateAgentSchema`.
+ */
+export const updateAgentSchema = z.object({
+  agent_name: z
+    .string()
+    .trim()
+    .min(1, "Agent name cannot be empty.")
+    .max(AGENT_NAME_MAX_LENGTH)
+    .optional(),
+  brokerage: optionalAgentField,
+  phone: phoneSchema,
+  email: emailSchema,
+  notes: z.string().trim().max(AGENT_NOTES_MAX_LENGTH).nullish(),
+  /** true = archive, false = restore. Omit to leave the archive state alone. */
+  archived: z.boolean().optional(),
+});
+
+/** A manager editing the AE's agent from a 1:1 can change details, not archive. */
+export const managerUpdateAgentSchema = updateAgentSchema.omit({ archived: true });

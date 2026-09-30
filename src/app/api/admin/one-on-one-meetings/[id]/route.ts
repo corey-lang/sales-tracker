@@ -4,7 +4,10 @@ import { getServerSupabase } from "@/lib/supabase/server";
 import { handleApiError, parseBody, requireAdmin } from "@/lib/server/auth";
 import {
   COACHING_FOCUS_MAX_LENGTH,
+  FOLLOWUP_BODY_MAX_LENGTH,
+  FOLLOWUP_SUBJECT_MAX_LENGTH,
   MEETING_NOTES_MAX_LENGTH,
+  PRIVATE_NOTES_MAX_LENGTH,
   revisionColumn,
 } from "@/lib/one-on-one-meetings";
 import {
@@ -50,7 +53,25 @@ const UpdateSchema = z.discriminatedUnion("field", [
     value: z.string().max(COACHING_FOCUS_MAX_LENGTH).nullable(),
     expected_revision: z.number().int().min(0),
   }),
+  // "1:1 Notes" (the column keeps its original name).
   z.object({ field: z.literal("coaching_notes"), value: Text, expected_revision: z.number().int().min(0) }),
+  // PRIVATE MANAGER NOTES — same revision protocol as every other field.
+  z.object({
+    field: z.literal("private_notes"),
+    value: z.string().max(PRIVATE_NOTES_MAX_LENGTH).nullable(),
+    expected_revision: z.number().int().min(0),
+  }),
+  // The AE follow-up email draft (subject + body autosave independently).
+  z.object({
+    field: z.literal("followup_subject"),
+    value: z.string().max(FOLLOWUP_SUBJECT_MAX_LENGTH).nullable(),
+    expected_revision: z.number().int().min(0),
+  }),
+  z.object({
+    field: z.literal("followup_body"),
+    value: z.string().max(FOLLOWUP_BODY_MAX_LENGTH).nullable(),
+    expected_revision: z.number().int().min(0),
+  }),
 ]);
 
 export async function GET(

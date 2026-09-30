@@ -396,3 +396,155 @@ describe("DraftAutosave cross-tab conflicts", () => {
     expect(order).toEqual(["legacy toggle landed", "complete"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1:1 Notes, Private Manager Notes and the AE follow-up email are ordinary
+// coordinator fields; the email generator is a tracked background operation.
+// ---------------------------------------------------------------------------
+
+describe("Complete 1:1 with notes, private notes and the follow-up email", () => {
+  it("saves EVERY one of them — including an email edited a moment ago — before completing", async () => {
+    const d = new DraftAutosave(1000);
+    const server = new Map<string, string>();
+    const order: string[] = [];
+    for (const key of ["m:coaching_notes", "m:private_notes", "m:followup_subject", "m:followup_body"]) {
+      d.ensure(key, "", async (v, r) => {
+        server.set(key, v);
+        order.push(`save:${key}`);
+        return r + 1;
+      });
+    }
+    d.set("m:coaching_notes", "1:1 notes");
+    d.set("m:private_notes", "private");
+    d.set("m:followup_subject", "Subject typed just now");
+    d.set("m:followup_body", "Body edited just now"); // debounce still pending
+    await completeDraft(d, async () => void order.push("complete"));
+    expect(order.at(-1)).toBe("complete");
+    expect(order.filter((o) => o.startsWith("save:"))).toHaveLength(4);
+    expect(Object.fromEntries(server)).toEqual({
+      "m:coaching_notes": "1:1 notes",
+      "m:private_notes": "private",
+      "m:followup_subject": "Subject typed just now",
+      "m:followup_body": "Body edited just now",
+    });
+  });
+
+  it("waits for an in-flight email save, then sends the newer edit, before completing", async () => {
+    const d = new DraftAutosave(1000);
+    const s = controlledSaver();
+    const complete = vi.fn(async () => "record");
+    d.ensure("m:followup_body", "", s.save);
+    d.set("m:followup_body", "draft 1");
+    void d.flush("m:followup_body");
+    await tick();
+    d.set("m:followup_body", "draft 1, edited");
+    const done = completeDraft(d, complete);
+    await tick();
+    s.calls[0].resolve();
+    await tick();
+    expect(complete).not.toHaveBeenCalled();
+    s.calls[1].resolve();
+    await done;
+    expect(s.persisted).toEqual(["draft 1", "draft 1, edited"]);
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("a conflicting email edit blocks completion without discarding the text", async () => {
+    const d = new DraftAutosave(1000);
+    const server = fakeServerField("theirs", 3);
+    d.ensure("m:followup_body", "", server.save, 0); // this tab is behind
+    d.set("m:followup_body", "mine");
+    await expect(completeDraft(d, async () => "x")).rejects.toBeInstanceOf(DraftSaveError);
+    expect(d.get("m:followup_body")?.value).toBe("mine");
+    expect(d.locked).toBe(false);
+  });
+});
+
+describe("DraftAutosave.adopt (server-written email text)", () => {
+  it("replaces the field with the server's text as already-saved, at its revision", async () => {
+    const d = new DraftAutosave(1000);
+    const s = instantSaver();
+    d.ensure("m:followup_body", "old", s.save, 0);
+    d.set("m:followup_body", "old, edited");
+    await d.adopt("m:followup_body", "generated", 5);
+    expect(d.get("m:followup_body")).toMatchObject({
+      value: "generated", saved: "generated", revision: 5, status: "idle", conflict: null,
+    });
+    // Nothing is re-sent for the adopted text, and the debounce for the old edit is gone.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.save).not.toHaveBeenCalled();
+    // The next edit is based on the adopted revision.
+    d.set("m:followup_body", "generated + mine");
+    await d.flush("m:followup_body");
+    expect(s.save).toHaveBeenCalledWith("generated + mine", 5);
+  });
+
+  it("waits for a save already in flight so an old response can't land on top", async () => {
+    const d = new DraftAutosave(1000);
+    const s = controlledSaver();
+    d.ensure("m:followup_body", "", s.save);
+    d.set("m:followup_body", "typed");
+    void d.flush("m:followup_body");
+    await tick();
+    const adopted = d.adopt("m:followup_body", "generated", 9);
+    await tick();
+    expect(d.get("m:followup_body")?.value).toBe("typed"); // not yet
+    s.calls[0].resolve();
+    await adopted;
+    expect(d.get("m:followup_body")).toMatchObject({ value: "generated", revision: 9, saved: "generated" });
+  });
+
+  it("clears a conflict (the user asked to replace the text)", async () => {
+    const d = new DraftAutosave(1000);
+    const server = fakeServerField("theirs", 3);
+    d.ensure("k", "", server.save, 0);
+    d.set("k", "mine");
+    await d.flush("k");
+    expect(d.get("k")?.status).toBe("conflict");
+    await d.adopt("k", "regenerated", 4);
+    expect(d.get("k")).toMatchObject({ status: "idle", conflict: null, value: "regenerated" });
+  });
+});
+
+describe("DraftAutosave.track (AI generation)", () => {
+  it("Complete waits for a generation in flight", async () => {
+    const d = new DraftAutosave(1000);
+    let finish!: () => void;
+    const gen = d.track(() => new Promise<void>((r) => (finish = r)));
+    const complete = vi.fn(async () => "record");
+    const done = completeDraft(d, complete);
+    await tick();
+    expect(complete).not.toHaveBeenCalled();
+    finish();
+    await gen;
+    expect(await done).toBe("record");
+  });
+
+  it("a FAILED generation never blocks completion (unlike a failed meeting mutation)", async () => {
+    const d = new DraftAutosave(1000);
+    let fail!: () => void;
+    const gen = d.track(() => new Promise<void>((_, rej) => (fail = () => rej(new Error("AI down")))));
+    gen.catch(() => undefined);
+    const complete = vi.fn(async () => "record");
+    const done = completeDraft(d, complete);
+    fail();
+    expect(await done).toBe("record");
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("can't start once completion has begun", async () => {
+    const d = new DraftAutosave(1000);
+    d.lock();
+    await expect(d.track(async () => 1)).rejects.toBeInstanceOf(DraftLockedError);
+  });
+
+  it("a generation in flight counts as unsaved work for the leave-page warning", async () => {
+    const d = new DraftAutosave(1000);
+    let finish!: () => void;
+    const gen = d.track(() => new Promise<void>((r) => (finish = r)));
+    expect(d.isDirty()).toBe(true);
+    finish();
+    await gen;
+    expect(d.isDirty()).toBe(false);
+  });
+});

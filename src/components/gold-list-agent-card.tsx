@@ -21,9 +21,6 @@ import { cn } from "@/lib/utils";
 import { goldListEmailHref, goldListPhoneHref } from "@/lib/gold-list-contact";
 import {
   ACTIVITY_NOTE_MAX_LENGTH,
-  AGENT_FIELD_MAX_LENGTH,
-  AGENT_NAME_MAX_LENGTH,
-  AGENT_NOTES_MAX_LENGTH,
   OUTCOME_NOTE_MAX_LENGTH,
   scheduleToneFor,
   type GoldListActivity,
@@ -33,6 +30,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { EditAgentForm } from "@/components/gold-list-agent-forms";
 import { Input } from "@/components/ui/input";
 
 // One Gold List agent, and the whole follow-up loop for them:
@@ -998,100 +996,5 @@ export function ActivityHistoryList({
         </li>
       ))}
     </ul>
-  );
-}
-
-/** Inline editor for the agent's own details (not their activity). */
-function EditAgentForm({
-  agent,
-  busy,
-  onCancel,
-  onSave,
-}: {
-  agent: GoldListAgentWithFollowUp;
-  busy: boolean;
-  onCancel: () => void;
-  onSave: (patch: Record<string, string | null>) => void | Promise<void>;
-}) {
-  const [name, setName] = useState(agent.agent_name);
-  const [brokerage, setBrokerage] = useState(agent.brokerage ?? "");
-  const [phone, setPhone] = useState(agent.phone ?? "");
-  const [email, setEmail] = useState(agent.email ?? "");
-  const [notes, setNotes] = useState(agent.notes ?? "");
-
-  return (
-    <form
-      className="space-y-2 rounded-md border border-border p-2.5"
-      onSubmit={(e) => {
-        e.preventDefault();
-        const trimmed = name.trim();
-        if (!trimmed || busy) return;
-        void onSave({
-          agent_name: trimmed,
-          brokerage: brokerage.trim() || null,
-          phone: phone.trim() || null,
-          email: email.trim() || null,
-          notes: notes.trim() || null,
-        });
-      }}
-    >
-      <Input
-        value={name}
-        autoFocus
-        required
-        maxLength={AGENT_NAME_MAX_LENGTH}
-        aria-label="Agent name"
-        placeholder="Agent name"
-        onChange={(e) => setName(e.target.value)}
-      />
-      <Input
-        value={brokerage}
-        maxLength={AGENT_FIELD_MAX_LENGTH}
-        aria-label="Brokerage"
-        placeholder="Brokerage"
-        onChange={(e) => setBrokerage(e.target.value)}
-      />
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <Input
-          value={phone}
-          type="tel"
-          maxLength={AGENT_FIELD_MAX_LENGTH}
-          aria-label="Phone"
-          placeholder="Phone"
-          onChange={(e) => setPhone(e.target.value)}
-        />
-        <Input
-          value={email}
-          type="email"
-          maxLength={AGENT_FIELD_MAX_LENGTH}
-          aria-label="Email"
-          placeholder="Email"
-          onChange={(e) => setEmail(e.target.value)}
-        />
-      </div>
-      <textarea
-        value={notes}
-        rows={2}
-        maxLength={AGENT_NOTES_MAX_LENGTH}
-        aria-label="Notes"
-        placeholder="Notes"
-        onChange={(e) => setNotes(e.target.value)}
-        className={TEXTAREA_CLASS}
-      />
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={busy || !name.trim()}>
-          {busy ? "Saving…" : "Save"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          disabled={busy}
-          onClick={onCancel}
-        >
-          Cancel
-        </Button>
-      </div>
-    </form>
   );
 }

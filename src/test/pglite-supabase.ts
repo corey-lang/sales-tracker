@@ -78,6 +78,7 @@ export const MIGRATIONS = [
   "salespeople_deactivated_at.sql",
   "gold_list.sql",
   "one_on_one_meetings.sql",
+  "one_on_one_workspace_v2.sql",
   "replace_activity_week.sql",
   "cogent_territory_mappings.sql",
   "team_messages.sql",
@@ -86,7 +87,7 @@ export const MIGRATIONS = [
 ];
 
 /** Just enough of Supabase's `storage` schema for business_card_scans.sql. */
-const STORAGE_STUB_SQL = `
+export const STORAGE_STUB_SQL = `
   CREATE SCHEMA IF NOT EXISTS storage;
   CREATE TABLE IF NOT EXISTS storage.buckets (id TEXT PRIMARY KEY, name TEXT, public BOOLEAN);
   CREATE TABLE IF NOT EXISTS storage.objects (
@@ -102,7 +103,7 @@ const STORAGE_STUB_SQL = `
  */
 export const POSTGREST_MAX_ROWS = 1000;
 
-const DRIFT_SQL = `
+export const DRIFT_SQL = `
   CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     salesperson_id UUID REFERENCES salespeople(id) ON DELETE CASCADE,

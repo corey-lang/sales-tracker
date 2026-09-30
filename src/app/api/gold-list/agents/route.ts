@@ -1,7 +1,5 @@
-import { possibleDuplicate } from "@/lib/gold-list-validation";
-import { emailSchema, phoneSchema } from "@/lib/gold-list-validation";
+import { createAgentSchema } from "@/lib/gold-list-validation";
 import { allGoldListRows, requireGoldListAccess } from "@/lib/server/gold-list";
-import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { allTestSalespersonIds } from "@/lib/server/roster";
@@ -9,15 +7,12 @@ import { ApiError, handleApiError, parseBody } from "@/lib/server/auth";
 import {
   AGENT_COLUMNS,
   canViewAllGoldLists,
+  createGoldListAgent,
   decorateAgents,
-  isUniqueViolation,
   listGoldListAeOptions,
   resolveGoldListScope,
 } from "@/lib/server/gold-list";
 import {
-  AGENT_FIELD_MAX_LENGTH,
-  AGENT_NAME_MAX_LENGTH,
-  AGENT_NOTES_MAX_LENGTH,
   GOLD_LIST_AGENTS_TABLE,
   activeAgents,
   type GoldListAgent,
@@ -46,22 +41,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const optionalField = z.string().trim().max(AGENT_FIELD_MAX_LENGTH).nullish();
-
-const CreateAgentSchema = z.object({
-  confirm_duplicate: z.boolean().default(false),
-  request_id: z.string().uuid().optional(),
-  agent_name: z
-    .string()
-    .trim()
-    .min(1, "Agent name is required.")
-    .max(AGENT_NAME_MAX_LENGTH),
-  brokerage: optionalField,
-  phone: phoneSchema,
-  email: emailSchema,
-  notes: z.string().trim().max(AGENT_NOTES_MAX_LENGTH).nullish(),
-});
 
 export type GoldListAgentsResponse = {
   agents: GoldListAgentWithFollowUp[];
@@ -143,69 +122,25 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const me = await requireGoldListAccess(req);
-    const body = await parseBody(req, CreateAgentSchema);
+    const body = await parseBody(req, createAgentSchema);
     const supabase = getServerSupabase();
 
-    const existing = await allGoldListRows<GoldListAgent>(
-      supabase
-        .from(GOLD_LIST_AGENTS_TABLE)
-        .select(AGENT_COLUMNS)
-        .eq("salesperson_id", me.id)
-        .order("id"),
-    );
-    if (existing.error)
-      throw new ApiError(500, "Could not check your existing agents.");
-    const ownAgents = (existing.data ?? []) as GoldListAgent[];
-    const previous =
-      body.request_id && ownAgents.find((a) => a.id === body.request_id);
-    if (previous) {
-      const [agent] = await decorateAgents(supabase, [previous], me);
+    // Owner is the authenticated caller, always. An admin adding an agent adds
+    // it to THEIR OWN Gold List, never to the AE they're viewing (a manager
+    // adding to an AE's list does that from a 1:1 — see
+    // /api/admin/one-on-one-meetings/[id]/gold-list).
+    const result = await createGoldListAgent(supabase, me.id, body, me.id);
+    if (result.kind === "duplicates") {
+      return Response.json({ duplicates: result.duplicates });
+    }
+    if (result.kind === "replay") {
+      const [agent] = await decorateAgents(supabase, [result.agent], me);
       return Response.json({ agent });
     }
-    const duplicates = ownAgents.filter((a) => possibleDuplicate(body, a));
-    if (!body.confirm_duplicate && duplicates.length) {
-      return Response.json({
-        duplicates: duplicates.map((a) => ({
-          id: a.id,
-          agent_name: a.agent_name,
-          archived: a.archived_at !== null,
-        })),
-      });
-    }
-    const res = await supabase
-      .from(GOLD_LIST_AGENTS_TABLE)
-      .insert({
-        // Owner is the authenticated caller, always. An admin adding an agent
-        // adds it to THEIR OWN Gold List, never to the AE they're viewing.
-        salesperson_id: me.id,
-        ...(body.request_id ? { id: body.request_id } : {}),
-        agent_name: body.agent_name,
-        brokerage: body.brokerage || null,
-        phone: body.phone || null,
-        email: body.email || null,
-        notes: body.notes || null,
-      })
-      .select(AGENT_COLUMNS)
-      .single();
-
-    if (res.error) {
-      // A concurrent retry may have inserted this request UUID already.
-      if (isUniqueViolation(res.error)) {
-        throw new ApiError(
-          409,
-          "This request has already been saved. Refresh your Gold List before retrying.",
-        );
-      }
-      console.warn(
-        `[gold-list] agent insert failed caller=${me.id} code=${res.error.code ?? "?"} msg=${res.error.message}`,
-      );
-      throw new ApiError(500, "Could not add that agent.");
-    }
-
     // A brand-new agent has no activities yet, so decoration is exact and
     // free: no open activity, no history.
     const agent: GoldListAgentWithFollowUp = {
-      ...(res.data as GoldListAgent),
+      ...result.agent,
       owner_name: me.first_name,
       can_edit: true,
       next_activity: null,

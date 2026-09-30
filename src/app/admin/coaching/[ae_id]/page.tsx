@@ -4,13 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { format, parseISO } from "date-fns";
-import { ArrowLeft, Check, Circle, History, Play } from "lucide-react";
+import { ArrowLeft, Check, Circle, History, Lock, Play } from "lucide-react";
 
 import { apiFetchJson } from "@/lib/api-client";
 import { formatTaskMoment } from "@/lib/dates";
 import {
-  COACHING_FOCUS_MAX_LENGTH,
   MEETING_NOTES_MAX_LENGTH,
+  PRIVATE_NOTES_MAX_LENGTH,
   revisionColumn,
   type GoldListDiscussionNote,
   type MeetingCommitment,
@@ -18,6 +18,7 @@ import {
   type MeetingTextField,
   type OneOnOneMeeting,
   type OneOnOneWorkspace,
+  type PreviousMeetingSummary,
   type WorkspaceGoldListAgent,
 } from "@/lib/one-on-one-meetings";
 import {
@@ -38,11 +39,11 @@ import {
   Section,
   revisionedSave,
   useDraft,
-  useDraftField,
   useDraftLocked,
 } from "./_components/autosave-text";
 import { CommitmentsSection } from "./_components/commitments";
 import { UpdateGoalsDisclosure } from "./_components/goal-editor";
+import { FollowupEmailSection } from "./_components/followup-email";
 import { GoldListReview, noteKey } from "./_components/gold-list-review";
 import { LegacyWeeklyFocus } from "./_components/legacy-weekly-focus";
 
@@ -53,10 +54,13 @@ import { LegacyWeeklyFocus } from "./_components/legacy-weekly-focus";
 //   → From your last 1:1   (focus + that meeting's follow-ups, live status)
 //   → Wins
 //   → Activity & Results   (Last Week vs This Week, each on its own goals)
-//   → Gold List            (the AE's REAL list; live updates + 1:1 notes)
-//   → Coaching
+//   → Gold List            (the AE's REAL list: add / edit agents, schedule /
+//                           complete activities, plus 1:1 discussion notes)
+//   → 1:1 Notes            ("From last 1:1" above; shareable meeting notes)
+//   → Private Manager Notes (admins only; never in the AI email)
 //   → Commitments & Next Steps (carryover first, then new)
 //   → Update Weekly Goals  (existing editor, collapsed)
+//   → AE Follow-Up Email   (AI draft, editable; copied into Outlook by hand)
 //   → Complete 1:1
 //   → Legacy Weekly Focus  (collapsed; old weekly records stay visible)
 //
@@ -289,6 +293,22 @@ export default function OneOnOneWorkspacePage() {
           todayIso={ws.today}
           meetingId={meeting?.id ?? null}
           actionAgentIds={new Set(ws.gold_list_action_agent_ids)}
+          addedAgentIds={new Set(ws.gold_list_added_agent_ids)}
+          editedAgentIds={new Set(ws.gold_list_edited_agent_ids)}
+          onAgentAdded={(agent: WorkspaceGoldListAgent) =>
+            patch((w) => ({
+              ...w,
+              gold_list: [agent, ...w.gold_list.filter((a) => a.id !== agent.id)],
+              gold_list_added_agent_ids: [...new Set([...w.gold_list_added_agent_ids, agent.id])],
+              gold_list_action_agent_ids: [...new Set([...w.gold_list_action_agent_ids, agent.id])],
+            }))
+          }
+          onAgentEdited={(agentId) =>
+            patch((w) => ({
+              ...w,
+              gold_list_edited_agent_ids: [...new Set([...w.gold_list_edited_agent_ids, agentId])],
+            }))
+          }
           onAction={(agentId) =>
             patch((w) =>
               w.gold_list_action_agent_ids.includes(agentId)
@@ -313,12 +333,13 @@ export default function OneOnOneWorkspacePage() {
           }
         />
 
-        <CoachingSection
+        <NotesSection
           meeting={meeting}
-          previousFocus={ws.last_completed?.meeting.coaching_focus ?? null}
-          focus={fieldProps("coaching_focus")}
+          previous={ws.last_completed?.meeting ?? null}
           notes={fieldProps("coaching_notes")}
         />
+
+        <PrivateNotesSection meeting={meeting} notes={fieldProps("private_notes")} />
 
         <CommitmentsSection
           meetingId={meeting?.id ?? null}
@@ -339,10 +360,18 @@ export default function OneOnOneWorkspacePage() {
 
         <UpdateGoalsDisclosure
           aeId={aeId}
+          meetingId={meeting?.id ?? null}
           currentGoal={ws.weekly_goal_current}
           nextOverride={ws.weekly_goal_next_override}
           nextWeekStart={ws.next_week_start}
           onChange={() => void refresh()}
+        />
+
+        <FollowupEmailSection
+          ws={ws}
+          meeting={meeting}
+          subject={fieldProps("followup_subject")}
+          body={fieldProps("followup_body")}
         />
 
         {meeting ? (
@@ -483,7 +512,7 @@ function HistoryPanel({ ws }: { ws: OneOnOneWorkspace }) {
                   {format(parseISO(h.meeting_date), "MMM d, yyyy")}
                 </span>
                 <span className="min-w-0 truncate text-sm text-muted-foreground">
-                  {h.coaching_focus ?? ""}
+                  {h.notes_preview ?? h.coaching_focus ?? ""}
                 </span>
               </Link>
             </li>
@@ -562,11 +591,7 @@ function FromLastOneOnOne({
       <p className="text-xs font-semibold uppercase tracking-wide text-primary">
         From your last 1:1 — {label}
       </p>
-      <div className="mt-2 grid gap-3 sm:grid-cols-2">
-        <div>
-          <p className="text-xs text-muted-foreground">Coaching focus</p>
-          <p className="text-sm font-medium">{meeting.coaching_focus ?? "—"}</p>
-        </div>
+      <div className="mt-2">
         <div>
           <p className="text-xs text-muted-foreground">Follow-ups</p>
           {commitments.length === 0 ? (
@@ -623,7 +648,7 @@ function FromLastOneOnOne({
 }
 
 // ---------------------------------------------------------------------------
-// Coaching
+// 1:1 Notes + Private Manager Notes
 // ---------------------------------------------------------------------------
 
 type FieldBinding = {
@@ -634,70 +659,96 @@ type FieldBinding = {
   save: FieldSaver;
 };
 
-function CoachingSection({
+function NotesSection({
   meeting,
-  previousFocus,
-  focus,
+  previous,
   notes,
 }: {
   meeting: OneOnOneMeeting | null;
-  previousFocus: string | null;
-  focus: FieldBinding;
+  previous: PreviousMeetingSummary | null;
   notes: FieldBinding;
 }) {
-  // Carrying the previous focus forward is an explicit choice — today's
-  // field is never pre-filled from history.
-  const focusField = useDraftField(focus.fieldKey, focus.value, focus.save, focus.revision);
-  const canCarry = Boolean(
-    meeting && previousFocus && !focusField.value.trim() && !focusField.locked,
-  );
   return (
-    <Section title="Coaching">
-      <div className="space-y-3">
-        <AutosaveText
-          {...focus}
-          label="Coaching focus"
-          multiline={false}
-          maxLength={COACHING_FOCUS_MAX_LENGTH}
-          placeholder={
-            meeting ? "What are we coaching on?" : "Start the 1:1 to set a focus."
-          }
-          hint={
-            previousFocus ? (
-              <>
-                Last time: {previousFocus}
-                {canCarry ? (
-                  <>
-                    {" · "}
-                    <button
-                      type="button"
-                      className="font-medium text-primary underline-offset-2 hover:underline"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        if (focusField.set(previousFocus)) void focusField.flush();
-                      }}
-                    >
-                      Carry forward
-                    </button>
-                  </>
-                ) : null}
-              </>
-            ) : undefined
-          }
-        />
-        <AutosaveText
-          {...notes}
-          label="Coaching / discussion notes"
-          rows={4}
-          maxLength={MEETING_NOTES_MAX_LENGTH}
-          placeholder={
-            meeting
-              ? "What we discussed, progress, observations, things to remember next time…"
-              : "Start the 1:1 to take coaching notes."
-          }
-        />
-      </div>
+    <Section
+      title="1:1 Notes"
+      description="Notes, coaching, feedback, or anything you want to remember from the conversation."
+    >
+      {previous ? (
+        // Shareable notes only: the workspace payload has no private notes
+        // to show here (PreviousMeetingSummary is an allowlist).
+        <details className="mb-3 rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+          <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
+            From last 1:1 · {shortDate(previous.meeting_date)}
+          </summary>
+          <div className="mt-2 space-y-2 text-sm">
+            <p className="whitespace-pre-wrap text-foreground/80">
+              {previous.coaching_notes?.trim() || "No notes were recorded."}
+            </p>
+            {previous.coaching_focus ? (
+              <p className="text-xs text-muted-foreground">
+                Coaching focus then: {previous.coaching_focus}
+              </p>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+      {meeting?.coaching_focus ? (
+        // A draft begun before the rework can still carry a focus line: keep
+        // it visible (read-only) rather than silently hiding saved text.
+        <p className="mb-2 text-xs text-muted-foreground">
+          Coaching focus (from earlier in this draft): {meeting.coaching_focus}
+        </p>
+      ) : null}
+      <AutosaveText
+        {...notes}
+        label="Notes"
+        rows={6}
+        maxLength={MEETING_NOTES_MAX_LENGTH}
+        placeholder={
+          meeting
+            ? "What we discussed, progress, observations, things to remember next time…"
+            : "Start the 1:1 to take notes."
+        }
+      />
     </Section>
+  );
+}
+
+function PrivateNotesSection({
+  meeting,
+  notes,
+}: {
+  meeting: OneOnOneMeeting | null;
+  notes: FieldBinding;
+}) {
+  return (
+    <section
+      aria-label="Private Manager Notes"
+      className="rounded-xl border-2 border-dashed border-amber-500/50 bg-amber-500/5 p-4 sm:p-5"
+    >
+      <div className="mb-3 flex items-start gap-2">
+        <Lock
+          aria-hidden="true"
+          className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400"
+        />
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold">Private Manager Notes</h3>
+          <p className="text-sm text-muted-foreground">
+            Only visible to admins. These notes are never included in the AE
+            follow-up email.
+          </p>
+        </div>
+      </div>
+      <AutosaveText
+        {...notes}
+        label="Private notes"
+        rows={4}
+        maxLength={PRIVATE_NOTES_MAX_LENGTH}
+        placeholder={
+          meeting ? "Just for you — never shared or sent…" : "Start the 1:1 to add private notes."
+        }
+      />
+    </section>
   );
 }
 
