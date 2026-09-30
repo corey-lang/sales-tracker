@@ -252,5 +252,67 @@ describe("follow-up email system prompt: voice", () => {
       expect(system, kept).toContain(kept);
     }
   });
+
+  // ---- Closings: no generic AI-style endings or motivational clichés ----
+
+  it("has a dedicated rule against generic AI-style closings and motivational clichés", () => {
+    expect(prompt).toContain("AVOID GENERIC AI-STYLE CLOSINGS AND MOTIVATIONAL CLICHÉS");
+    expect(lower).toMatch(/do not end with a line that could be sent to any ae after any meeting/);
+    expect(lower).toMatch(/motivational-speaker or ai-generated style/);
+    expect(lower).toMatch(/do not force an inspirational ending; a simple, natural close is better/);
+  });
+
+  it("names the generic closings ONLY as things to avoid (never as lines to use)", () => {
+    const avoidSentence = prompt.slice(
+      prompt.indexOf("Examples of what not to write:"),
+      prompt.indexOf("Do not force an inspirational ending"),
+    );
+    for (const cliche of [
+      "keep the momentum going",
+      "let's make this week count",
+      "I can't wait to see what we accomplish together",
+    ]) {
+      // Present exactly once, inside the "what not to write" sentence.
+      expect(avoidSentence, cliche).toContain(`"${cliche}"`);
+      expect(prompt.split(cliche).length - 1, cliche).toBe(1);
+    }
+  });
+
+  it("asks for an ending specific to THIS 1:1: progress, recorded commitments or next steps, proportional", () => {
+    expect(lower).toMatch(/something a real manager would write after this specific 1:1/);
+    expect(lower).toMatch(/reinforce confidence when it fits/);
+    expect(lower).toMatch(/actual progress, recorded commitments or next steps when the data supports it/);
+    expect(lower).toMatch(/stay proportional to what happened in the meeting/);
+  });
+
+  it("the closing guidance lives in the ENDING section, before the sign-off, and supplies no replacement line", () => {
+    const ending = prompt.indexOf("ENDING:");
+    const rule = prompt.indexOf("AVOID GENERIC AI-STYLE CLOSINGS");
+    const signoff = prompt.indexOf("Sign off casually");
+    const grounding = prompt.indexOf("GROUNDING — these rules do not bend");
+    expect(ending).toBeGreaterThan(-1);
+    expect(rule).toBeGreaterThan(ending);
+    expect(rule).toBeLessThan(signoff);
+    expect(signoff).toBeLessThan(grounding);
+    // Variation is preserved: still "fresh each time", and no stock closing is offered to copy.
+    expect(lower).toMatch(/write it fresh each time in your own words/);
+    for (const stock of ["you've got this", "i know you can get there", "let's have a great week", "looking forward to", "i'm excited to see"]) {
+      expect(lower, stock).not.toContain(stock);
+    }
+  });
+
+  it("the new closing guidance travels with every request, next to the preserved rules", () => {
+    const system = buildFollowupRequest({ wins: "x" } as never).messages[0].content;
+    for (const kept of [
+      "AVOID GENERIC AI-STYLE CLOSINGS AND MOTIVATIONAL CLICHÉS",
+      "NO NEW COMMITMENTS, TARGETS OR ACTION ITEMS",
+      "GENERAL COACHING THEMES MUST NOT BECOME NEW ACTION ITEMS",
+      "Praise actions and wins, not the person",
+      'always write it as "Gold List"',
+      '"Thanks!"',
+    ]) {
+      expect(system, kept).toContain(kept);
+    }
+  });
 });
 

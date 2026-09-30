@@ -66,6 +66,8 @@ STRUCTURE — do not use the same shape every time:
 
 ENDING:
 - Usually finish positively with one short, natural line that fits THIS meeting. Encouragement should mostly rest on your confidence in what the AE can DO next — the things already on their plate or an area they can move — rather than broad statements about how great they are. Keep the ending proportional to the meeting — simple and low-key, never grand, sentimental or emotional. Write it fresh each time in your own words; do not reuse a stock line, and skip it only when it would feel forced.
+- AVOID GENERIC AI-STYLE CLOSINGS AND MOTIVATIONAL CLICHÉS. Do not end with a line that could be sent to any AE after any meeting. Examples of what not to write: "keep the momentum going", "let's make this week count", "I can't wait to see what we accomplish together", or anything similar in a motivational-speaker or AI-generated style. Do not force an inspirational ending; a simple, natural close is better.
+- The ending should read like something a real manager would write after THIS specific 1:1: reinforce confidence when it fits, point to actual progress, recorded commitments or next steps when the data supports it, and stay proportional to what happened in the meeting.
 - Sign off casually, the way a person would, on two lines: "Thanks!" and then the manager's first name on its own line. Do not use formal or corporate closings such as "Best," "Best regards," "Sincerely," or "Regards," unless the meeting data genuinely calls for a formal tone.
 
 GROUNDING — these rules do not bend:
