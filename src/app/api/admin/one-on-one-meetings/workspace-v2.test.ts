@@ -3,9 +3,9 @@
  * (1:1 Notes + Private Manager Notes) and the AE follow-up email — against a
  * REAL Postgres (PGlite running the project's migrations) with real auth.
  *
- * The AI provider is the ONLY fake: `@anthropic-ai/sdk` is mocked so the tests
- * can assert on the exact request the app would send, and so failures can be
- * staged. Nothing is ever sent by email — the app has no such capability.
+ * The AI provider is the ONLY fake: the OpenAI HTTPS call (global `fetch` to
+ * api.openai.com) is stubbed so the tests can assert on the exact request body
+ * the app would send, and so failures can be staged. Nothing is ever sent by email — the app has no such capability.
  *
  * The app clock is pinned to Tue 2026-09-29 12:00 America/Denver.
  */
@@ -17,19 +17,32 @@ import { createTestDb, type TestDb } from "@/test/pglite-supabase";
 process.env.SESSION_SECRET = "test-session-secret";
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "http://localhost";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "test-anon-key";
-process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+process.env.OPENAI_API_KEY = "test-openai-key";
+delete process.env.ANTHROPIC_API_KEY; // the follow-up email must not need it
 
 const holder = vi.hoisted(() => ({ client: null as unknown }));
 vi.mock("@/lib/supabase/server", () => ({ getServerSupabase: () => holder.client }));
 
-// The only fake: the AI SDK. `create` records every request it receives.
+// The only fake: OpenAI. `create` receives the parsed JSON body of every
+// POST to the chat-completions endpoint (and its headers); it returns the
+// response JSON, or rejects (with `.status` => that HTTP status, else a
+// network failure).
 const ai = vi.hoisted(() => ({ create: vi.fn() }));
-vi.mock("@anthropic-ai/sdk", () => ({
-  default: class FakeAnthropic {
-    messages = { create: ai.create };
-    constructor(readonly options: unknown) {}
-  },
-}));
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const realFetch = globalThis.fetch;
+function installFakeOpenAI() {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) !== OPENAI_URL) throw new Error(`unexpected fetch in test: ${String(input)}`);
+    try {
+      const out = await ai.create(JSON.parse(String(init?.body)), { headers: init?.headers });
+      return new Response(JSON.stringify(out), { status: 200, headers: { "Content-Type": "application/json" } });
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status) return new Response(`upstream said: ${(err as Error).message}`, { status });
+      throw err;
+    }
+  });
+}
 
 const { signSessionToken } = await import("@/lib/server/auth");
 const { computeStandings } = await import("@/lib/server/leaderboard-standings");
@@ -40,6 +53,7 @@ const { buildFollowupRequest, parseFollowupReply, FOLLOWUP_DEFAULT_MODEL } = awa
   "@/lib/ai/followup-email"
 );
 const { formatEmailForCopy } = await import("@/lib/one-on-one-meetings");
+const { FOLLOWUP_COMPLETED_WHILE_WRITING_MESSAGE } = await import("@/lib/server/one-on-one-meetings");
 
 const workspaceRoute = await import("@/app/api/admin/coaching/[ae_id]/meetings/route");
 const historyRoute = await import("@/app/api/admin/coaching/[ae_id]/meetings/history/route");
@@ -212,13 +226,20 @@ const REPLY = {
   subject: "Great 1:1 today, Hilary!",
   body: "Hi Hilary,\n\nLoved our conversation today — great job closing Compass.\n\n- Corey",
 };
-const aiReply = (r: { subject: string; body: string } = REPLY) => ({
-  content: [{ type: "text", text: JSON.stringify(r) }],
+/** An OpenAI chat-completions response whose message content is `text`. */
+const aiText = (text: string) => ({
+  choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: text } }],
 });
+const aiReply = (r: { subject: string; body: string } = REPLY) => aiText(JSON.stringify(r));
 
-/** The exact request body handed to the AI SDK on its Nth call. */
-const aiRequest = (n = 0) => ai.create.mock.calls[n][0] as {
-  model: string; system: string; messages: Array<{ role: string; content: string }>;
+/** The exact JSON body POSTed to OpenAI on its Nth call (as `system` + user `messages`). */
+const aiWire = (n = 0) => ai.create.mock.calls[n][0] as {
+  model: string; response_format: unknown; max_completion_tokens: number;
+  messages: Array<{ role: string; content: string }>;
+};
+const aiRequest = (n = 0) => {
+  const w = aiWire(n);
+  return { ...w, system: w.messages[0].content, messages: w.messages.slice(1) };
 };
 
 beforeEach(async () => {
@@ -226,10 +247,15 @@ beforeEach(async () => {
   vi.setSystemTime(new Date("2026-09-29T18:00:00.000Z"));
   ai.create.mockReset();
   ai.create.mockResolvedValue(aiReply());
-  process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  delete process.env.ANTHROPIC_API_KEY;
+  installFakeOpenAI();
   await seed();
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.stubGlobal("fetch", realFetch);
+});
 
 // ===========================================================================
 // 1) Gold List management inside an active 1:1
@@ -689,9 +715,10 @@ describe("AE follow-up email: what the AI receives", () => {
   it("the request builder is pure: same context, same request; model is overridable", () => {
     const ctx = { hello: "world" } as never;
     expect(buildFollowupRequest(ctx)).toEqual(buildFollowupRequest(ctx));
-    process.env.FOLLOWUP_EMAIL_MODEL = "some-other-model";
+    process.env.OPENAI_FOLLOWUP_EMAIL_MODEL = "some-other-model";
     expect(buildFollowupRequest(ctx).model).toBe("some-other-model");
-    delete process.env.FOLLOWUP_EMAIL_MODEL;
+    delete process.env.OPENAI_FOLLOWUP_EMAIL_MODEL;
+    expect(buildFollowupRequest(ctx).model).toBe("gpt-4o-mini");
   });
 });
 
@@ -852,7 +879,7 @@ describe("AE follow-up email: AI failure never damages or blocks the meeting", (
   it("an unusable reply is treated as a failure (nothing saved)", async () => {
     const id = await startMeeting();
     for (const text of ["not json at all", JSON.stringify({ subject: "only subject" }), JSON.stringify({ subject: "", body: "x" })]) {
-      ai.create.mockResolvedValueOnce({ content: [{ type: "text", text }] });
+      ai.create.mockResolvedValueOnce(aiText(text));
       expect((await api.generate(id)).status).toBe(502);
     }
     expect((await meetingRow(id)).followup_body).toBeNull();
@@ -862,7 +889,7 @@ describe("AE follow-up email: AI failure never damages or blocks the meeting", (
 
   it("a server without the AI key says so (503, not retryable) and the meeting is fine", async () => {
     const id = await startMeeting();
-    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     const res = await api.generate(id);
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ retryable: false });
@@ -872,7 +899,7 @@ describe("AE follow-up email: AI failure never damages or blocks the meeting", (
 });
 
 describe("AE follow-up email: completion", () => {
-  it("the FINAL edited email is what history shows, and it is immutable", async () => {
+  it("the FINAL edited email is what history shows; the autosave PATCH stays in-progress-only and everything else is frozen", async () => {
     const id = await startMeeting();
     await api.generate(id);
     await api.saveField(id, "followup_subject", "Edited subject", 1);
@@ -883,17 +910,17 @@ describe("AE follow-up email: completion", () => {
     expect(record.meeting).toMatchObject({
       status: "completed", followup_subject: "Edited subject", followup_body: "Edited body — final.",
     });
-    // No more edits, no more generations, no matter what.
+    // The draft-autosave route is for the IN-PROGRESS draft only; editing a
+    // completed 1:1's email goes through the dedicated /followup route
+    // (see "follow-up email after completion" below).
     expect((await api.saveField(id, "followup_body", "again", 2)).status).toBe(409);
-    ai.create.mockClear();
-    expect((await api.generate(id)).status).toBe(409);
-    expect(ai.create).not.toHaveBeenCalled();
+    // …and the rest of the record is frozen by the database, whoever asks.
     await expect(
-      db.sql(`UPDATE one_on_one_meetings SET followup_body = 'tampered' WHERE id = $1`, [id]),
+      db.sql(`UPDATE one_on_one_meetings SET wins = 'tampered' WHERE id = $1`, [id]),
     ).rejects.toMatchObject({ code: "23514" });
   });
 
-  it("a generation that finishes after the meeting completed is refused and saves nothing", async () => {
+  it("a generation built from LIVE data that finishes after the meeting completed is refused and saves nothing", async () => {
     const id = await startMeeting();
     ai.create.mockImplementationOnce(async () => {
       expect((await api.complete(id)).status).toBe(200); // completes while the AI is "thinking"
@@ -901,8 +928,10 @@ describe("AE follow-up email: completion", () => {
     });
     const res = await api.generate(id);
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ error: "This 1:1 is completed and read-only." });
+    expect(await res.json()).toMatchObject({ error: FOLLOWUP_COMPLETED_WHILE_WRITING_MESSAGE });
     expect(await meetingRow(id)).toMatchObject({ status: "completed", followup_subject: null, followup_body: null });
+    // Generating again now builds from the FROZEN record and lands.
+    expect((await api.generate(id)).status).toBe(200);
   });
 
   it("a generation racing the write itself (completion between check and save) cannot land either", async () => {
@@ -1042,7 +1071,7 @@ describe("goal change vs completion: atomicity and ordering", () => {
     expect(await liveGoals()).toMatchObject([{ effective_from: THIS_MONDAY, office_visits: 33 }]);
     expect((await historyOf(id)).map((h) => h.values.office_visits)).toEqual([33]);
     expect((await snapshotOf(id)).this_week.cells.office_visits.original_goal).toBe(33);
-    expect(JSON.stringify(await meetingRow(id))).not.toContain("99");
+    expect(JSON.stringify((await meetingRow(id)).goal_changes)).not.toContain('"office_visits":99');
   });
 
   it("B2. with no earlier change: a rejected goal inserts nothing at all", async () => {
@@ -1376,6 +1405,459 @@ describe("goal change vs completion: atomicity and ordering", () => {
       expect.objectContaining({ description: "Send the listing deck", origin: "new" }),
       expect.objectContaining({ description: "Legacy follow-up", origin: "carryover", status: "completed" }),
     ]));
+  });
+});
+
+// ===========================================================================
+// 5c) V2.1 — OpenAI, and the follow-up email AFTER a 1:1 is completed
+// ===========================================================================
+
+const EMAIL_COLUMNS = [
+  "followup_subject", "followup_subject_rev", "followup_body", "followup_body_rev",
+  "followup_generated_at", "followup_context_hash", "followup_model", "updated_at",
+];
+/** The whole meeting row minus the email columns: everything that must stay frozen. */
+const frozenPart = async (id: string) => {
+  const row = { ...(await meetingRow(id)) };
+  for (const c of EMAIL_COLUMNS) delete row[c];
+  return row;
+};
+const putEmail = (
+  id: string,
+  body: { subject: string | null; body: string | null; expected_subject_revision: number; expected_body_revision: number },
+  who: string | null = ADMIN,
+) => followupRoute.PUT(req(who, "/x", { method: "PUT", body }), p({ id }));
+/** Saves on top of the email's CURRENT revisions (a well-behaved tab). */
+const putEmailNow = async (id: string, subject: string | null, body: string | null, who: string | null = ADMIN) => {
+  const row = await meetingRow(id);
+  return putEmail(id, {
+    subject, body,
+    expected_subject_revision: Number(row.followup_subject_rev),
+    expected_body_revision: Number(row.followup_body_rev),
+  }, who);
+};
+const completedRich = async () => {
+  const id = await richMeeting();
+  expect((await api.complete(id)).status).toBe(200);
+  return id;
+};
+
+describe("follow-up email uses OpenAI", () => {
+  it("POSTs to the OpenAI chat-completions endpoint with OPENAI_API_KEY, a JSON-mode body and subject/body back", async () => {
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined(); // not needed
+    const id = await startMeeting();
+    const res = await api.generate(id);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ subject: REPLY.subject, body: REPLY.body });
+
+    expect(ai.create).toHaveBeenCalledTimes(1);
+    const [body, meta] = ai.create.mock.calls[0] as [ReturnType<typeof aiWire>, { headers: Record<string, string> }];
+    expect(meta.headers.Authorization).toBe("Bearer test-openai-key");
+    expect(body).toMatchObject({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      max_completion_tokens: 1024,
+    });
+    expect(body.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(body.messages[0].content).toMatch(/warm, conversational, upbeat and encouraging/i);
+    expect(await meetingRow(id)).toMatchObject({ followup_model: "gpt-4o-mini" });
+  });
+
+  it("a missing OPENAI_API_KEY is the only configuration it needs (503, nothing saved, meeting intact)", async () => {
+    const id = await startMeeting();
+    delete process.env.OPENAI_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "set-but-irrelevant";
+    try {
+      const res = await api.generate(id);
+      expect(res.status).toBe(503);
+      expect(ai.create).not.toHaveBeenCalled(); // an Anthropic key does NOT make it work
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+
+  it("an OpenAI HTTP error / network failure is a safe 502 with no provider text; a 401 is 'not set up'", async () => {
+    const id = await startMeeting();
+    ai.create.mockRejectedValueOnce(Object.assign(new Error("Incorrect API key sk-live-abc"), { status: 401 }));
+    const unauth = await api.generate(id);
+    expect(unauth.status).toBe(503);
+    expect(JSON.stringify(await unauth.json())).not.toMatch(/sk-live|Incorrect/);
+    ai.create.mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }));
+    expect((await api.generate(id)).status).toBe(502);
+    ai.create.mockRejectedValueOnce(new Error("socket hang up"));
+    expect((await api.generate(id)).status).toBe(502);
+    ai.create.mockResolvedValueOnce({ choices: [{ finish_reason: "length", message: { content: '{"subject":"a","body":"b"' } }] });
+    expect((await api.generate(id)).status).toBe(502);
+    ai.create.mockResolvedValueOnce({ choices: [] });
+    expect((await api.generate(id)).status).toBe(502);
+    expect((await meetingRow(id)).followup_body).toBeNull();
+    expect((await api.complete(id)).status).toBe(200); // still completes, email optional
+  });
+});
+
+describe("follow-up email after completion", () => {
+  it("a completed meeting with NO email can generate one — and nothing else about it moves", async () => {
+    const id = await completedRich();
+    const frozen = await frozenPart(id);
+    const before = await meetingRow(id);
+    expect(before.followup_body).toBeNull();
+
+    const res = await api.generate(id);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ subject: REPLY.subject, body: REPLY.body, subject_revision: 1, body_revision: 1 });
+
+    const after = await meetingRow(id);
+    expect(after).toMatchObject({
+      status: "completed", followup_subject: REPLY.subject, followup_body: REPLY.body, followup_model: "gpt-4o-mini",
+    });
+    expect(after.followup_generated_at).not.toBeNull();
+    // Completion stamps, snapshot, notes (incl. private), goals history… untouched.
+    expect(await frozenPart(id)).toEqual(frozen);
+    expect(after.completed_at).toEqual(before.completed_at);
+    expect(after.activity_snapshot).toEqual(before.activity_snapshot);
+    expect(after.private_notes).toBe(PRIVATE);
+  });
+
+  it("a completed meeting can be written by hand (no AI involved)", async () => {
+    const id = await completedRich();
+    const frozen = await frozenPart(id);
+    const res = await putEmailNow(id, "Hand-written subject", "Hi Hilary,\n\nTyped by hand.\n\n- Corey");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      subject: "Hand-written subject", body: "Hi Hilary,\n\nTyped by hand.\n\n- Corey", subject_revision: 1, body_revision: 1,
+    });
+    expect(ai.create).not.toHaveBeenCalled();
+    expect(await meetingRow(id)).toMatchObject({ followup_generated_at: null, followup_model: null });
+    expect(await frozenPart(id)).toEqual(frozen);
+  });
+
+  it("edit, regenerate, display and copy: only the FINAL saved email is kept, and it persists", async () => {
+    const id = await completedRich();
+    await api.generate(id);
+    expect((await putEmailNow(id, "Edit 1", "Body edit 1")).status).toBe(200);
+    expect((await putEmailNow(id, "Edit 2", "Body edit 2 — final")).status).toBe(200);
+
+    let record = await json<{ meeting: Row }>(api.record(id));
+    expect(record.meeting).toMatchObject({
+      followup_subject: "Edit 2", followup_body: "Body edit 2 — final",
+      followup_subject_rev: 3, followup_body_rev: 3,
+    });
+    expect(formatEmailForCopy(String(record.meeting.followup_subject), String(record.meeting.followup_body))).toBe(
+      "Subject: Edit 2\n\nBody edit 2 — final",
+    );
+
+    // Regenerate replaces it (an explicit action on the current revisions).
+    ai.create.mockResolvedValueOnce(aiReply({ subject: "Fresh", body: "Fresh body" }));
+    const regen = await api.generate(id);
+    expect(regen.status).toBe(200);
+    record = await json<{ meeting: Row }>(api.record(id));
+    expect(record.meeting).toMatchObject({ followup_subject: "Fresh", followup_body: "Fresh body" });
+    // No revision history is kept: the record holds the current text only.
+    const cols = await db.sql(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'one_on_one_meetings' AND column_name ILIKE '%followup%'`,
+    );
+    expect(cols.map((c) => c.column_name).sort()).toEqual([
+      "followup_body", "followup_body_rev", "followup_context_hash", "followup_generated_at",
+      "followup_model", "followup_subject", "followup_subject_rev",
+    ]);
+    // Clearing both fields is allowed too (and reads as "no email").
+    expect((await putEmailNow(id, "", "")).status).toBe(200);
+    expect(await meetingRow(id)).toMatchObject({ followup_subject: null, followup_body: null });
+  });
+
+  it("the email of a meeting completed BEFORE this feature is editable (its saved text carries over)", async () => {
+    const id = await startMeeting();
+    await api.generate(id);
+    await api.complete(id);
+    expect((await putEmailNow(id, "Polished", "Polished body")).status).toBe(200);
+    expect(await meetingRow(id)).toMatchObject({ followup_subject: "Polished", status: "completed" });
+  });
+
+  it("every OTHER field of a completed meeting stays immutable — at the database and at every route", async () => {
+    const id = await completedRich();
+    await api.generate(id);
+    const frozen = await frozenPart(id);
+    const emailBefore = { ...(await meetingRow(id)) };
+
+    const tamper: Array<[string, string]> = [
+      ["wins", `wins = 'x'`], ["activity_notes", `activity_notes = 'x'`], ["coaching_notes", `coaching_notes = 'x'`],
+      ["coaching_focus", `coaching_focus = 'x'`], ["private_notes", `private_notes = 'x'`],
+      ["activity_snapshot", `activity_snapshot = '{}'::jsonb`], ["goal_changes", `goal_changes = '[]'::jsonb`],
+      ["status", `status = 'in_progress', completed_at = NULL, activity_snapshot = NULL`],
+      ["completed_at", `completed_at = completed_at + interval '1 day'`], ["completed_by", `completed_by = NULL`],
+      ["manager_name", `manager_name = 'x'`], ["ae_id", `ae_id = '${OTHER_AE}'`],
+      ["wins_rev", `wins_rev = wins_rev + 1`], ["private_notes_rev", `private_notes_rev = 99`],
+      // email + a frozen column in ONE statement: the whole statement is refused.
+      ["email AND wins", `followup_body = 'sneaky', wins = 'x'`],
+    ];
+    for (const [name, set] of tamper) {
+      const attempt = await db.sql(`UPDATE one_on_one_meetings SET ${set} WHERE id = $1 RETURNING id`, [id]).then(
+        () => "ACCEPTED", (e: { code?: string }) => e.code);
+      expect(`${name}: ${attempt}`).toBe(`${name}: 23514`);
+    }
+    await expect(db.sql(`DELETE FROM one_on_one_meetings WHERE id = $1`, [id])).rejects.toMatchObject({ code: "23514" });
+    expect(await frozenPart(id)).toEqual(frozen);
+    expect(await meetingRow(id)).toEqual(emailBefore);
+
+    // Routes: the PATCH autosave, commitments, goals, Gold List — all still 409.
+    for (const field of ["wins", "activity_notes", "coaching_notes", "coaching_focus", "private_notes"]) {
+      expect((await api.saveField(id, field, "x", 0)).status, field).toBe(409);
+    }
+    expect((await api.addCommitment(id, { description: "late" })).status).toBe(409);
+    expect((await api.goals({ start: "this_week", values: GOALS, meeting_id: id })).status).toBe(409);
+    expect((await api.addAgent(id, { agent_name: "Late Agent" })).status).toBe(409);
+    expect((await api.note(id, SARAH, "late note")).status).toBe(409);
+    expect(await frozenPart(id)).toEqual(frozen);
+    // The email columns alone ARE writable at the database (that is the whole change).
+    await db.sql(`UPDATE one_on_one_meetings SET followup_body = 'db-level edit' WHERE id = $1`, [id]);
+  });
+
+  it("an email write never touches completion data, the snapshot, notes, commitments, goals or Gold List history", async () => {
+    const id = await completedRich();
+    const tables = async () => ({
+      notes: await db.sql(`SELECT * FROM one_on_one_gold_list_notes WHERE meeting_id = $1 ORDER BY id`, [id]),
+      reviews: await db.sql(`SELECT * FROM one_on_one_commitment_reviews WHERE meeting_id = $1 ORDER BY id`, [id]),
+      commitments: await db.sql(`SELECT * FROM one_on_one_meeting_commitments ORDER BY id`),
+      agents: await db.sql(`SELECT * FROM gold_list_agents ORDER BY id`),
+      activities: await db.sql(`SELECT * FROM gold_list_activities ORDER BY id`),
+      goals: await db.sql(`SELECT * FROM weekly_goals ORDER BY id`),
+    });
+    const before = await tables();
+    const frozen = await frozenPart(id);
+    await api.generate(id);
+    await putEmailNow(id, "Subject", "Body");
+    await api.generate(id);
+    expect(await tables()).toEqual(before);
+    expect(await frozenPart(id)).toEqual(frozen);
+  });
+
+  it("cross-tab: a save based on a stale view is rejected with the newer text, nothing is overwritten", async () => {
+    const id = await completedRich();
+    await api.generate(id); // revs 1/1
+    // Tab A and Tab B both open at revs 1/1.
+    const stale = { expected_subject_revision: 1, expected_body_revision: 1 };
+    expect((await putEmail(id, { subject: "Tab A", body: "Tab A body", ...stale })).status).toBe(200); // revs 2/2
+    const res = await putEmail(id, { subject: "Tab B", body: "Tab B body", ...stale });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      followup_conflict: { subject: { value: "Tab A", revision: 2 }, body: { value: "Tab A body", revision: 2 } },
+    });
+    expect(await meetingRow(id)).toMatchObject({ followup_subject: "Tab A", followup_body: "Tab A body" });
+    // Tab B resolves by re-saving on top of the current revisions.
+    expect((await putEmail(id, { subject: "Tab B", body: "Tab B body", expected_subject_revision: 2, expected_body_revision: 2 })).status).toBe(200);
+  });
+
+  it("a late AI generation cannot overwrite a newer manual edit (completed meeting)", async () => {
+    const id = await completedRich();
+    await api.generate(id); // revs 1/1
+    ai.create.mockImplementationOnce(async () => {
+      // While the AI is "thinking", another tab saves a manual edit.
+      expect((await putEmailNow(id, "Manual edit", "Manual body")).status).toBe(200);
+      return aiReply({ subject: "Late AI", body: "Late AI body" });
+    });
+    const res = await api.generate(id, { subject: 1, body: 1 });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ followup_conflict: { body: { value: "Manual body", revision: 2 } } });
+    expect(await meetingRow(id)).toMatchObject({ followup_subject: "Manual edit", followup_body: "Manual body" });
+  });
+
+  it("a regenerate request built on stale revisions is refused BEFORE spending a generation", async () => {
+    const id = await completedRich();
+    await api.generate(id);
+    await putEmailNow(id, "Newer", "Newer body");
+    ai.create.mockClear();
+    const res = await api.generate(id, { subject: 1, body: 1 });
+    expect(res.status).toBe(409);
+    expect(ai.create).not.toHaveBeenCalled();
+  });
+
+  it("Test AE privacy: another admin can't read, generate or edit Corey's private Test AE meeting email", async () => {
+    const id = await startMeeting(TEST_AE);
+    expect((await api.complete(id)).status).toBe(200);
+    expect((await api.generate(id)).status).toBe(200); // the owner
+    ai.create.mockClear();
+    expect((await api.generate(id, { subject: 1, body: 1 }, RYAN)).status).toBe(404);
+    expect((await putEmailNow(id, "Hijack", "Hijack body", RYAN)).status).toBe(404);
+    expect((await api.followupStatus(id, RYAN)).status).toBe(404);
+    expect((await api.record(id, RYAN)).status).toBe(404);
+    expect(ai.create).not.toHaveBeenCalled();
+    expect(await meetingRow(id)).toMatchObject({ followup_subject: REPLY.subject });
+    expect((await putEmailNow(id, "Owner edit", "Owner body")).status).toBe(200);
+  });
+
+  it("only admins: an AE token or no token can't generate or edit", async () => {
+    const id = await completedRich();
+    const before = await meetingRow(id);
+    for (const who of [AE, OTHER_AE, null]) {
+      const gen = await api.generate(id, { subject: 0, body: 0 }, who);
+      expect([401, 403], String(who)).toContain(gen.status);
+      const put = await putEmailNow(id, "x", "y", who);
+      expect([401, 403], String(who)).toContain(put.status);
+    }
+    expect(ai.create).not.toHaveBeenCalled();
+    expect(await meetingRow(id)).toEqual(before);
+    // The anon (public) key still can't touch the table at all.
+    const anon = await db.anon.from("one_on_one_meetings").update({ followup_body: "x" }).eq("id", id).select("id");
+    expect(anon.data ?? []).toEqual([]);
+    expect((await meetingRow(id)).followup_body).toBeNull();
+  });
+
+  it("the v2.1 migration is idempotent: re-running it (and v2 before it) changes nothing", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const id = await completedRich();
+    await api.generate(id);
+    const before = await meetingRow(id);
+    await db.asOwner(readFileSync(join(process.cwd(), "supabase", "one_on_one_followup_v2_1.sql"), "utf8"));
+    await db.asOwner(readFileSync(join(process.cwd(), "supabase", "one_on_one_followup_v2_1.sql"), "utf8"));
+    expect(await meetingRow(id)).toEqual(before);
+    expect((await putEmailNow(id, "After re-run", "Still editable")).status).toBe(200);
+    await expect(db.sql(`UPDATE one_on_one_meetings SET wins = 'x' WHERE id = $1`, [id])).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("the PUT validates its input (lengths, revisions)", async () => {
+    const id = await completedRich();
+    const ok = { expected_subject_revision: 0, expected_body_revision: 0 };
+    expect((await putEmail(id, { subject: "x".repeat(301), body: "b", ...ok })).status).toBe(400);
+    expect((await putEmail(id, { subject: "s", body: "b".repeat(10001), ...ok })).status).toBe(400);
+    expect((await putEmail(id, { subject: "s", body: "b", expected_subject_revision: -1, expected_body_revision: 0 })).status).toBe(400);
+  });
+});
+
+describe("follow-up email for a COMPLETED meeting is generated from its FROZEN record", () => {
+  /** Changes EVERYTHING live that a naive generator would read. */
+  async function changeTheWorld() {
+    await db.sql(`UPDATE gold_list_agents SET brokerage = 'LIVE-BROKERAGE-MARKER', agent_name = 'LIVE-RENAMED-MARKER' WHERE id = $1`, [SARAH]);
+    await db.sql(
+      `INSERT INTO gold_list_agents (salesperson_id, agent_name, brokerage) VALUES ($1, 'LIVE-NEW-AGENT-MARKER', 'Nowhere')`, [AE]);
+    await db.sql(
+      `UPDATE gold_list_activities SET description = 'LIVE-ACTIVITY-MARKER', scheduled_for = '2027-01-01' WHERE agent_id = $1 AND status = 'scheduled'`, [SARAH]);
+    expect((await api.goals({ start: "this_week", values: { ...GOALS, office_visits: 888 } })).status).toBe(200);
+    await db.sql(`UPDATE activity_entries SET office_visits = 4321 WHERE salesperson_id = $1 AND entry_date = '2026-09-28'`, [AE]);
+    // A NEW 1:1 for the same AE with a live commitment and a live note.
+    const next = await startMeeting();
+    await api.addCommitment(next, { description: "LIVE-COMMITMENT-MARKER" });
+    await api.set(next, "wins", "LIVE-WINS-MARKER");
+    await api.set(next, "private_notes", "LIVE-PRIVATE-MARKER");
+  }
+
+  it("later live Gold List, goal, activity and commitment changes do not alter the historical context at all", async () => {
+    const id = await completedRich();
+    const before = await loadFollowupContext(db.client as never, id);
+    await changeTheWorld();
+    const after = await loadFollowupContext(db.client as never, id);
+    expect(after.context).toEqual(before.context);
+    expect(after.contentHash).toBe(before.contentHash);
+
+    // And what actually goes to OpenAI for that completed meeting.
+    expect((await api.generate(id)).status).toBe(200);
+    const wire = JSON.stringify(aiWire());
+    for (const marker of [
+      "LIVE-BROKERAGE", "LIVE-RENAMED", "LIVE-NEW-AGENT", "LIVE-ACTIVITY", "LIVE-COMMITMENT", "LIVE-WINS",
+      "LIVE-PRIVATE", "888", "4321", "2027-01-01",
+    ]) {
+      expect(wire, marker).not.toContain(marker);
+    }
+    // The frozen facts ARE there.
+    const user = aiWire().messages[1].content;
+    for (const frozen of [
+      "Closed the Compass account", "Visits are up week over week", "Talked through objection handling on renewals",
+      "Sarah wants a lunch meeting", "Lunch at Tradesman", "Dana Whitaker", "Compass Realty",
+      "Send Sarah the renewal deck", "Sarah Johnson", "2026-09-28",
+    ]) {
+      expect(user, frozen).toContain(frozen);
+    }
+    // Frozen Activity & Results: this week's actual visits were 5 at completion.
+    const ctx = after.context;
+    expect(ctx.activity_results?.this_week.activities.find((a) => a.activity === "Office visits")?.actual).toBe(5);
+    expect(ctx.activity_results?.this_week.activities.find((a) => a.activity === "Office visits")?.goal).toBe(40);
+  });
+
+  it("reads ONLY the meeting's frozen tables — never a live Gold List, goal, activity or commitment table", async () => {
+    const id = await completedRich();
+    const seen: Array<{ table: string; columns: string }> = [];
+    const recording = {
+      ...db.client,
+      rpc: db.client.rpc,
+      from: (table: string) => {
+        const q = db.client.from(table);
+        const select = q.select.bind(q);
+        q.select = (cols?: string) => {
+          seen.push({ table, columns: cols ?? "*" });
+          return select(cols);
+        };
+        return q;
+      },
+    };
+    await loadFollowupContext(recording as never, id);
+    expect([...new Set(seen.map((s) => s.table))].sort()).toEqual([
+      "one_on_one_commitment_reviews", "one_on_one_gold_list_notes", "one_on_one_meetings",
+    ]);
+    // Explicit columns everywhere (no `*`), and no contact / private column named.
+    for (const s of seen) {
+      expect(s.columns, s.table).not.toMatch(/\*|phone|email|private|followup/);
+    }
+    expect(seen.find((s) => s.table === "one_on_one_meetings")!.columns).toBe(SHAREABLE_MEETING_COLUMNS);
+  });
+
+  it("Private Manager Notes never enter the historical context or the OpenAI request", async () => {
+    const id = await completedRich();
+    expect((await meetingRow(id)).private_notes).toBe(PRIVATE);
+    const { context } = await loadFollowupContext(db.client as never, id);
+    expect(JSON.stringify(context)).not.toContain(PRIVATE_SNIPPET);
+    expect((await api.generate(id)).status).toBe(200);
+    const wire = JSON.stringify(ai.create.mock.calls[0]);
+    expect(wire).not.toContain(PRIVATE_SNIPPET);
+    expect(wire).not.toContain("thin ice");
+    expect(wire.toLowerCase()).not.toContain("private_notes");
+    // No agent contact PII either.
+    for (const pii of ["801-555-0100", "dana-secret@example.com", "CRM-ONLY-NOTE-XYZ", "801-555-0111", "sarah@example.com", "CRM-only note about Sarah"]) {
+      expect(wire, pii).not.toContain(pii);
+    }
+    // The AE-facing surfaces never see them: the GET status route and the PUT/POST bodies.
+    const status = JSON.stringify(await json(api.followupStatus(id)));
+    expect(status).not.toContain(PRIVATE_SNIPPET);
+    const put = JSON.stringify(await json(putEmailNow(id, "s", "b")));
+    expect(put).not.toContain(PRIVATE_SNIPPET);
+  });
+
+  it("a meeting completed before v2 (no snapshot flags, no goal history) still generates from what it did freeze", async () => {
+    const id = await startMeeting();
+    await api.set(id, "wins", "Old win");
+    await api.complete(id);
+    // Simulate the pre-v2 record: flags that didn't exist are at their defaults.
+    const { context } = await loadFollowupContext(db.client as never, id);
+    expect(context).toMatchObject({ wins: "Old win", gold_list: [], goal_changes: [], commitments: { made_in_this_1_1: [] } });
+    expect(context.activity_results).not.toBeNull(); // the frozen comparison exists
+    expect((await api.generate(id)).status).toBe(200);
+  });
+
+  it("an in-progress meeting still builds from LIVE data (unchanged behavior)", async () => {
+    const id = await richMeeting();
+    const before = await loadFollowupContext(db.client as never, id);
+    expect(before.status).toBe("in_progress");
+    await db.sql(`UPDATE activity_entries SET office_visits = 4321 WHERE salesperson_id = $1 AND entry_date = '2026-09-28'`, [AE]);
+    const after = await loadFollowupContext(db.client as never, id);
+    expect(after.context.activity_results?.this_week.activities.find((a) => a.activity === "Office visits")?.actual).toBe(4321);
+    expect(after.contentHash).toBe(before.contentHash); // live numbers don't make the email "stale"
+  });
+
+  it("completion, goal atomicity, Gold List attribution and the legacy route are unaffected by the email changes", async () => {
+    const id = await richMeeting();
+    await api.generate(id);
+    expect((await api.goals({ start: "this_week", values: { ...GOALS, office_visits: 35 }, meeting_id: id })).status).toBe(200);
+    expect((await api.complete(id)).status).toBe(200);
+    expect((await snapshotOf(id)).this_week.cells.office_visits.original_goal).toBe(35);
+    expect((await historyOf(id))).toHaveLength(2);
+    const notes = await db.sql(`SELECT agent_name, agent_added, agent_edited, action_taken FROM one_on_one_gold_list_notes WHERE meeting_id = $1 ORDER BY agent_name`, [id]);
+    expect(notes).toEqual([
+      { agent_name: "Dana Whitaker", agent_added: true, agent_edited: false, action_taken: true },
+      { agent_name: "Sarah Johnson", agent_added: false, agent_edited: true, action_taken: true },
+    ]);
+    // Editing the email afterwards changes none of that.
+    await putEmailNow(id, "s", "b");
+    expect((await snapshotOf(id)).this_week.cells.office_visits.original_goal).toBe(35);
+    expect(await historyOf(id)).toHaveLength(2);
   });
 });
 

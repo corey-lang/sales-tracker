@@ -432,6 +432,38 @@ describe.skipIf(!ENABLED)("REAL PostgreSQL: goal change vs completion (multi-con
   });
 
   // -------------------------------------------------------------------------
+  it("7. v2.1: concurrent follow-up email saves on a COMPLETED meeting — exactly one compare-and-set wins; the frozen record never moves", async () => {
+    const A = await session();
+    const B = await session();
+    expect((await appCompletion(A, meeting)).ok).toBe(true);
+    const frozen = async () => {
+      const [row] = await admin.q(
+        `SELECT to_jsonb(m) - ARRAY['followup_subject','followup_subject_rev','followup_body','followup_body_rev','followup_generated_at','followup_context_hash','followup_model','updated_at'] AS frozen
+           FROM one_on_one_meetings m WHERE id = $1`, [meeting]);
+      return row.frozen;
+    };
+    const before = await frozen();
+    const cas = `UPDATE one_on_one_meetings SET followup_body = $2, followup_body_rev = followup_body_rev + 1
+                  WHERE id = $1 AND followup_body_rev = 0 RETURNING followup_body_rev`;
+
+    // A holds the row (uncommitted email edit); B's edit really waits, then matches nothing.
+    await A.q(`BEGIN`);
+    expect((await A.attempt(cas, [meeting, "from A"])).ok).toBe(true);
+    const b = B.attempt(cas, [meeting, "from B"]);
+    await waitBlockedBy(B.pid, A.pid);
+    await A.q(`COMMIT`);
+    const rb = await b;
+    expect(rb.ok && rb.rows.length).toBe(0); // stale revision: the app turns this into a 409 + current text
+    expect((await admin.q(`SELECT followup_body FROM one_on_one_meetings WHERE id = $1`, [meeting]))[0].followup_body).toBe("from A");
+
+    // The database still refuses anything but the email, even mid-contention.
+    expect(await A.attempt(`UPDATE one_on_one_meetings SET wins = 'x' WHERE id = $1`, [meeting])).toMatchObject({ ok: false, code: "23514" });
+    expect(await A.attempt(`UPDATE one_on_one_meetings SET followup_body = 'y', status = 'in_progress' WHERE id = $1`, [meeting])).toMatchObject({ ok: false, code: "23514" });
+    expect(await A.attempt(`DELETE FROM one_on_one_meetings WHERE id = $1`, [meeting])).toMatchObject({ ok: false, code: "23514" });
+    expect(await frozen()).toEqual(before);
+  });
+
+  // -------------------------------------------------------------------------
   it("6. DEADLOCK HUNT: goal changes, autosaves, commitments, Gold List + legacy writes and completion, hammered concurrently across many meetings — zero deadlocks, every outcome accounted for, invariants hold", async () => {
     const ROUNDS = Number(process.env.REAL_PG_ROUNDS ?? 25);
     const [{ deadlocks: deadlocksBefore }] = await admin.q(

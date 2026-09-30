@@ -79,6 +79,7 @@ export const MIGRATIONS = [
   "gold_list.sql",
   "one_on_one_meetings.sql",
   "one_on_one_workspace_v2.sql",
+  "one_on_one_followup_v2_1.sql",
   "replace_activity_week.sql",
   "cogent_territory_mappings.sql",
   "team_messages.sql",

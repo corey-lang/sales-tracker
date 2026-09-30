@@ -21,6 +21,17 @@
 // never the agent's phone/email/private CRM notes), commitments, and goal
 // changes. Swag Leads will be added here later as another allowed source.
 //
+// ACTIVE vs COMPLETED
+//   * In-progress meeting: built from LIVE data (today's Gold List, goals and
+//     activity) — it is the conversation as it is happening.
+//   * COMPLETED meeting: built ONLY from what that meeting froze — its
+//     activity_snapshot, its Gold List note snapshots (incl. the snapshotted
+//     actions and next activity), its frozen commitment reviews and its
+//     recorded goal_changes. No live Gold List / goal / activity / commitment
+//     row is read, so a later change to any of them can't be presented as what
+//     happened at that 1:1. Anything that was never snapshotted (e.g. the
+//     agent-added flags on meetings completed before v2) is simply omitted.
+//
 // STALENESS
 //   `contentHash` fingerprints the MEETING-OWNED part of the context (not live
 //   activity numbers, which drift on their own). It is stored with a
@@ -36,8 +47,11 @@ import { ACTIVITIES } from "@/lib/activities";
 import { todayInAppTimezone } from "@/lib/dates";
 import { GOLD_LIST_ACTIVITIES_TABLE, GOLD_LIST_AGENTS_TABLE } from "@/lib/gold-list";
 import {
+  MEETING_COMMITMENT_REVIEWS_TABLE,
   MEETING_COMMITMENTS_TABLE,
+  MEETING_GOLD_LIST_NOTES_TABLE,
   MEETINGS_TABLE,
+  type ActivitySnapshot,
   type ActivityWeekResult,
   type GoalChange,
   type MeetingCommitment,
@@ -57,7 +71,7 @@ type Db = SupabaseClient<any, any, any>;
  * privacy boundary above. (No private_notes, no email draft, no revisions.)
  */
 export const SHAREABLE_MEETING_COLUMNS =
-  "id, ae_id, ae_name, manager_name, meeting_date, status, wins, activity_notes, coaching_notes, goal_changes";
+  "id, ae_id, ae_name, manager_name, meeting_date, status, wins, activity_notes, coaching_notes, goal_changes, activity_snapshot";
 
 type ShareableMeeting = {
   id: string;
@@ -70,6 +84,8 @@ type ShareableMeeting = {
   activity_notes: string | null;
   coaching_notes: string | null;
   goal_changes: GoldListSafeGoalChange[] | null;
+  /** Frozen at completion; null while in progress. */
+  activity_snapshot: ActivitySnapshot | null;
 };
 type GoldListSafeGoalChange = GoalChange;
 
@@ -110,7 +126,8 @@ export type FollowupContext = {
   wins: string | null;
   activity_notes: string | null;
   one_on_one_notes: string | null;
-  activity_results: { last_week: WeekBrief; this_week: WeekBrief };
+  /** Null only for a completed meeting that has no frozen comparison. */
+  activity_results: { last_week: WeekBrief; this_week: WeekBrief } | null;
   gold_list: GoldListBrief[];
   commitments: { made_in_this_1_1: CommitmentBrief[]; carried_over: CommitmentBrief[] };
   goal_changes: Array<{ takes_effect: string; goals: Record<string, number> }>;
@@ -201,14 +218,31 @@ export async function loadShareableMeeting(
 
 /**
  * Builds the AI-bound context for a meeting plus the fingerprint of its
- * meeting-owned content. Reads only shareable data (see file header).
+ * meeting-owned content. Reads only shareable data (see file header):
+ * a completed meeting from its FROZEN record, an in-progress one from live data.
  */
 export async function loadFollowupContext(
   supabase: Db,
   meetingId: string,
   asOf: Date = todayInAppTimezone(),
-): Promise<{ context: FollowupContext; contentHash: string }> {
+): Promise<{
+  context: FollowupContext;
+  contentHash: string;
+  /** Which source the context was built from: the save must require this same status. */
+  status: "in_progress" | "completed";
+}> {
   const meeting = await loadShareableMeeting(supabase, meetingId);
+  if (meeting.status === "completed") {
+    return { ...(await buildCompletedContext(supabase, meeting)), status: "completed" };
+  }
+  return { ...(await buildLiveContext(supabase, meeting, asOf)), status: "in_progress" };
+}
+
+async function buildLiveContext(
+  supabase: Db,
+  meeting: ShareableMeeting,
+  asOf: Date,
+): Promise<{ context: FollowupContext; contentHash: string }> {
 
   const [comparison, notes, actions, attributed, commitments] = await Promise.all([
     buildActivityComparison(supabase, meeting.ae_id, asOf),
@@ -355,10 +389,15 @@ export async function loadFollowupContext(
     })),
   };
   assertShareable(context);
+  return { context, contentHash: fingerprint(context) };
+}
 
-  // Fingerprint of what the MEETING owns. Live numbers (activity results, the
-  // agents' next-scheduled dates) are left out: they drift with the AE's own
-  // day and would make every email look stale.
+/**
+ * Fingerprint of what the MEETING owns. Live numbers (activity results, the
+ * agents' next-scheduled dates) are left out: they drift with the AE's own day
+ * and would make every email look stale.
+ */
+function fingerprint(context: FollowupContext): string {
   const owned = {
     wins: context.wins,
     activity_notes: context.activity_notes,
@@ -370,8 +409,113 @@ export async function loadFollowupContext(
     commitments: context.commitments,
     goal_changes: context.goal_changes,
   };
-  const contentHash = createHash("sha256").update(JSON.stringify(owned)).digest("hex");
-  return { context, contentHash };
+  return createHash("sha256").update(JSON.stringify(owned)).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Completed meeting: the FROZEN record only
+// ---------------------------------------------------------------------------
+
+type FrozenNoteRow = {
+  agent_name: string;
+  brokerage: string | null;
+  note: string | null;
+  action_taken: boolean;
+  agent_added: boolean;
+  agent_edited: boolean;
+  next_activity_on: string | null;
+  next_activity_description: string | null;
+  activity_changes: Array<{ kind: string; description: string; date: string }> | null;
+};
+type FrozenReviewRow = {
+  origin: "new" | "carryover";
+  description: string;
+  owner: "ae" | "manager";
+  due_date: string | null;
+  status: "open" | "completed" | "dropped";
+};
+
+/**
+ * The context for a COMPLETED meeting, from that meeting's own frozen rows.
+ * Explicit column lists throughout (no `*`, so an agent's phone/email/CRM
+ * notes — and anything added to these tables later — cannot ride along), and
+ * NOT ONE read of a live table: gold_list_agents, gold_list_activities,
+ * weekly_goals, activity_entries and one_on_one_meeting_commitments are never
+ * queried here.
+ */
+async function buildCompletedContext(
+  supabase: Db,
+  meeting: ShareableMeeting,
+): Promise<{ context: FollowupContext; contentHash: string }> {
+  const [notesRes, reviewsRes] = await Promise.all([
+    supabase
+      .from(MEETING_GOLD_LIST_NOTES_TABLE)
+      .select(
+        "agent_name, brokerage, note, action_taken, agent_added, agent_edited, next_activity_on, next_activity_description, activity_changes",
+      )
+      .eq("meeting_id", meeting.id),
+    supabase
+      .from(MEETING_COMMITMENT_REVIEWS_TABLE)
+      .select("origin, description, owner, due_date, status, sort_order")
+      .eq("meeting_id", meeting.id)
+      .order("sort_order", { ascending: true }),
+  ]);
+  if (notesRes.error || reviewsRes.error) {
+    throw new ApiError(500, "Could not load the completed 1:1 for the email.");
+  }
+
+  const goldList: GoldListBrief[] = ((notesRes.data ?? []) as unknown as FrozenNoteRow[])
+    // "Discussed": a note, an action, or the agent added/edited in that 1:1.
+    .filter((n) => n.note?.trim() || n.action_taken || n.agent_added || n.agent_edited)
+    .map(
+      (n): GoldListBrief => ({
+        agent: n.agent_name,
+        brokerage: n.brokerage,
+        added_to_gold_list_this_1_1: n.agent_added,
+        details_updated_this_1_1: n.agent_edited,
+        discussion: n.note?.trim() || null,
+        actions: [...(n.activity_changes ?? [])]
+          .map((c) => ({ kind: c.kind, what: c.description, date: c.date }))
+          .sort((x, y) => `${x.date}${x.kind}${x.what}`.localeCompare(`${y.date}${y.kind}${y.what}`)),
+        next_activity:
+          n.next_activity_on && n.next_activity_description
+            ? { what: n.next_activity_description, date: n.next_activity_on }
+            : null,
+      }),
+    )
+    .sort((x, y) => x.agent.localeCompare(y.agent) || (x.brokerage ?? "").localeCompare(y.brokerage ?? ""));
+
+  const reviews = (reviewsRes.data ?? []) as unknown as FrozenReviewRow[];
+  const brief = (r: FrozenReviewRow): CommitmentBrief => ({
+    what: r.description,
+    who: r.owner === "ae" ? "AE" : "Manager",
+    due: r.due_date,
+    status: r.status,
+  });
+
+  const snapshot = meeting.activity_snapshot;
+  const context: FollowupContext = {
+    ae_first_name: meeting.ae_name ?? "there",
+    manager_first_name: meeting.manager_name ?? "your manager",
+    meeting_date: meeting.meeting_date,
+    wins: meeting.wins?.trim() || null,
+    activity_notes: meeting.activity_notes?.trim() || null,
+    one_on_one_notes: meeting.coaching_notes?.trim() || null,
+    activity_results: snapshot
+      ? { last_week: weekBrief(snapshot.last_week), this_week: weekBrief(snapshot.this_week) }
+      : null,
+    gold_list: goldList,
+    commitments: {
+      made_in_this_1_1: reviews.filter((r) => r.origin === "new" && r.status !== "dropped").map(brief),
+      carried_over: reviews.filter((r) => r.origin === "carryover").map(brief),
+    },
+    goal_changes: (meeting.goal_changes ?? []).map((g) => ({
+      takes_effect: g.effective_from,
+      goals: g.values,
+    })),
+  };
+  assertShareable(context);
+  return { context, contentHash: fingerprint(context) };
 }
 
 /** True when a generated email no longer matches the meeting's shareable content. */

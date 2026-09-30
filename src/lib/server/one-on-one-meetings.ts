@@ -980,18 +980,33 @@ export async function updateGoalInMeeting(
 }
 
 /**
+ * The follow-up email is the ONE thing still writable on a COMPLETED 1:1 (the
+ * rest of the record is frozen by the database; see
+ * supabase/one_on_one_followup_v2_1.sql). Both writers below touch ONLY the
+ * email columns, so even a bug here could not reach anything else — and the
+ * freeze trigger would refuse it if it tried.
+ */
+
+export const FOLLOWUP_COMPLETED_WHILE_WRITING_MESSAGE =
+  "This 1:1 was completed while the email was being written. Generate it again from the completed record.";
+
+/**
  * Stores a freshly GENERATED follow-up email: subject + body replaced
  * together (each revision + 1), with the generation metadata, in ONE
  * compare-and-set UPDATE. It lands only if both revisions are still the ones
- * the client saw and the meeting is in progress — so a regeneration can
- * never overwrite an edit made in another tab, and never lands after
- * completion (the DB freeze trigger refuses it too).
+ * the client saw — so a regeneration can never overwrite an edit made in
+ * another tab — AND the meeting is still in `expectedStatus`, the state its
+ * context was built from. A generation built from LIVE data (in progress)
+ * therefore can't land on a meeting that completed meanwhile (its content would
+ * no longer match the frozen record); the manager regenerates from the record.
+ * Works on in-progress and completed meetings alike; nothing else is written.
  */
 export async function saveGeneratedFollowup(
   supabase: Db,
   meetingId: string,
   generated: { subject: string; body: string; model: string; contextHash: string },
   expected: { subject: number; body: number },
+  expectedStatus: OneOnOneMeeting["status"] = "in_progress",
 ): Promise<OneOnOneMeeting> {
   const res = await supabase
     .from(MEETINGS_TABLE)
@@ -1005,7 +1020,7 @@ export async function saveGeneratedFollowup(
       followup_model: generated.model,
     })
     .eq("id", meetingId)
-    .eq("status", "in_progress")
+    .eq("status", expectedStatus)
     .eq("followup_subject_rev", expected.subject)
     .eq("followup_body_rev", expected.body)
     .select("*")
@@ -1016,7 +1031,49 @@ export async function saveGeneratedFollowup(
   }
   if (res.data) return res.data as OneOnOneMeeting;
   const now = await loadMeeting(supabase, meetingId);
-  assertInProgress(now);
+  if (now.status !== expectedStatus) {
+    throw new ApiError(409, FOLLOWUP_COMPLETED_WHILE_WRITING_MESSAGE);
+  }
+  throw new FollowupRevisionConflict(
+    { value: now.followup_subject, revision: now.followup_subject_rev },
+    { value: now.followup_body, revision: now.followup_body_rev },
+  );
+}
+
+/**
+ * Saves a MANUALLY edited follow-up email (subject + body together) on an
+ * in-progress OR completed 1:1, in ONE compare-and-set UPDATE on both email
+ * revisions: a save based on a stale view (another tab saved, or a generation
+ * landed) matches no row and gets the current text back as a
+ * FollowupRevisionConflict instead of overwriting it. Only the email text and
+ * its revisions are written — never the generation metadata, the status,
+ * timestamps or any other column.
+ */
+export async function saveFollowupEmail(
+  supabase: Db,
+  meetingId: string,
+  email: { subject: string | null; body: string | null },
+  expected: { subject: number; body: number },
+): Promise<OneOnOneMeeting> {
+  const res = await supabase
+    .from(MEETINGS_TABLE)
+    .update({
+      followup_subject: email.subject?.trim() ? email.subject : null,
+      followup_body: email.body?.trim() ? email.body : null,
+      followup_subject_rev: expected.subject + 1,
+      followup_body_rev: expected.body + 1,
+    })
+    .eq("id", meetingId)
+    .eq("followup_subject_rev", expected.subject)
+    .eq("followup_body_rev", expected.body)
+    .select("*")
+    .maybeSingle();
+  throwIfFrozen(res.error);
+  if (res.error) {
+    throw new ApiError(500, `Could not save the email: ${res.error.message}`);
+  }
+  if (res.data) return res.data as OneOnOneMeeting;
+  const now = await loadMeeting(supabase, meetingId);
   throw new FollowupRevisionConflict(
     { value: now.followup_subject, revision: now.followup_subject_rev },
     { value: now.followup_body, revision: now.followup_body_rev },

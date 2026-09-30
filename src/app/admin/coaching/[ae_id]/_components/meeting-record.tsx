@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 
 import { ActivityResults } from "./activity-results";
 import { Section } from "./autosave-text";
+import { CompletedFollowupEmail } from "./completed-followup-email";
 
 // A completed 1:1, read-only, rendered ONLY from what was frozen at
 // completion: the activity snapshot, the Gold List note snapshots, and the
@@ -146,19 +147,24 @@ export function MeetingRecordView({ record }: { record: MeetingRecord }) {
         </Section>
       ) : null}
 
-      <Section
-        title="AE Follow-Up Email"
-        description="The final version prepared for the AE — not sent from the app."
-      >
-        {meeting.followup_subject || meeting.followup_body ? (
-          <FollowupEmailView
-            subject={meeting.followup_subject ?? ""}
-            body={meeting.followup_body ?? ""}
-          />
-        ) : (
-          <p className="text-sm text-muted-foreground">No follow-up email was prepared.</p>
-        )}
-      </Section>
+      {meeting.status === "completed" ? (
+        // The meeting is frozen; the email is the one editable artifact.
+        <CompletedFollowupEmail meeting={meeting} />
+      ) : (
+        <Section
+          title="AE Follow-Up Email"
+          description="The final version prepared for the AE — not sent from the app."
+        >
+          {meeting.followup_subject || meeting.followup_body ? (
+            <FollowupEmailView
+              subject={meeting.followup_subject ?? ""}
+              body={meeting.followup_body ?? ""}
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">No follow-up email was prepared.</p>
+          )}
+        </Section>
+      )}
     </div>
   );
 }

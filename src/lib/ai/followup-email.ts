@@ -1,5 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
-
 import type { FollowupContext } from "@/lib/server/followup-context";
 import {
   FOLLOWUP_BODY_MAX_LENGTH,
@@ -8,25 +6,32 @@ import {
 
 // Drafts the manager's AE follow-up email after a 1:1.
 //
-// SAME PROVIDER AS THE REST OF THE APP: Anthropic, via the SDK and the
-// ANTHROPIC_API_KEY that already powers the Smitty narrator
-// (lib/ai/smitty-narrator.ts). No new vendor. The key is read from the
-// environment only, never logged, never sent to the browser.
+// PROVIDER: OpenAI (Chat Completions), via the same plain `fetch` pattern the
+// app's other OpenAI features use (business-card extraction, Coverage brochure
+// extraction) — there is no OpenAI SDK dependency in this project, and none
+// was added. The key is OPENAI_API_KEY, read from the environment only, never
+// logged, never sent to the browser. ANTHROPIC_API_KEY is NOT used here.
 //
 // INPUT IS A FollowupContext AND NOTHING ELSE. That type is built by
 // server/followup-context.ts from an explicit allowlist of shareable meeting
 // content; it has no field for the manager's private notes, so there is
 // nothing here that could carry them. buildFollowupRequest() is exported so
-// tests can assert on the EXACT request the SDK receives.
+// tests can assert on the EXACT request body sent to OpenAI.
 //
 // FAILURE IS SAFE: every failure throws FollowupGenerationError with a
-// user-safe message (raw provider text is logged as a code only). The route
-// turns it into a retryable error and NOTHING about the meeting changes — a
-// failed generation can never block completing the 1:1.
+// user-safe message (raw provider text is never logged or returned — only a
+// status code). The route turns it into a retryable error and NOTHING about
+// the meeting changes — a failed generation can never block completing the 1:1.
 
-/** Overridable without a code change; defaults to the model the narrator uses. */
-export const FOLLOWUP_DEFAULT_MODEL = "claude-sonnet-4-6";
+/**
+ * Cost-efficient model for a short structured writing task; the same model the
+ * app's other OpenAI features default to. Override with
+ * OPENAI_FOLLOWUP_EMAIL_MODEL (no code change). Deliberately a NEW variable:
+ * the earlier FOLLOWUP_EMAIL_MODEL named an Anthropic model.
+ */
+export const FOLLOWUP_DEFAULT_MODEL = "gpt-4o-mini";
 
+const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const REQUEST_TIMEOUT_MS = 45_000;
 
 export const FOLLOWUP_SYSTEM_PROMPT = `You draft a follow-up email that a sales manager will send to one of their account executives (AEs) right after a 1:1 meeting. The manager will read, edit and send it themselves.
@@ -65,16 +70,18 @@ export const FOLLOWUP_UNAVAILABLE_MESSAGE =
   "Couldn't generate the email right now. Your 1:1 is untouched — try again in a moment.";
 
 export function followupModel(): string {
-  return process.env.FOLLOWUP_EMAIL_MODEL?.trim() || FOLLOWUP_DEFAULT_MODEL;
+  return process.env.OPENAI_FOLLOWUP_EMAIL_MODEL?.trim() || FOLLOWUP_DEFAULT_MODEL;
 }
 
-/** The exact request sent to the model. Pure, so tests can inspect it. */
+/** The exact JSON body POSTed to OpenAI. Pure, so tests can inspect it. */
 export function buildFollowupRequest(context: FollowupContext) {
   return {
     model: followupModel(),
-    max_tokens: 1024,
-    system: FOLLOWUP_SYSTEM_PROMPT,
+    // JSON mode: the reply is a single JSON object with subject + body.
+    response_format: { type: "json_object" as const },
+    max_completion_tokens: 1024,
     messages: [
+      { role: "system" as const, content: FOLLOWUP_SYSTEM_PROMPT },
       {
         role: "user" as const,
         content: `<meeting_data>\n${JSON.stringify(context, null, 2)}\n</meeting_data>\n\nWrite the follow-up email now.`,
@@ -112,9 +119,9 @@ export function parseFollowupReply(
 export async function generateFollowupEmail(
   context: FollowupContext,
 ): Promise<GeneratedFollowup> {
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
-    console.warn("[followup-email] ANTHROPIC_API_KEY is not set");
+    console.warn("[followup-email] OPENAI_API_KEY is not set");
     throw new FollowupGenerationError(
       "Email generation isn't set up on this server yet. Your 1:1 is untouched.",
       false,
@@ -122,26 +129,46 @@ export async function generateFollowupEmail(
   }
 
   const request = buildFollowupRequest(context);
-  const client = new Anthropic({ apiKey, maxRetries: 1, timeout: REQUEST_TIMEOUT_MS });
 
   let rawText: string;
   try {
-    const msg = await client.messages.create(request);
-    const block = msg.content[0];
-    if (!block || block.type !== "text") {
-      console.warn("[followup-email] unexpected content block type");
+    const res = await fetch(OPENAI_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      // Status only — never the response body, which can echo request details.
+      console.warn(`[followup-email] API call failed: HTTP ${res.status}`);
+      // A bad/revoked key won't fix itself on retry; everything else may.
+      throw new FollowupGenerationError(
+        res.status === 401 || res.status === 403
+          ? "Email generation isn't set up on this server yet. Your 1:1 is untouched."
+          : FOLLOWUP_UNAVAILABLE_MESSAGE,
+        !(res.status === 401 || res.status === 403),
+      );
+    }
+    const data = (await res.json()) as {
+      choices?: Array<{
+        finish_reason?: string;
+        message?: { content?: unknown; refusal?: unknown };
+      }>;
+    };
+    const choice = data.choices?.[0];
+    if (!choice || typeof choice.message?.content !== "string" || choice.finish_reason === "length") {
+      console.warn("[followup-email] unexpected completion shape");
       throw new FollowupGenerationError(FOLLOWUP_UNAVAILABLE_MESSAGE, true);
     }
-    rawText = block.text;
+    rawText = choice.message.content;
   } catch (err) {
     if (err instanceof FollowupGenerationError) throw err;
-    // Code/name only — never provider text, which can echo request details.
-    const status =
-      err instanceof Error && "status" in err
-        ? `:${(err as { status?: unknown }).status}`
-        : "";
+    // Name only (AbortError / TypeError / SyntaxError) — never provider text.
     console.warn(
-      `[followup-email] API call failed: ${err instanceof Error ? err.name : "unknown"}${status}`,
+      `[followup-email] API call failed: ${err instanceof Error ? err.name : "unknown"}`,
     );
     throw new FollowupGenerationError(FOLLOWUP_UNAVAILABLE_MESSAGE, true);
   }

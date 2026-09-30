@@ -11,9 +11,13 @@ import {
   loadFollowupContext,
 } from "@/lib/server/followup-context";
 import {
-  assertInProgress,
+  FOLLOWUP_BODY_MAX_LENGTH,
+  FOLLOWUP_SUBJECT_MAX_LENGTH,
+} from "@/lib/one-on-one-meetings";
+import {
   FollowupRevisionConflict,
   requireMeeting,
+  saveFollowupEmail,
   saveGeneratedFollowup,
   toConflictResponse,
 } from "@/lib/server/one-on-one-meetings";
@@ -23,8 +27,23 @@ import {
 // POST /api/admin/one-on-one-meetings/[id]/followup
 //        body: { expected_subject_revision, expected_body_revision }
 //        -> { subject, body, subject_revision, body_revision, generated_at }
+// PUT  /api/admin/one-on-one-meetings/[id]/followup
+//        body: { subject, body, expected_subject_revision, expected_body_revision }
+//        -> { subject, body, subject_revision, body_revision }
 //
-// Admin-only. The AE follow-up email: an AI-drafted, manager-edited recap the
+// WORKS ON IN-PROGRESS *AND COMPLETED* 1:1s. The follow-up email is the one
+// artifact that stays writable after completion; the completed meeting itself
+// is NOT reopened and no other field is reachable from here (these handlers
+// write only the email columns, and the database freeze trigger refuses
+// anything else — supabase/one_on_one_followup_v2_1.sql).
+//
+// Admin-only, through requireMeeting(): the same visibility rules as the rest
+// of the 1:1 (another admin gets a 404 for Corey's private Test AE meeting).
+//
+// A COMPLETED meeting's email is generated from its FROZEN record only (its
+// activity snapshot, Gold List note snapshots, commitment reviews, recorded
+// goal changes) — never today's live Gold List / goals / activity. See
+// server/followup-context.ts. The AE follow-up email: an AI-drafted, manager-edited recap the
 // manager copies into Outlook themselves. NOTHING IS SENT from the app.
 //
 // PRIVACY: the AI input is loadFollowupContext()'s output — an allowlist of
@@ -34,7 +53,10 @@ import {
 // POST generates and REPLACES the draft — it is only ever called on an
 // explicit Generate / Regenerate click. It persists in one compare-and-set
 // against both email revisions, so it can't overwrite an edit made in
-// another tab (409 + both current values) and can't land after completion.
+// another tab (409 + both current values), and only onto a meeting still in the
+// state its context was built from (a live-data generation that finishes after
+// the meeting completed is refused, 409, rather than filed under the frozen
+// record). PUT saves a hand-edited email with the same compare-and-set.
 // If the AI is unavailable the route answers 502 { error, retryable } and
 // changes NOTHING: the meeting, the notes and any existing draft are intact,
 // and completing the 1:1 never depends on this route.
@@ -49,6 +71,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const GenerateSchema = z.object({
+  expected_subject_revision: z.number().int().min(0),
+  expected_body_revision: z.number().int().min(0),
+});
+
+const SaveSchema = z.object({
+  subject: z.string().max(FOLLOWUP_SUBJECT_MAX_LENGTH).nullable(),
+  body: z.string().max(FOLLOWUP_BODY_MAX_LENGTH).nullable(),
   expected_subject_revision: z.number().int().min(0),
   expected_body_revision: z.number().int().min(0),
 });
@@ -87,7 +116,6 @@ export async function POST(
     const body = await parseBody(req, GenerateSchema);
     const supabase = getServerSupabase();
     const meeting = await requireMeeting(supabase, id, me);
-    assertInProgress(meeting);
 
     // Cheap early refusal: if the email already moved on in another tab, say so
     // BEFORE spending a generation. (The save below re-checks atomically.)
@@ -101,7 +129,7 @@ export async function POST(
       );
     }
 
-    const { context, contentHash } = await loadFollowupContext(supabase, meeting.id);
+    const { context, contentHash, status } = await loadFollowupContext(supabase, meeting.id);
 
     let generated;
     try {
@@ -121,6 +149,7 @@ export async function POST(
       meeting.id,
       { ...generated, contextHash: contentHash },
       { subject: body.expected_subject_revision, body: body.expected_body_revision },
+      status,
     );
     return Response.json({
       subject: saved.followup_subject,
@@ -128,6 +157,33 @@ export async function POST(
       subject_revision: saved.followup_subject_rev,
       body_revision: saved.followup_body_rev,
       generated_at: saved.followup_generated_at,
+    });
+  } catch (err) {
+    return toConflictResponse(err) ?? handleApiError(err);
+  }
+}
+
+export async function PUT(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const me = await requireAdmin(req);
+    const { id } = await params;
+    const body = await parseBody(req, SaveSchema);
+    const supabase = getServerSupabase();
+    const meeting = await requireMeeting(supabase, id, me);
+    const saved = await saveFollowupEmail(
+      supabase,
+      meeting.id,
+      { subject: body.subject, body: body.body },
+      { subject: body.expected_subject_revision, body: body.expected_body_revision },
+    );
+    return Response.json({
+      subject: saved.followup_subject,
+      body: saved.followup_body,
+      subject_revision: saved.followup_subject_rev,
+      body_revision: saved.followup_body_rev,
     });
   } catch (err) {
     return toConflictResponse(err) ?? handleApiError(err);
