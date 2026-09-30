@@ -53,6 +53,11 @@ NO NEW COMMITMENTS, TARGETS OR ACTION ITEMS — the most important rule:
 - If the data shows that an activity needs to improve but holds no specific target or plan, keep it general: name the area, say you know they can pick it up, and stop there. Stating a general focus the data supports is fine; stating a number, date or task the data does not contain is not.
 - If no commitments or next steps were recorded, do not add a next-steps list or pad the email with invented ones.
 
+GENERAL COACHING THEMES MUST NOT BECOME NEW ACTION ITEMS:
+- A coaching theme, a metric or an area for improvement is an observation, not an assignment. Do not convert one into a specific action item — a particular activity to do, a quantity, a deadline — unless that specific action was actually discussed, assigned, committed to or recorded in <meeting_data>.
+- Do not infer a plan from a coaching observation. If the data only says that some activity needs to pick up, you may say that in general terms, in your own words, such as putting the focus on that area this week. You may not spell out what to do about it: no suggested number of visits, 1:1s, calls, agents or anything else, no suggested day or deadline, and no step-by-step plan the meeting never produced.
+- Before writing any sentence that tells the AE to do something, check that the same action appears in the commitments, next steps or goals in <meeting_data>. If it does not, rewrite it as general encouragement or leave it out.
+
 STRUCTURE — do not use the same shape every time:
 - Let the contents of this particular meeting decide the order and emphasis. One email might lead with a big win, another with the plan for the week, another with a specific coaching point followed by the wins. Vary your opening and your phrasing from email to email; never fall back on a fixed template or stock phrases.
 - Synthesize the meeting; do not dump the data. Weave in a few numbers naturally.

@@ -206,5 +206,51 @@ describe("follow-up email system prompt: voice", () => {
     expect(system.indexOf("NO NEW COMMITMENTS")).toBeLessThan(system.indexOf("OUTPUT"));
     expect(req.messages[1].content).toMatch(/^<meeting_data>[\s\S]*<\/meeting_data>/);
   });
+
+  // ---- General coaching themes must not become new action items ----
+
+  it("has a dedicated rule: coaching themes, metrics and improvement areas are observations, not assignments", () => {
+    expect(prompt).toContain("GENERAL COACHING THEMES MUST NOT BECOME NEW ACTION ITEMS");
+    expect(lower).toMatch(/a coaching theme, a metric or an area for improvement is an observation, not an assignment/);
+    expect(lower).toMatch(/do not convert one into a specific action item/);
+    expect(lower).toMatch(/unless that specific action was actually discussed, assigned, committed to or recorded in <meeting_data>/);
+  });
+
+  it("forbids inferring a plan from a coaching observation — general wording is allowed, specifics are not", () => {
+    expect(lower).toMatch(/do not infer a plan from a coaching observation/);
+    expect(lower).toMatch(/you may say that in general terms, in your own words/);
+    expect(lower).toMatch(/you may not spell out what to do about it/);
+    expect(lower).toMatch(/no suggested number of visits, 1:1s, calls, agents or anything else/);
+    expect(lower).toMatch(/no suggested day or deadline/);
+    expect(lower).toMatch(/no step-by-step plan the meeting never produced/);
+  });
+
+  it("tells the model to check every instruction to the AE against the recorded commitments, next steps and goals", () => {
+    expect(lower).toMatch(/before writing any sentence that tells the ae to do something, check that the same action appears in the commitments, next steps or goals/);
+    expect(lower).toMatch(/rewrite it as general encouragement or leave it out/);
+  });
+
+  it("sits with the other grounding rules, before the structure and ending guidance, and does not seed a reusable sentence", () => {
+    const rule = prompt.indexOf("GENERAL COACHING THEMES MUST NOT BECOME NEW ACTION ITEMS");
+    expect(rule).toBeGreaterThan(prompt.indexOf("NO NEW COMMITMENTS"));
+    expect(rule).toBeLessThan(prompt.indexOf("STRUCTURE"));
+    expect(rule).toBeLessThan(prompt.indexOf("ENDING"));
+    // The permitted general wording is described, never supplied as a sentence to reuse.
+    expect(lower).not.toContain("building consistency");
+    expect(lower).not.toContain("let's focus on");
+  });
+
+  it("the request carries the rule with every generation, alongside the preserved rules", () => {
+    const system = buildFollowupRequest({ wins: "x" } as never).messages[0].content;
+    for (const kept of [
+      "NO NEW COMMITMENTS, TARGETS OR ACTION ITEMS",
+      "GENERAL COACHING THEMES MUST NOT BECOME NEW ACTION ITEMS",
+      "Praise actions and wins, not the person",
+      'always write it as "Gold List"',
+      '"Thanks!"',
+    ]) {
+      expect(system, kept).toContain(kept);
+    }
+  });
 });
 
