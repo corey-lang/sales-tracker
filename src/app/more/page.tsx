@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   BarChart3,
+  Flag,
   Gift,
   LogOut,
   MapPin,
@@ -20,6 +21,7 @@ import { BottomNav, BOTTOM_NAV_SPACER } from "@/components/bottom-nav";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { NotificationOptIn } from "@/components/notification-opt-in";
+import { canOpenRoadToTenThousand } from "@/components/road-to-10000/access";
 
 // "More" tab — a minimal account/links page so the bottom nav has a sensible
 // fourth destination. Intentionally lightweight: profile summary, an Admin
@@ -113,6 +115,19 @@ export default function MorePage() {
             <Sparkles aria-hidden="true" className="size-4" />
             What&apos;s New
           </Link>
+          {/* Road to 10,000 — the company goal. Admins and the assistant reach
+              the Update control from its full view; AEs get a view-only page.
+              Admins land on /admin, never /dashboard, so without this (and the
+              card on the admin dashboard) they had no way in but the URL. */}
+          {canOpenRoadToTenThousand(salesperson.role) && (
+            <Link
+              href="/road-to-10000"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              <Flag aria-hidden="true" className="size-4" />
+              Road to 10,000
+            </Link>
+          )}
           {/* Leaderboard — moved off the bottom nav when Gold List took its
               tab. juice_box_only accounts are excluded here exactly as they
               are on /leaderboard itself (which redirects them to /juice-box)

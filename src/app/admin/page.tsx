@@ -12,6 +12,7 @@ import { TotalsCard } from "@/components/admin/totals-card";
 import { GoalsCard } from "@/components/admin/goals-card";
 import { MessagesCard } from "@/components/admin/messages-card";
 import { MaintenanceCard } from "@/components/admin/maintenance-card";
+import { RoadTo10000Card } from "@/components/road-to-10000-card";
 
 // Admin Dashboard — the /admin index. Activity totals, AE messages, weekly
 // goal management, and maintenance. The admin-role guard and top chrome live
@@ -64,6 +65,11 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* The company goal. Admins land here (not on /dashboard, where the AE
+          Home cards live), so this is their Home card; it opens the full view
+          with the Update control. */}
+      <RoadTo10000Card />
+
       <FiltersCard
         from={from}
         to={to}

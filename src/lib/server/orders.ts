@@ -14,14 +14,7 @@
  *   src/lib/working-days.ts) subtracts holidays AND PTO.
  */
 
-import {
-  addDays,
-  endOfMonth,
-  format,
-  getDay,
-  parseISO,
-  startOfMonth,
-} from "date-fns";
+import { endOfMonth, format, startOfMonth } from "date-fns";
 
 import { getServerSupabase } from "@/lib/supabase/server";
 import { todayInAppTimezone } from "@/lib/dates";
@@ -32,11 +25,13 @@ import {
   type UnmappedTerritory,
 } from "@/lib/server/cogent";
 import { fetchRangeAdjustments } from "@/lib/server/working-days";
+// The business-day counting (weekdays minus company holidays) lives in a shared
+// pure module so Orders pace and Road to 10,000 use ONE definition.
 import {
-  paceVerdict,
-  type PaceVerdict,
-  type WorkingDayAdjustment,
-} from "@/lib/working-days";
+  businessDaysBetween,
+  companyHolidayValueByDate,
+} from "@/lib/business-days";
+import { paceVerdict, type PaceVerdict } from "@/lib/working-days";
 
 export type OrderPace = {
   /** Business days in the whole month (weekdays minus company holidays). */
@@ -126,44 +121,6 @@ function currentMonthWindow(now?: Date): {
     endDate: format(todayAnchor, "yyyy-MM-dd"),
     monthEndDate: format(endOfMonth(todayAnchor), "yyyy-MM-dd"),
   };
-}
-
-/** Company-holiday day-off value per date — applies_to_all rows ONLY (never
- *  individual PTO). day_value is 1.0 (full) or 0.5 (half), capped at 1. */
-function companyHolidayValueByDate(
-  adjustments: WorkingDayAdjustment[],
-): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const a of adjustments) {
-    if (!a.applies_to_all) continue; // company holidays only
-    const v = Math.min(1, Math.max(0, Number(a.day_value) || 0));
-    m.set(a.adjustment_date, Math.min(1, (m.get(a.adjustment_date) ?? 0) + v));
-  }
-  return m;
-}
-
-/** Weekdays (Mon–Fri) in [start, end] inclusive, minus company-holiday values.
- *  Returns 0 when start > end. Bounded loop (≤ a month). */
-function businessDaysBetween(
-  startInclusive: string,
-  endInclusive: string,
-  holidayValues: Map<string, number>,
-): number {
-  if (startInclusive > endInclusive) return 0;
-  const last = parseISO(endInclusive).getTime();
-  let total = 0;
-  let d = parseISO(startInclusive);
-  let guard = 0;
-  while (d.getTime() <= last && guard < 400) {
-    const dow = getDay(d); // 0 Sun .. 6 Sat
-    if (dow >= 1 && dow <= 5) {
-      const ds = format(d, "yyyy-MM-dd");
-      total += 1 - (holidayValues.get(ds) ?? 0);
-    }
-    d = addDays(d, 1);
-    guard += 1;
-  }
-  return Math.round(total * 10) / 10;
 }
 
 /**

@@ -31,6 +31,7 @@ import { RecentActivityCard } from "@/components/recent-activity-card";
 import { VerificationCenter } from "@/components/verification-center";
 import { AiAssistantCard } from "@/components/ai-assistant/ai-assistant-card";
 import { OrdersCard } from "@/components/orders-card";
+import { RoadTo10000Card } from "@/components/road-to-10000-card";
 
 // Home dashboard. Slimmer than the pre-nav-rollout version — the To-Do
 // section and the biz-card / log-activity quick actions have moved into
@@ -188,6 +189,9 @@ export default function DashboardPage() {
               </Link>
             </div>
           </header>
+          {/* The assistant (Tonja) has no AE cards, so the company goal — and
+              its Update control, via the full view — lives here too. */}
+          <RoadTo10000Card />
           <VerificationCenter />
         </main>
         <BottomNav salesperson={salesperson} />
@@ -242,6 +246,10 @@ export default function DashboardPage() {
         </header>
 
         <ThisWeekCard salespersonId={salesperson.id} refreshKey={entryVersion} />
+
+        {/* Road to 10,000 — the company goal (10,000 Homescriptions sold in
+            2026). Between This Week and Orders; opens the full view. */}
+        <RoadTo10000Card />
 
         {/* Production orders (Cogent) — month-to-date vs goal, pace by business
             days (weekdays minus company holidays only), and today's count.
