@@ -85,14 +85,21 @@ export const MIGRATIONS = [
   "replace_activity_week.sql",
   "cogent_territory_mappings.sql",
   "team_messages.sql",
+  "team_message_reads.sql",
   "juice_box_pass4_conversations.sql",
+  "juice_box_pass5_media.sql",
+  "juice_box_multi_image.sql",
+  "juice_box_channels.sql",
   "private_test_accounts.sql",
+  "juice_box_seen_by.sql",
 ];
 
 /** Just enough of Supabase's `storage` schema for business_card_scans.sql. */
 export const STORAGE_STUB_SQL = `
   CREATE SCHEMA IF NOT EXISTS storage;
   CREATE TABLE IF NOT EXISTS storage.buckets (id TEXT PRIMARY KEY, name TEXT, public BOOLEAN);
+  ALTER TABLE storage.buckets ADD COLUMN IF NOT EXISTS file_size_limit BIGINT;
+  ALTER TABLE storage.buckets ADD COLUMN IF NOT EXISTS allowed_mime_types TEXT[];
   CREATE TABLE IF NOT EXISTS storage.objects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), bucket_id TEXT, name TEXT
   );

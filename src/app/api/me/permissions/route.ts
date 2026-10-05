@@ -1,5 +1,6 @@
 import { handleApiError, requireSalesperson } from "@/lib/server/auth";
 import { canManageSwagLeads } from "@/lib/server/swag-leads";
+import { canViewJuiceBoxSeen } from "@/lib/server/juice-box-seen";
 import { getServerSupabase } from "@/lib/supabase/server";
 
 // GET /api/me/permissions
@@ -34,6 +35,8 @@ export type LivePermissionsResponse = {
   can_import_offices: boolean;
   /** Swag Leads management (admin, or the per-user flag). Fails closed. */
   can_manage_swag_leads: boolean;
+  /** Juice Box "Seen by X of Y" details (admin, or the per-user flag). Fails closed. */
+  can_view_juice_box_seen: boolean;
 };
 
 export async function GET(req: Request) {
@@ -43,6 +46,7 @@ export async function GET(req: Request) {
       role: me.role,
       can_import_offices: me.can_import_offices,
       can_manage_swag_leads: await canManageSwagLeads(getServerSupabase(), me),
+      can_view_juice_box_seen: await canViewJuiceBoxSeen(getServerSupabase(), me),
     };
     return Response.json(body, {
       headers: { "Cache-Control": "private, no-store" },

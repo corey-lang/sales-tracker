@@ -1,5 +1,7 @@
 "use client";
 
+import { SeenByLine, SeenByProvider } from "@/components/juice-box/seen-by";
+import { useSeenReport } from "@/components/juice-box/seen-report";
 import {
   Fragment,
   useCallback,
@@ -2116,6 +2118,13 @@ function JuiceBoxFeed({
     onInitialJumpHandled,
   ]);
 
+  // Ids of the posts currently loaded — the batch the "Seen by X of Y" counts
+  // are fetched for (admin / granted users only; see components/juice-box/seen-by).
+  const seenMessageIds = useMemo(
+    () => (state.kind === "ready" ? state.messages.map((m) => m.id) : []),
+    [state],
+  );
+
   // The sheet is rendered only when BOTH `reactionDetails` and a live
   // aggregate are present, so if the chip's last reactor un-reacts while
   // the sheet is open it naturally disappears without a setState-in-effect
@@ -2123,7 +2132,7 @@ function JuiceBoxFeed({
   // user opens another chip or dismisses; harmless and quiet.
 
   return (
-    <>
+    <SeenByProvider messageIds={seenMessageIds}>
       <FeedList
         state={state}
         channel={channel}
@@ -2259,7 +2268,7 @@ function JuiceBoxFeed({
         onOpenChange={onSearchOpenChange}
         onSelectMessage={handleSelectSearchResult}
       />
-    </>
+    </SeenByProvider>
   );
 }
 
@@ -4592,6 +4601,10 @@ function FeedCard({
     [message.created_at],
   );
 
+  // Reports this post once it has really been on screen — the evidence behind
+  // "Seen by X of Y" (separate from, and not touching, the channel read marker).
+  const seenRef = useSeenReport(message.id);
+
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Inline emoji bar — kept on the card so multiple bars can never be open
@@ -4693,6 +4706,7 @@ function FeedCard({
       // original post. The data-juice-highlight attribute is set/cleared
       // by scrollToMessage and styled in globals.css.
       id={`juice-message-${message.id}`}
+      ref={seenRef}
       size="sm"
       className={cn(
         // Slightly brighter ring + soft orange glow on hover so adjacent
@@ -4802,6 +4816,9 @@ function FeedCard({
           onOpenBar={() => setReactionBarOpen(true)}
           hasAny={hasReactions}
         />
+        {/* "👁 Seen by X of Y" — only for people allowed to see it; renders
+            nothing for everyone else. A reply is its own post here. */}
+        <SeenByLine messageId={message.id} />
         {reactionBarOpen && (
           <ReactionBar
             messageId={message.id}
