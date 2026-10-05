@@ -37,6 +37,9 @@ import type { UserRole } from "@/lib/permissions";
 export type LivePermissions = {
   role: UserRole;
   can_import_offices: boolean;
+  /** Swag Leads management (admin, or the per-user flag) — chrome only;
+   *  /api/swag-leads/* re-checks on every request. Optional for back-compat. */
+  can_manage_swag_leads?: boolean;
 };
 
 /**
@@ -105,6 +108,7 @@ export function useLivePermissions(): {
         setPermissions({
           role: payload.role,
           can_import_offices: payload.can_import_offices === true,
+          can_manage_swag_leads: payload.can_manage_swag_leads === true,
         });
       } catch {
         // Network error — leave permissions null, mark loaded so the

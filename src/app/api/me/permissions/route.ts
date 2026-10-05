@@ -1,4 +1,6 @@
 import { handleApiError, requireSalesperson } from "@/lib/server/auth";
+import { canManageSwagLeads } from "@/lib/server/swag-leads";
+import { getServerSupabase } from "@/lib/supabase/server";
 
 // GET /api/me/permissions
 //
@@ -30,6 +32,8 @@ export const dynamic = "force-dynamic";
 export type LivePermissionsResponse = {
   role: "admin" | "assistant" | "ae" | "juice_box_only";
   can_import_offices: boolean;
+  /** Swag Leads management (admin, or the per-user flag). Fails closed. */
+  can_manage_swag_leads: boolean;
 };
 
 export async function GET(req: Request) {
@@ -38,6 +42,7 @@ export async function GET(req: Request) {
     const body: LivePermissionsResponse = {
       role: me.role,
       can_import_offices: me.can_import_offices,
+      can_manage_swag_leads: await canManageSwagLeads(getServerSupabase(), me),
     };
     return Response.json(body, {
       headers: { "Cache-Control": "private, no-store" },

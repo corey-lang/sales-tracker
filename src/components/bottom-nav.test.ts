@@ -111,3 +111,23 @@ describe("buildNavItems", () => {
     }
   });
 });
+
+describe("Swag Leads tab (management accounts only; chrome, not authorization)", () => {
+  const nav = (role: UserRole, canManageSwagLeads?: boolean) =>
+    buildNavItems(session(role), { canManageSwagLeads }).map((i) => i.href);
+
+  it("AEs and admins never get the tab (AEs reach Swag Leads from More; the bar stays at six)", () => {
+    expect(nav("ae", true)).not.toContain("/swag-leads");
+    expect(nav("ae")).toHaveLength(6);
+    expect(nav("admin", true)).not.toContain("/swag-leads");
+  });
+
+  it("an assistant or juice_box_only account gets it only with the capability", () => {
+    expect(nav("assistant")).toEqual(["/dashboard", "/juice-box"]);
+    expect(nav("assistant", true)).toEqual(["/dashboard", "/juice-box", "/swag-leads"]);
+    expect(nav("juice_box_only")).toEqual(["/juice-box"]);
+    expect(nav("juice_box_only", false)).toEqual(["/juice-box"]);
+    expect(nav("juice_box_only", true)).toEqual(["/juice-box", "/swag-leads"]);
+  });
+});
+

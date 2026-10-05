@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   BarChart3,
+  Gift,
   LogOut,
   MapPin,
   ShieldCheck,
@@ -138,6 +139,26 @@ export default function MorePage() {
               My Activity
             </Link>
           )}
+          {(() => {
+            // Swag Leads — social-media prospecting leads. Every AE, admins,
+            // and management accounts granted the capability (Tonja, Faith).
+            // The capability comes from the live permission read and fails
+            // closed; /api/swag-leads/* is the real gate.
+            const allowed =
+              salesperson.role === "ae" ||
+              salesperson.role === "admin" ||
+              (permsLoaded && permissions?.can_manage_swag_leads === true);
+            if (!allowed) return null;
+            return (
+              <Link
+                href="/swag-leads"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                <Gift aria-hidden="true" className="size-4" />
+                Swag Leads
+              </Link>
+            );
+          })()}
           {salesperson.role === "admin" && (
             <Link
               href="/admin"

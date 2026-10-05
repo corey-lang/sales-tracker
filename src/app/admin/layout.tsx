@@ -56,6 +56,8 @@ const ADMIN_NAV: NavItem[] = [
       // Lives outside /admin (it's an AE surface that admins can read in
       // full via its AE filter), same arrangement as Office Imports below.
       { href: "/gold-list", label: "Gold List" },
+      // Also outside /admin so the leads team (Tonja, Faith) can open it.
+      { href: "/swag-leads", label: "Swag Leads" },
       { href: "/office-imports", label: "Office Imports" },
       { href: "/admin/cogent", label: "Cogent Orders" },
       { href: "/admin/working-days", label: "Working Day Adjustments" },

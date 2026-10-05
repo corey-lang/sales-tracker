@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   Citrus,
   Gem,
+  Gift,
   Home,
   ListChecks,
   Map as MapIcon,
@@ -13,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api-client";
 import type { StoredSalesperson } from "@/lib/use-salesperson";
 import { useJuiceBoxUnread } from "@/components/juice-box-unread-provider";
 
@@ -93,6 +96,13 @@ const GOLD_LIST: NavItem = {
   icon: Gem,
 };
 
+// Swag Leads — social-media prospecting leads (NOT swag orders). AEs reach it
+// from /more (the bar is already at its six-tab ceiling); the tab below is for
+// MANAGEMENT accounts that have no AE surface — assistants (Tonja) and
+// juice_box_only accounts granted the capability (Faith) — so the feature has a
+// front door for them. Chrome only: /api/swag-leads/* re-checks every request.
+const SWAG_LEADS: NavItem = { href: "/swag-leads", label: "Swag Leads", icon: Gift };
+
 /**
  * Bottom padding any page using BottomNav should apply to its main wrapper.
  *
@@ -126,6 +136,8 @@ export const BOTTOM_NAV_SPACER =
  */
 export function buildNavItems(
   salesperson: StoredSalesperson | null,
+  /** Live capability (from /api/me/permissions); absent/false adds nothing. */
+  opts: { canManageSwagLeads?: boolean } = {},
 ): NavItem[] {
   if (!salesperson) return [HOME_AE];
   // Juice Box-only accounts (Travis, Rizz, …) see ONLY the Juice Box
@@ -133,7 +145,9 @@ export function buildNavItems(
   // and shouldn't be tempted by tabs that would just redirect them
   // back here. Notifications + log out are reachable via the gear in
   // the Juice Box page header (see /juice-box).
-  if (salesperson.role === "juice_box_only") return [JUICE_BOX];
+  if (salesperson.role === "juice_box_only") {
+    return opts.canManageSwagLeads ? [JUICE_BOX, SWAG_LEADS] : [JUICE_BOX];
+  }
   // Admin Home points at /admin so Home stays consistent with where
   // admins land after login (see landingPathFor). Every other role's
   // Home is the AE /dashboard.
@@ -147,8 +161,47 @@ export function buildNavItems(
   const items: NavItem[] = [home, JUICE_BOX];
   if (salesperson.role !== "assistant") {
     items.push(GOLD_LIST, MAP, TODOS, SCAN_BIZ_CARD);
+  } else if (opts.canManageSwagLeads) {
+    items.push(SWAG_LEADS);
   }
   return items;
+}
+
+// One lookup per signed-in user per page load, shared by every BottomNav mount.
+const swagAccessCache = new Map<string, boolean>();
+
+/**
+ * Whether to show the Swag Leads tab. Only assistants and juice_box_only
+ * accounts can gain it, so nobody else triggers the request. Fails closed.
+ */
+function useCanManageSwagLeads(salesperson: StoredSalesperson | null): boolean {
+  const eligible =
+    salesperson?.role === "assistant" || salesperson?.role === "juice_box_only";
+  const id = salesperson?.id ?? "";
+  const [allowed, setAllowed] = useState<boolean>(
+    () => (eligible && swagAccessCache.get(id)) === true,
+  );
+  useEffect(() => {
+    if (!eligible || !id) return;
+    const known = swagAccessCache.get(id);
+    if (known !== undefined) {
+      setAllowed(known); // eslint-disable-line react-hooks/set-state-in-effect
+      return;
+    }
+    let cancelled = false;
+    apiFetch("/api/me/permissions")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { can_manage_swag_leads?: boolean } | null) => {
+        const v = body?.can_manage_swag_leads === true;
+        swagAccessCache.set(id, v);
+        if (!cancelled) setAllowed(v);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [eligible, id]);
+  return eligible && allowed;
 }
 
 export function BottomNav({
@@ -161,7 +214,8 @@ export function BottomNav({
   // for signed-out users so the value is 0 in that case.
   const { unreadCount } = useJuiceBoxUnread();
 
-  const items = buildNavItems(salesperson);
+  const canManageSwagLeads = useCanManageSwagLeads(salesperson);
+  const items = buildNavItems(salesperson, { canManageSwagLeads });
 
   // Grid columns map 1:1 to the active item count so the tabs share width
   // evenly regardless of which role-gated items are present. A single tab
