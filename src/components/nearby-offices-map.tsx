@@ -502,6 +502,7 @@ export default function NearbyOfficesMap({
               position={[item.latitude, item.longitude]}
               icon={iconByVariant[variant]}
             >
+              {/* Popup surface is white; dark-theme tokens wash out, so use fixed slate. */}
               <Popup maxWidth={280} minWidth={240}>
                 <div className="space-y-1.5">
                   <div className="flex items-start justify-between gap-2">
@@ -515,9 +516,9 @@ export default function NearbyOfficesMap({
                     )}
                   </div>
                   {item.last_visit_at ? (
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-[11px] text-slate-600">
                       Last visit{" "}
-                      <span className="font-medium text-foreground/80">
+                      <span className="font-medium text-slate-700">
                         {formatActivityStamp(item.last_visit_at)}
                       </span>
                     </p>
@@ -528,12 +529,12 @@ export default function NearbyOfficesMap({
                   )}
                   {item.next_action && (
                     <p className="text-xs">
-                      <span className="font-medium text-foreground/80">
+                      <span className="font-medium text-slate-700">
                         Next:
                       </span>{" "}
                       {item.next_action}
                       {dueDate && (
-                        <span className="text-muted-foreground">
+                        <span className="text-slate-600">
                           {" "}
                           · due {dueDate}
                         </span>
