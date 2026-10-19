@@ -31,6 +31,15 @@ export type ConflictReport = {
   reason: string;
 };
 
+export type ReviewReport = {
+  row: number;
+  office_name: string;
+  candidate_id: string;
+  candidate_name: string;
+  candidate_street: string | null;
+  reason: string;
+};
+
 export type BatchResult = {
   batch_id: string | null;
   source: string;
@@ -46,6 +55,9 @@ export type BatchResult = {
   flagged_total?: number;
   conflicts?: ConflictReport[];
   conflicts_total?: number;
+  /** New offices that might be a corrected copy of an existing one. */
+  review?: ReviewReport[];
+  review_total?: number;
   warning?: string;
 };
 
@@ -75,6 +87,8 @@ export function emptyResult(source: string): BatchResult {
     flagged_total: 0,
     conflicts: [],
     conflicts_total: 0,
+    review: [],
+    review_total: 0,
   };
 }
 
@@ -106,6 +120,8 @@ export function mergeBatchResult(
     conflicts: cap([...(acc.conflicts ?? []), ...shift(next.conflicts)]),
     conflicts_total:
       (acc.conflicts_total ?? 0) + (next.conflicts_total ?? next.conflicts?.length ?? 0),
+    review: cap([...(acc.review ?? []), ...shift(next.review)]),
+    review_total: (acc.review_total ?? 0) + (next.review_total ?? next.review?.length ?? 0),
     warning: next.warning ?? acc.warning,
   };
 }
@@ -113,4 +129,15 @@ export function mergeBatchResult(
 /** Every sent row is accounted for in exactly one bucket. */
 export function accountedRows(r: BatchResult): number {
   return r.created + r.updated + (r.unchanged ?? 0) + r.skipped.length + r.errors.length;
+}
+
+/**
+ * One-line, human reconciliation of a result, e.g.
+ * "6,401 processed = 5,909 new + 492 updated + 0 unchanged + 0 skipped + 0 errors".
+ */
+export function reconciliationLine(r: BatchResult): string {
+  const n = (x: number) => x.toLocaleString("en-US");
+  return `${n(r.total_rows)} processed = ${n(r.created)} new + ${n(r.updated)} updated + ${n(
+    r.unchanged ?? 0,
+  )} unchanged + ${n(r.skipped.length)} skipped + ${n(r.errors.length)} errors`;
 }

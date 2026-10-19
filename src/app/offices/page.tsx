@@ -1894,7 +1894,7 @@ function ListViewSection({
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by name, city, or zip"
+          placeholder="Search by name, address, city, or zip"
           aria-label="Search offices"
           className="h-10 pl-8 pr-9"
           inputMode="search"

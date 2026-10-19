@@ -209,6 +209,28 @@ describe("a territory larger than PostgREST's 1,000-row cap", () => {
     expect(miss.offices.some((o) => o.name === "Zzz Last Realty")).toBe(false);
   });
 
+  it("search matches the street address (e.g. an address typed to find one specific office)", async () => {
+    const byStreet = (await (await listRoute.GET(req(SHANNON, "/api/offices?q=9%20End%20St"))).json()) as ListBody;
+    expect(byStreet.offices.map((o) => o.name)).toEqual(["Zzz Last Realty"]);
+
+    // A street number from the middle of the territory finds exactly that office.
+    const mid = (await (await listRoute.GET(req(SHANNON, "/api/offices?q=1234%20Main"))).json()) as ListBody;
+    expect(mid.offices.map((o) => o.name)).toEqual(["Office 01234"]);
+
+    // Name, city and zip searches still work alongside it.
+    const byZip = (await (await listRoute.GET(req(SHANNON, "/api/offices?q=78201"))).json()) as ListBody;
+    expect(byZip.total_matched).toBeGreaterThan(0);
+    const byCity = (await (await listRoute.GET(req(SHANNON, "/api/offices?q=San%20Antonio"))).json()) as ListBody;
+    expect(byCity.total_matched).toBeGreaterThan(0);
+  });
+
+  it("street search never leaks another AE's offices", async () => {
+    const hit = (await (await listRoute.GET(req(SHANNON, "/api/offices?q=1%20Elsewhere"))).json()) as ListBody;
+    expect(hit.offices).toHaveLength(0);
+    const james = (await (await listRoute.GET(req(OTHER_AE, "/api/offices?q=1%20Elsewhere"))).json()) as ListBody;
+    expect(james.offices.map((o) => o.name)).toEqual(["James Only Realty"]);
+  });
+
   it("keeps territories strictly per-AE", async () => {
     const jamesMap = (await (await mapRoute.GET(req(OTHER_AE, "/api/offices/map"))).json()) as MapBody;
     expect(jamesMap.offices.map((o) => o.name)).toEqual(["James Only Realty"]);

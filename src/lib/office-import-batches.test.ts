@@ -7,6 +7,7 @@ import {
   batchSlice,
   emptyResult,
   mergeBatchResult,
+  reconciliationLine,
   type BatchResult,
 } from "./office-import-batches";
 
@@ -79,5 +80,21 @@ describe("mergeBatchResult", () => {
       0,
     );
     expect(accountedRows(r)).toBe(r.total_rows);
+  });
+});
+
+describe("reconciliationLine", () => {
+  it("states processed = new + updated + unchanged + skipped + errors", () => {
+    const r = batch({ created: 5909, updated: 492, unchanged: 0, total_rows: 6401 });
+    expect(reconciliationLine(r)).toBe(
+      "6,401 processed = 5,909 new + 492 updated + 0 unchanged + 0 skipped + 0 errors",
+    );
+    expect(accountedRows(r)).toBe(r.total_rows);
+  });
+  it("merges review items with file-wide row numbers", () => {
+    const item = { row: 2, office_name: "X", candidate_id: "c", candidate_name: "Y", candidate_street: null, reason: "r" };
+    const m = mergeBatchResult(emptyResult("t"), batch({ review: [item], review_total: 1, total_rows: 5 }), 1000);
+    expect(m.review?.[0].row).toBe(1002);
+    expect(m.review_total).toBe(1);
   });
 });

@@ -43,7 +43,7 @@ import {
 //   * `salesperson_id = me.id` pinned on every read.
 //
 // SEARCH
-//   Optional `q` matches office.name / office.city / office.zip via
+//   Optional `q` matches office.name / office.street / office.city / office.zip via
 //   case-insensitive ilike. Input is sanitized to alphanumerics + a
 //   small set of address-safe punctuation so a stray `%`, `,`, or
 //   PostgREST operator separator can't break out of the value
@@ -163,7 +163,7 @@ export async function GET(req: Request) {
     // wildcards added here.
     const searchOr =
       cleanQ.length > 0
-        ? `name.ilike.%${cleanQ}%,city.ilike.%${cleanQ}%,zip.ilike.%${cleanQ}%`
+        ? `name.ilike.%${cleanQ}%,street.ilike.%${cleanQ}%,city.ilike.%${cleanQ}%,zip.ilike.%${cleanQ}%`
         : null;
 
     // Base query: this AE's offices in their slice (production for

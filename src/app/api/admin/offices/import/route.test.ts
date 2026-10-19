@@ -42,6 +42,8 @@ type Body = {
   flagged: Array<{ row: number; reason: string }>;
   conflicts: Array<{ row: number; field: string; existing: string | null; incoming: string | null; office_id: string }>;
   conflicts_total: number;
+  review: Array<{ row: number; office_name: string; candidate_id: string; candidate_name: string; reason: string }>;
+  review_total: number;
   errors: Array<{ row: number; reason: string }>;
 };
 
@@ -365,4 +367,101 @@ describe("large files sent as several requests", () => {
     expect(b.unchanged).toBe(1_500);
     expect(await offices()).toHaveLength(1_500);
   }, 60_000);
+});
+
+describe("corrected names / addresses without a stable id are never auto-merged", () => {
+  it("a corrected STREET (same name + zip) becomes a separate office and is flagged for review", async () => {
+    await run([{ name: "Acme Realty", street: "100 Main St", zip: "78201" }]);
+    const r = await run([{ name: "Acme Realty", street: "100 Main Street Suite 4", zip: "78201" }]);
+    expect(r.created).toBe(1);
+    expect(r.updated).toBe(0);
+    expect(await offices()).toHaveLength(2);
+    expect(r.review).toHaveLength(1);
+    expect(r.review[0]).toMatchObject({ row: 1, office_name: "Acme Realty", candidate_name: "Acme Realty" });
+    expect(r.review[0].reason).toMatch(/different street/);
+    // The existing office is untouched.
+    const rows = await offices();
+    expect(rows.find((o) => o.street === "100 Main St")).toMatchObject({ name: "Acme Realty", zip: "78201" });
+  });
+
+  it("a RENAMED office (same street + zip + phone) becomes a separate office and is flagged for review", async () => {
+    await run([{ name: "Old Name Realty", street: "7 Pine Rd", zip: "78212", office_phone: "(210) 555-0123" }]);
+    const r = await run([{ name: "New Name Realty", street: "7 Pine Rd", zip: "78212", office_phone: "210-555-0123" }]);
+    expect(r.created).toBe(1);
+    expect(await offices()).toHaveLength(2);
+    expect(r.review).toHaveLength(1);
+    expect(r.review[0].reason).toMatch(/different name/);
+  });
+
+  it("does NOT flag ordinary neighbours: different names at one address with different contacts", async () => {
+    await run([{ name: "Chris Reeves", street: "40 NE Loop 410", zip: "78216", office_phone: "210-555-0001" }]);
+    const r = await run([{ name: "Signet Mortgage", street: "40 NE Loop 410", zip: "78216", office_phone: "210-555-0002" }]);
+    expect(r.created).toBe(1);
+    expect(r.review).toHaveLength(0);
+  });
+
+  it("does NOT flag when the shared name is in a different zip (a different branch)", async () => {
+    await run([{ name: "Keller Williams", street: "1 A St", zip: "78201" }]);
+    const r = await run([{ name: "Keller Williams", street: "9 Z Ave", zip: "78258" }]);
+    expect(r.created).toBe(1);
+    expect(r.review).toHaveLength(0);
+  });
+
+  it("re-importing an unchanged file raises no review items", async () => {
+    const rows = [
+      { name: "Acme Realty", street: "100 Main St", zip: "78201" },
+      { name: "Acme Realty", street: "100 Main Street Suite 4", zip: "78201" },
+    ];
+    await run(rows);
+    const again = await run(rows);
+    expect(again.created).toBe(0);
+    expect(again.unchanged).toBe(2);
+    expect(again.review).toHaveLength(0);
+  });
+
+  it("an external id still matches a corrected name/address (stable source id) — that is not a guess", async () => {
+    await run([{ name: "Acme Realty", street: "100 Main St", zip: "78201", external_badger_id: "b-9" }]);
+    const r = await run([{ name: "Acme Realty Group", street: "100 Main Street", zip: "78201", external_badger_id: "b-9" }]);
+    expect(r.created).toBe(0);
+    expect(r.review).toHaveLength(0);
+    expect(await offices()).toHaveLength(1);
+  });
+});
+
+describe("reporting: new vs updated vs total reconcile (the San Antonio shape)", () => {
+  it("legacy offices without zips + a larger file = N new + M updated, nothing lost", async () => {
+    // 5 pre-existing offices (as imported from Badger: no zip, no coordinates, with notes).
+    for (let i = 0; i < 5; i++) {
+      await db.sql(
+        `INSERT INTO offices (salesperson_id, name, street, city, state, dedupe_key, environment, office_notes, next_action)
+         VALUES ($1,$2,$3,'San Antonio','TX',$4,'production',$5,$6)`,
+        [SHANNON, `Legacy ${i}`, `${i} Old Rd`, `legacy ${i}|${i} old rd|`, `note ${i}`, i % 2 ? `act ${i}` : null],
+      );
+    }
+    const before = await offices();
+    const file: Row[] = [
+      ...Array.from({ length: 5 }, (_, i) => ({ name: `Legacy ${i}`, street: `${i} Old Rd`, zip: "78201", latitude: 29.4 + i / 100, longitude: -98.5 })),
+      ...Array.from({ length: 20 }, (_, i) => ({ name: `Fresh ${i}`, street: `${i} New Rd`, zip: "78202" })),
+    ];
+    const r = await run(file);
+    expect(r).toMatchObject({ created: 20, updated: 5, unchanged: 0, total_rows: 25 });
+    expect(r.skipped).toHaveLength(0);
+    expect(r.errors).toHaveLength(0);
+    expect(r.review).toHaveLength(0);
+
+    const after = await offices();
+    expect(after).toHaveLength(25);
+    for (const b of before) {
+      const a = after.find((o) => o.id === b.id)!;
+      for (const col of ["name", "street", "city", "state", "office_notes", "next_action", "created_at", "import_batch_id", "source"]) {
+        expect(a[col], col).toEqual(b[col]);
+      }
+      expect(a.zip).toBe("78201"); // blanks filled — the only change
+      expect(a.latitude).not.toBeNull();
+    }
+    // Only the 20 created offices carry this batch id; row_count = created + updated.
+    const batch = (await db.sql<Row>(`SELECT * FROM office_import_batches`))[0];
+    expect(batch.row_count).toBe(25);
+    expect(await db.sql(`SELECT 1 FROM offices WHERE import_batch_id = $1`, [batch.id])).toHaveLength(20);
+  });
 });

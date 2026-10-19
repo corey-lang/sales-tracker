@@ -62,6 +62,18 @@ import { haversineMiles } from "@/lib/geo";
 //   Coordinates fill only when the office has none; a differing pair more
 //   than COORDINATE_CONFLICT_MILES away is a conflict, not a silent move.
 //
+// POSSIBLE DUPLICATES (flagged for manual review — never merged)
+//   Without a stable external id, a row whose name or street was CORRECTED
+//   can't be proven to be the same office, so it is created as its own office
+//   — never silently merged into an existing one. When it looks like it might
+//   be a corrected version of an existing office it is also listed in
+//   `review[]` with the candidate, so a person can decide:
+//     * same name + same zip, different street (a street correction?), or
+//     * same street + zip and the same phone or email, different name (a
+//       renamed office?).
+//   No similarity scoring and no fuzzy text matching is used. Because the new
+//   office carries this batch's import_batch_id it is easy to find and remove.
+//
 // COORDINATES
 //   A pair must be complete and valid WGS84 (see validateCoordinatePair).
 //   An invalid pair is DROPPED and the row reported in `flagged[]`; the
@@ -78,13 +90,19 @@ import { haversineMiles } from "@/lib/geo";
 //   changes), which is what makes a failed run resumable.
 //
 // SUMMARY SHAPE
-//   created   — offices that didn't exist before.
+//   created   — offices that didn't exist before (new rows in `offices`).
 //   updated   — existing offices that had at least one blank filled.
 //   unchanged — existing offices matched with nothing to add.
+//   Every row sent lands in exactly one of created / updated / unchanged /
+//   skipped / errors, so created + updated + unchanged + skipped + errors ===
+//   total_rows. The batch row's `row_count` is created + updated (offices this
+//   batch added or enriched); only the CREATED ones carry its import_batch_id.
 //   skipped[] — rows the IMPORTER intentionally bypassed (validation fail,
 //               AE not found, ambiguous match, duplicate in the file).
 //   flagged[] — rows imported but with a problem worth reviewing (dropped
 //               invalid coordinates).
+//   review[]  — NEW offices that might be a corrected copy of an existing one
+//               (see POSSIBLE DUPLICATES). Created, not merged.
 //   conflicts[] — incoming values that differ from a stored value and were
 //               NOT applied (capped; see conflicts_total).
 //   errors[]  — rows the DATABASE rejected (constraint violation,
@@ -219,6 +237,15 @@ type Conflict = {
   field: string;
   existing: string | null;
   incoming: string | null;
+  reason: string;
+};
+
+type ReviewItem = {
+  row: number;
+  office_name: string;
+  candidate_id: string;
+  candidate_name: string;
+  candidate_street: string | null;
   reason: string;
 };
 
@@ -606,6 +633,8 @@ export async function POST(req: Request) {
     const flagged: Flag[] = [];
     const conflicts: Conflict[] = [];
     let conflictsTotal = 0;
+    const review: ReviewItem[] = [];
+    let reviewTotal = 0;
     const addConflict = (c: Conflict) => {
       conflictsTotal++;
       if (conflicts.length < RESPONSE_LIST_CAP) conflicts.push(c);
@@ -700,8 +729,11 @@ export async function POST(req: Request) {
       byExt: Map<string, Existing[]>;
       byKey: Map<string, Existing[]>;
       byNameStreet: Map<string, Existing[]>;
+      byNameZip: Map<string, Existing[]>;
+      byStreetZip: Map<string, Existing[]>;
       storedKeys: Set<string>;
     };
+    const blankZip = (z: string | null) => z === null || z.trim() === "";
     const push = (m: Map<string, Existing[]>, k: string, o: Existing) => {
       const l = m.get(k);
       if (!l) m.set(k, [o]);
@@ -720,6 +752,10 @@ export async function POST(req: Request) {
         `${normalizeForDedupe(o.name)}|${normalizeForDedupe(o.street)}`,
         o,
       );
+      if (!blankZip(o.zip)) {
+        push(ix.byNameZip, `${normalizeForDedupe(o.name)}|${normalizeForDedupe(o.zip)}`, o);
+        push(ix.byStreetZip, `${normalizeForDedupe(o.street)}|${normalizeForDedupe(o.zip)}`, o);
+      }
       ix.storedKeys.add(o.dedupe_key);
     };
     const slices = new Map<string, SliceIndex>();
@@ -752,6 +788,8 @@ export async function POST(req: Request) {
         byExt: new Map(),
         byKey: new Map(),
         byNameStreet: new Map(),
+        byNameZip: new Map(),
+        byStreetZip: new Map(),
         storedKeys: new Set(),
       };
       for (const o of res.data) indexOffice(ix, o);
@@ -843,6 +881,47 @@ export async function POST(req: Request) {
       }
 
       if (m.kind === "none") {
+        // Not the same office as anything stored — but if it LOOKS like a
+        // corrected copy of one, say so (only pre-existing offices count, not
+        // ones this request is creating).
+        const nameZip = blank(r.row.zip)
+          ? []
+          : (ix.byNameZip.get(`${normalizeForDedupe(r.row.name)}|${normalizeForDedupe(r.row.zip)}`) ?? []);
+        const streetZip = blank(r.row.zip)
+          ? []
+          : (ix.byStreetZip.get(`${normalizeForDedupe(r.row.street)}|${normalizeForDedupe(r.row.zip)}`) ?? []);
+        const sameContact = (c: Existing) =>
+          (!blank(r.row.office_phone) &&
+            !blank(c.office_phone) &&
+            r.row.office_phone!.replace(/\D/g, "") === c.office_phone!.replace(/\D/g, "") &&
+            r.row.office_phone!.replace(/\D/g, "") !== "") ||
+          (!blank(r.row.office_email) &&
+            !blank(c.office_email) &&
+            r.row.office_email!.trim().toLowerCase() === c.office_email!.trim().toLowerCase());
+        const candidates: Array<{ c: Existing; reason: string }> = [];
+        for (const c of nameZip) {
+          if (!c.id.startsWith("planned-")) {
+            candidates.push({ c, reason: "Same name and zip as an existing office but a different street — a corrected address? Created as a separate office; merge manually if it is the same one." });
+          }
+        }
+        for (const c of streetZip) {
+          if (!c.id.startsWith("planned-") && sameContact(c) && !candidates.some((x) => x.c.id === c.id)) {
+            candidates.push({ c, reason: "Same street, zip and phone/email as an existing office but a different name — a renamed office? Created as a separate office; merge manually if it is the same one." });
+          }
+        }
+        for (const { c, reason } of candidates) {
+          reviewTotal++;
+          if (review.length < RESPONSE_LIST_CAP) {
+            review.push({
+              row: r.idx,
+              office_name: r.row.name,
+              candidate_id: c.id,
+              candidate_name: c.name,
+              candidate_street: c.street,
+              reason,
+            });
+          }
+        }
         const payload: InsertPayload = {
           salesperson_id: r.ae.id,
           import_batch_id: batchId,
@@ -1089,6 +1168,8 @@ export async function POST(req: Request) {
         flagged_total: flagged.length,
         conflicts,
         conflicts_total: conflictsTotal,
+        review,
+        review_total: reviewTotal,
         errors,
         ...(provenanceWarning ? { warning: provenanceWarning } : {}),
       },

@@ -24,6 +24,7 @@ import {
   batchSlice,
   emptyResult,
   mergeBatchResult,
+  reconciliationLine,
   type BatchResult,
 } from "@/lib/office-import-batches";
 
@@ -1338,12 +1339,12 @@ export default function OfficeImportsPage() {
             {result && (
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                 <SummaryStat
-                  label="Created"
+                  label="New offices"
                   value={result.created}
                   tone="success"
                 />
                 <SummaryStat
-                  label="Updated"
+                  label="Updated existing"
                   value={result.updated}
                   tone="info"
                 />
@@ -1363,6 +1364,13 @@ export default function OfficeImportsPage() {
                   tone={result.errors.length > 0 ? "destructive" : "muted"}
                 />
               </div>
+            )}
+            {result && (
+              <p className="text-xs text-muted-foreground">
+                {reconciliationLine(result)}. “Updated existing” only ever
+                fills blank fields on an office you already have — nothing is
+                overwritten or erased.
+              </p>
             )}
             {/*
               Reconciliation guard. The four-bucket invariant is
@@ -1404,6 +1412,17 @@ export default function OfficeImportsPage() {
                 total={result.flagged_total}
               />
             )}
+            {result && (result.review?.length ?? 0) > 0 && (
+              <ResultRowsTable
+                title="Possible duplicates — created as new, review (not merged)"
+                tone="warning"
+                rows={(result.review ?? []).map((v) => ({
+                  row: v.row,
+                  reason: `${v.office_name}: ${v.reason} Existing: “${v.candidate_name}”${v.candidate_street ? `, ${v.candidate_street}` : ""}.`,
+                }))}
+                total={result.review_total}
+              />
+            )}
             {result && (result.conflicts?.length ?? 0) > 0 && (
               <ResultRowsTable
                 title="Kept existing value — the file disagrees (review)"
@@ -1424,6 +1443,7 @@ export default function OfficeImportsPage() {
               result.errors.length === 0 &&
               (result.flagged_total ?? 0) === 0 &&
               (result.conflicts_total ?? 0) === 0 &&
+              (result.review_total ?? 0) === 0 &&
               result.created + result.updated + (result.unchanged ?? 0) > 0 && (
                 <p className="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
                   <CheckCircle2 aria-hidden="true" className="size-4" />
