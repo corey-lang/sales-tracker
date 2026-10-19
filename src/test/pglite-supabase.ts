@@ -12,7 +12,8 @@
  * WHAT'S SUPPORTED
  *   Only the PostgREST surface the 1:1 / coaching / Gold List server code
  *   uses: select (plain column lists), insert, update, upsert(onConflict),
- *   delete, eq / neq / is / in / gt / gte / lt / lte / not(is null) / or(),
+ *   delete, eq / neq / is / in / gt / gte / lt / lte / not(is null) / or()
+ *   (terms: eq, gt(e), lt(e), is.null, in, ilike),
  *   order (PostgREST null ordering), limit, range, single, maybeSingle, and
  *   rpc() for functions returning a row, plus one embedded many-to-one
  *   resource (`table:fk_column(cols)` or `salespeople(cols)`). Responses are truncated to
@@ -360,6 +361,8 @@ export async function createTestDb(
           const list = val.replace(/^\(|\)$/g, "").split(",").filter(Boolean);
           return list.length ? `${c} = ANY(${this.p(list)})` : "FALSE";
         }
+        // PostgREST `ilike` (case-insensitive LIKE; the caller supplies the `%`s).
+        if (op === "ilike") return `${c} ILIKE ${this.p(val)}`;
         const ops: Record<string, string> = { eq: "=", gte: ">=", lte: "<=", gt: ">", lt: "<" };
         if (!ops[op]) throw new Error(`pglite-supabase: unsupported logic op "${op}"`);
         return `${c} ${ops[op]} ${this.p(val)}`;

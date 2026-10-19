@@ -16,6 +16,16 @@ import { useSalesperson } from "@/lib/use-salesperson";
 import { useVisibleRoster } from "@/lib/use-visible-roster";
 import { useScrollToTop } from "@/lib/use-scroll-to-top";
 import { useLivePermissions } from "@/lib/use-live-permissions";
+import {
+  IMPORT_BATCH_SIZE,
+  IMPORT_MAX_FILE_ROWS,
+  accountedRows,
+  batchCount,
+  batchSlice,
+  emptyResult,
+  mergeBatchResult,
+  type BatchResult,
+} from "@/lib/office-import-batches";
 
 import {
   Card,
@@ -226,7 +236,9 @@ const ACKNOWLEDGED_HEADERS: ReadonlySet<string> = new Set([
   "_address line 2",
 ]);
 
-const MAX_ROWS = 5_000;
+// The server accepts 5,000 rows per REQUEST; the page sends larger files as
+// consecutive batches (see src/lib/office-import-batches.ts).
+const MAX_ROWS = IMPORT_MAX_FILE_ROWS;
 const PREVIEW_LIMIT = 50;
 const SOURCE_LABEL = "Badger CSV";
 
@@ -541,24 +553,7 @@ function toApiRow(row: ParsedRow): ApiRow {
 // ---------------------------------------------------------------------------
 
 type RowReport = { row: number; reason: string };
-type ImportResult = {
-  batch_id: string | null;
-  source: string;
-  environment: string;
-  /** Rows that didn't exist before this import. */
-  created: number;
-  /** Rows that matched an existing office (same AE + dedupe key) and
-   *  had their address / coords / source updated in place. */
-  updated: number;
-  total_rows: number;
-  /** Rows the importer intentionally bypassed — validation failures,
-   *  AE not resolvable, intra-batch duplicates. Caller-fixable. */
-  skipped: RowReport[];
-  /** Rows the database rejected — constraint violation, transient
-   *  connection failure, etc. Usually retryable. */
-  errors: RowReport[];
-  warning?: string;
-};
+type ImportResult = BatchResult;
 
 /** Lightweight salesperson summary for the Default-AE picker.
  *  `is_test` drives the dynamic Environment label so admins can
@@ -681,6 +676,16 @@ export default function OfficeImportsPage() {
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
+  // Large files go out as several requests. `progress` drives the live
+  // "batch 3 of 7" label; `resume` holds everything needed to continue from
+  // the batch that failed (re-sending a finished batch is harmless — see
+  // src/lib/office-import-batches.ts — so resuming is always safe).
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [resume, setResume] = useState<{
+    nextBatch: number;
+    batchId: string | null;
+    acc: ImportResult;
+  } | null>(null);
 
   /**
    * Per-row checks memoized once per (rows, hasDefaultAe) change so
@@ -766,47 +771,71 @@ export default function OfficeImportsPage() {
     }
   }
 
-  async function handleImport() {
+  async function handleImport(
+    from: { nextBatch: number; batchId: string | null; acc: ImportResult } | null = null,
+  ) {
     if (importing || rows.length === 0 || stats.tooMany) return;
     setImporting(true);
     setResult(null);
     setResultError(null);
-    try {
-      // environment is NOT sent. The server derives each row's slice
-      // from the resolved AE (test account → "test", every other AE →
-      // "production"), so the client never has to think about it.
-      // default_salesperson_id is only sent when the picker has a
-      // value selected, so an "import from a CSV that already has AE
-      // columns" workflow doesn't get a misleading default applied.
-      const payload: {
-        source: string;
-        rows: ApiRow[];
-        default_salesperson_id?: string;
-      } = {
-        source: SOURCE_LABEL,
-        rows: rows.map(toApiRow),
-      };
-      if (defaultAeId) payload.default_salesperson_id = defaultAeId;
+    setResume(null);
 
-      const res = await apiFetch("/api/admin/offices/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | (ImportResult & { error?: string })
-        | null;
-      if (!res.ok) {
-        setResultError(data?.error ?? `Import failed (${res.status}).`);
-        return;
+    // environment is NOT sent. The server derives each row's slice
+    // from the resolved AE (test account → "test", every other AE →
+    // "production"), so the client never has to think about it.
+    // default_salesperson_id is only sent when the picker has a
+    // value selected, so an "import from a CSV that already has AE
+    // columns" workflow doesn't get a misleading default applied.
+    const apiRows = rows.map(toApiRow);
+    const total = batchCount(apiRows.length);
+    let acc = from?.acc ?? emptyResult(SOURCE_LABEL);
+    let batchId = from?.batchId ?? null;
+    let b = from?.nextBatch ?? 0;
+    try {
+      for (; b < total; b++) {
+        setProgress({ done: b, total });
+        const payload: {
+          source: string;
+          rows: ApiRow[];
+          default_salesperson_id?: string;
+          batch_id?: string;
+        } = { source: SOURCE_LABEL, rows: batchSlice(apiRows, b) };
+        if (defaultAeId) payload.default_salesperson_id = defaultAeId;
+        if (batchId) payload.batch_id = batchId;
+
+        const res = await apiFetch("/api/admin/offices/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = (await res.json().catch(() => null)) as
+          | (ImportResult & { error?: string })
+          | null;
+        if (!res.ok || !data) {
+          throw new Error(data?.error ?? `Import failed (${res.status}).`);
+        }
+        acc = mergeBatchResult(acc, data, b * IMPORT_BATCH_SIZE);
+        batchId = data.batch_id ?? batchId;
       }
-      if (data) setResult(data);
+      setResult(acc);
     } catch (err) {
-      setResultError(
-        err instanceof Error ? err.message : "Import failed unexpectedly.",
-      );
+      const msg = err instanceof Error ? err.message : "Import failed unexpectedly.";
+      if (b < total) {
+        // Everything before batch `b` is saved. Show what completed so far and
+        // offer to continue from the failed batch.
+        setResult(acc.total_rows > 0 ? acc : null);
+        setResume({ nextBatch: b, batchId, acc });
+        setResultError(
+          total > 1
+            ? `Batch ${b + 1} of ${total} failed: ${msg} The ${acc.total_rows} row${acc.total_rows === 1 ? "" : "s"} before it were saved. Resume to continue — re-sending is safe and never creates duplicates.`
+            : msg,
+        );
+      } else {
+        setResultError(msg);
+      }
     } finally {
       setImporting(false);
+      setProgress(null);
     }
   }
 
@@ -1084,8 +1113,8 @@ export default function OfficeImportsPage() {
                 role="alert"
                 className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
               >
-                CSV has {stats.total} rows — the import API caps at {MAX_ROWS}.
-                Split the file and try again.
+                CSV has {stats.total} rows — the page accepts up to{" "}
+                {MAX_ROWS.toLocaleString()}. Split the file and try again.
               </p>
             )}
 
@@ -1243,13 +1272,15 @@ export default function OfficeImportsPage() {
                 <Button
                   type="button"
                   size="sm"
-                  onClick={handleImport}
+                  onClick={() => handleImport()}
                   disabled={
                     importing || rows.length === 0 || stats.tooMany
                   }
                 >
                   {importing
-                    ? "Importing…"
+                    ? progress && progress.total > 1
+                      ? `Importing batch ${progress.done + 1} of ${progress.total}…`
+                      : "Importing…"
                     : `Import ${stats.total} row${stats.total === 1 ? "" : "s"}`}
                 </Button>
               ) : (
@@ -1284,6 +1315,18 @@ export default function OfficeImportsPage() {
                 {resultError}
               </p>
             )}
+            {resume && (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => handleImport(resume)}
+                disabled={importing}
+              >
+                {importing
+                  ? "Resuming…"
+                  : `Resume from batch ${resume.nextBatch + 1} of ${batchCount(rows.length)}`}
+              </Button>
+            )}
             {result?.warning && (
               <p
                 role="alert"
@@ -1293,7 +1336,7 @@ export default function OfficeImportsPage() {
               </p>
             )}
             {result && (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                 <SummaryStat
                   label="Created"
                   value={result.created}
@@ -1303,6 +1346,11 @@ export default function OfficeImportsPage() {
                   label="Updated"
                   value={result.updated}
                   tone="info"
+                />
+                <SummaryStat
+                  label="Unchanged"
+                  value={result.unchanged ?? 0}
+                  tone="muted"
                 />
                 <SummaryStat
                   label="Skipped"
@@ -1318,31 +1366,22 @@ export default function OfficeImportsPage() {
             )}
             {/*
               Reconciliation guard. The four-bucket invariant is
-              `created + updated + skipped + errors === total_rows`.
+              `created + updated + unchanged + skipped + errors === total_rows`.
               If those don't add up, surface it loudly so a silent
               accounting gap can't ever go unnoticed — the import is
               still authoritative for the rows it touched, but the
               admin needs to know a row went unreported.
             */}
-            {result &&
-              result.created +
-                result.updated +
-                result.skipped.length +
-                result.errors.length !==
-                result.total_rows && (
-                <p
-                  role="alert"
-                  className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                >
-                  Row accounting mismatch: server reported{" "}
-                  {result.created +
-                    result.updated +
-                    result.skipped.length +
-                    result.errors.length}{" "}
-                  of {result.total_rows} sent rows. This shouldn&apos;t
-                  happen — please report it.
-                </p>
-              )}
+            {result && !resume && accountedRows(result) !== result.total_rows && (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                Row accounting mismatch: server reported{" "}
+                {accountedRows(result)} of {result.total_rows} sent rows. This
+                shouldn&apos;t happen — please report it.
+              </p>
+            )}
             {result && result.errors.length > 0 && (
               <ResultRowsTable
                 title="Errors (database rejected these rows)"
@@ -1357,10 +1396,35 @@ export default function OfficeImportsPage() {
                 rows={result.skipped}
               />
             )}
+            {result && (result.flagged?.length ?? 0) > 0 && (
+              <ResultRowsTable
+                title="Imported with a problem (review)"
+                tone="warning"
+                rows={result.flagged ?? []}
+                total={result.flagged_total}
+              />
+            )}
+            {result && (result.conflicts?.length ?? 0) > 0 && (
+              <ResultRowsTable
+                title="Kept existing value — the file disagrees (review)"
+                tone="warning"
+                rows={(result.conflicts ?? []).map((c) => ({
+                  row: c.row,
+                  reason:
+                    c.field === "archived"
+                      ? `${c.office_name}: ${c.reason}`
+                      : `${c.office_name}: ${c.field} — stored "${c.existing ?? ""}", file "${c.incoming ?? ""}"`,
+                }))}
+                total={result.conflicts_total}
+              />
+            )}
             {result &&
+              !resume &&
               result.skipped.length === 0 &&
               result.errors.length === 0 &&
-              result.created + result.updated > 0 && (
+              (result.flagged_total ?? 0) === 0 &&
+              (result.conflicts_total ?? 0) === 0 &&
+              result.created + result.updated + (result.unchanged ?? 0) > 0 && (
                 <p className="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
                   <CheckCircle2 aria-hidden="true" className="size-4" />
                   All rows imported cleanly.
@@ -1413,10 +1477,13 @@ function ResultRowsTable({
   title,
   tone,
   rows,
+  total,
 }: {
   title: string;
   tone: "warning" | "destructive";
   rows: RowReport[];
+  /** True count when `rows` is a capped sample. */
+  total?: number;
 }) {
   const Icon = tone === "destructive" ? XCircle : AlertTriangle;
   const headingClass =
@@ -1429,7 +1496,7 @@ function ResultRowsTable({
         className={`mb-1 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${headingClass}`}
       >
         <Icon aria-hidden="true" className="size-3.5" />
-        {title} ({rows.length})
+        {title} ({total !== undefined && total > rows.length ? `${rows.length} of ${total}` : rows.length})
       </p>
       <div className="max-h-64 overflow-y-auto rounded-md border border-border">
         <table className="w-full text-xs">

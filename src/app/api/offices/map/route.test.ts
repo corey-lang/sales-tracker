@@ -21,6 +21,8 @@
  *   * last_visit_at annotation (feeds the 30/60/90/Never/Custom filters).
  *   * distance_miles is optional (null without a center; computed, but
  *     never used to filter, with one).
+ *   * Paging past PostgREST's 1,000-row response cap (the regression that
+ *     silently cut large territories to their first 1,000 offices).
  *   * The truncation backstop (MAP_ALL_RESULT_LIMIT).
  *   * Fail-closed behavior when the visit-history lookup errors.
  *
@@ -59,10 +61,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // vi.hoisted — values available inside vi.mock factories before module eval
 // ---------------------------------------------------------------------------
 
-const { mockOfficesLimit, mockVisitsIn, officeEqCalls, officeFilterCalls } =
+const { mockOfficesRange, mockVisitsRange, officeEqCalls, officeFilterCalls } =
   vi.hoisted(() => ({
-    mockOfficesLimit: vi.fn(),
-    mockVisitsIn: vi.fn(),
+    mockOfficesRange: vi.fn(),
+    mockVisitsRange: vi.fn(),
     officeEqCalls: [] as Array<[string, unknown]>,
     officeFilterCalls: [] as Array<[string, string, unknown]>,
   }));
@@ -111,14 +113,15 @@ vi.mock("@/lib/supabase/server", () => ({
           return self;
         };
         self["order"] = () => self;
-        self["limit"] = mockOfficesLimit;
+        self["range"] = mockOfficesRange;
         return self;
       }
-      // office_visits chain terminates in `in`.
+      // office_visits chain terminates in `range` (paged AE-wide read).
       const self: Record<string, unknown> = {};
       self["select"] = () => self;
       self["eq"] = () => self;
-      self["in"] = mockVisitsIn;
+      self["order"] = () => self;
+      self["range"] = mockVisitsRange;
       return self;
     },
   })),
@@ -177,7 +180,7 @@ beforeEach(() => {
   officeFilterCalls.length = 0;
   mockRequireAeToolAccess.mockResolvedValue(MOCK_ME);
   // Default: no visits logged for anything, unless a test overrides it.
-  mockVisitsIn.mockResolvedValue({ data: [], error: null });
+  mockVisitsRange.mockResolvedValue({ data: [], error: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -186,7 +189,7 @@ beforeEach(() => {
 
 describe("GET /api/offices/map", () => {
   it("scopes the offices query to the caller's own salesperson_id and environment", async () => {
-    mockOfficesLimit.mockResolvedValue({ data: [officeRow()], error: null });
+    mockOfficesRange.mockResolvedValue({ data: [officeRow()], error: null });
 
     const res = await GET(makeRequest());
 
@@ -196,7 +199,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("ignores a client-supplied salesperson_id / environment — identity is server-derived only", async () => {
-    mockOfficesLimit.mockResolvedValue({ data: [officeRow()], error: null });
+    mockOfficesRange.mockResolvedValue({ data: [officeRow()], error: null });
 
     const res = await GET(
       makeRequest("?salesperson_id=evil-id&environment=test"),
@@ -214,7 +217,7 @@ describe("GET /api/offices/map", () => {
 
   it("uses the test environment slice for the seeded test account", async () => {
     mockRequireAeToolAccess.mockResolvedValue({ ...MOCK_ME, is_test: true });
-    mockOfficesLimit.mockResolvedValue({ data: [], error: null });
+    mockOfficesRange.mockResolvedValue({ data: [], error: null });
 
     await GET(makeRequest());
 
@@ -222,7 +225,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("filters out archived offices and offices without coordinates", async () => {
-    mockOfficesLimit.mockResolvedValue({ data: [officeRow()], error: null });
+    mockOfficesRange.mockResolvedValue({ data: [officeRow()], error: null });
 
     await GET(makeRequest());
 
@@ -236,7 +239,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("returns distance_miles: null for every office when no center is supplied", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [officeRow({ id: "office-1" })],
       error: null,
     });
@@ -251,7 +254,7 @@ describe("GET /api/offices/map", () => {
   it("computes distance_miles when lat/lng are supplied, without filtering by it", async () => {
     // Deliberately far from the supplied center — must still be returned,
     // proving this route never drops offices based on distance.
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [
         officeRow({ id: "near", latitude: 40.76, longitude: -111.89 }),
         officeRow({ id: "far", latitude: 47.6, longitude: -122.33 }), // Seattle
@@ -276,7 +279,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("ignores an incomplete or invalid center instead of erroring", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [officeRow({ id: "office-1" })],
       error: null,
     });
@@ -289,11 +292,11 @@ describe("GET /api/offices/map", () => {
   });
 
   it("annotates last_visit_at with the most recent visit by the calling AE", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [officeRow({ id: "office-1" }), officeRow({ id: "office-2" })],
       error: null,
     });
-    mockVisitsIn.mockResolvedValue({
+    mockVisitsRange.mockResolvedValue({
       data: [
         { office_id: "office-1", visited_at: "2026-06-01T12:00:00.000Z" },
         { office_id: "office-1", visited_at: "2026-06-15T12:00:00.000Z" },
@@ -315,11 +318,11 @@ describe("GET /api/offices/map", () => {
   });
 
   it("fails closed (502) when the visit-history lookup errors, rather than shipping wrong last_visit_at", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [officeRow({ id: "office-1" })],
       error: null,
     });
-    mockVisitsIn.mockResolvedValue({
+    mockVisitsRange.mockResolvedValue({
       data: null,
       error: { code: "500", message: "boom" },
     });
@@ -330,7 +333,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("returns a sanitized 500 when the offices query itself fails", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: null,
       error: { code: "500", message: "raw db detail should not leak" },
     });
@@ -342,11 +345,68 @@ describe("GET /api/offices/map", () => {
     expect(JSON.stringify(body)).not.toContain("raw db detail");
   });
 
+  /** Emulates PostgREST: every response is clamped to 1,000 rows, whatever
+   *  range the caller asked for, with no truncation signal. */
+  function emulatePostgrest(rows: unknown[]) {
+    mockOfficesRange.mockImplementation((from: number, to: number) =>
+      Promise.resolve({
+        data: rows.slice(from, Math.min(to + 1, from + 1000)),
+        error: null,
+      }),
+    );
+  }
+
+  it("returns EVERY office for a territory larger than PostgREST's 1,000-row response cap", async () => {
+    const rows = Array.from({ length: 6_400 }, (_, i) =>
+      officeRow({ id: `office-${i}`, name: `Office ${i}` }),
+    );
+    emulatePostgrest(rows);
+
+    const res = await GET(makeRequest());
+    const body = await res.json();
+
+    expect(body.offices).toHaveLength(6_400);
+    expect(body.total).toBe(6_400);
+    expect(body.truncated).toBe(false);
+    // No office is dropped or duplicated across page boundaries.
+    expect(new Set(body.offices.map((o: { id: string }) => o.id)).size).toBe(
+      6_400,
+    );
+  });
+
+  it("annotates last_visit_at for offices beyond the first page of results", async () => {
+    const rows = Array.from({ length: 2_500 }, (_, i) =>
+      officeRow({ id: `office-${i}` }),
+    );
+    emulatePostgrest(rows);
+    mockVisitsRange.mockResolvedValue({
+      data: [{ office_id: "office-2400", visited_at: "2026-07-01T12:00:00.000Z" }],
+      error: null,
+    });
+
+    const res = await GET(makeRequest());
+    const body = await res.json();
+
+    const o = body.offices.find((x: { id: string }) => x.id === "office-2400");
+    expect(o.last_visit_at).toBe("2026-07-01T12:00:00.000Z");
+  });
+
+  it("makes one AE-scoped visits read, not one query per 200 offices", async () => {
+    const rows = Array.from({ length: 3_000 }, (_, i) =>
+      officeRow({ id: `office-${i}` }),
+    );
+    emulatePostgrest(rows);
+
+    await GET(makeRequest());
+
+    expect(mockVisitsRange).toHaveBeenCalledTimes(1);
+  });
+
   it("caps results at MAP_ALL_RESULT_LIMIT and flags truncation instead of silently dropping offices", async () => {
     const rows = Array.from({ length: MAP_ALL_RESULT_LIMIT + 1 }, (_, i) =>
       officeRow({ id: `office-${i}`, name: `Office ${i}` }),
     );
-    mockOfficesLimit.mockResolvedValue({ data: rows, error: null });
+    emulatePostgrest(rows);
 
     const res = await GET(makeRequest());
     const body = await res.json();
@@ -357,7 +417,7 @@ describe("GET /api/offices/map", () => {
   });
 
   it("reports truncated: false when the result set is under the cap", async () => {
-    mockOfficesLimit.mockResolvedValue({
+    mockOfficesRange.mockResolvedValue({
       data: [officeRow({ id: "office-1" })],
       error: null,
     });

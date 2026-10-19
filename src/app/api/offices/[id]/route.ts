@@ -12,6 +12,7 @@ import {
 } from "@/lib/server/auth";
 import {
   buildOfficeDedupeKey,
+  validateCoordinatePair,
   officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
@@ -346,6 +347,18 @@ const PatchSchema = z
     // Contact.
     office_phone: z.string().trim().max(OFFICE_PHONE_MAX).nullable().optional(),
     office_email: z.string().trim().max(OFFICE_EMAIL_MAX).nullable().optional(),
+  })
+  .superRefine((body, ctx) => {
+    // Coordinates move as a complete, valid WGS84 pair (or are cleared
+    // together with two nulls) — a lone latitude/longitude is rejected.
+    if (body.latitude === undefined && body.longitude === undefined) return;
+    const pair = validateCoordinatePair(
+      body.latitude ?? null,
+      body.longitude ?? null,
+    );
+    if (!pair.ok) {
+      ctx.addIssue({ code: "custom", message: pair.reason, path: ["latitude"] });
+    }
   })
   .refine(
     (body) =>

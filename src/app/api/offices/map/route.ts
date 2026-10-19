@@ -10,6 +10,7 @@ import {
   type OfficeMapItem,
 } from "@/lib/offices";
 import { haversineMiles } from "@/lib/geo";
+import { selectAllPages } from "@/lib/server/paginate";
 
 // GET /api/offices/map?lat=<optional>&lng=<optional>
 //
@@ -35,12 +36,19 @@ import { haversineMiles } from "@/lib/geo";
 //   * latitude/longitude IS NOT NULL — offices without coordinates can't be
 //     placed on a map. They remain visible in the List view.
 //
+// PAGING
+//   PostgREST silently clamps every response to 1,000 rows (Supabase's
+//   max-rows), whatever `.limit()` asks for — so a single query can never
+//   return more than 1,000 offices and gives NO signal that it truncated.
+//   Both reads below therefore page to completion (selectAllPages). The
+//   offices read orders by (name, id) so pages are deterministic and the
+//   Map keeps its alphabetical order.
+//
 // CAP
-//   MAP_ALL_RESULT_LIMIT (2,000) is a generous backstop, not a working
+//   MAP_ALL_RESULT_LIMIT (10,000) is a generous backstop, not a working
 //   limit — this endpoint's entire point is "load everything assigned."
-//   Hitting it would be an anomaly for an 11-person team; it's logged
-//   loudly and flagged via `truncated` rather than silently dropping
-//   offices from the map.
+//   Hitting it would be an anomaly; it's logged loudly and flagged via
+//   `truncated` rather than silently dropping offices from the map.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,11 +88,6 @@ type OfficeMapRow = {
   next_action_due_date: string | null;
 };
 
-/** Chunk size for the visits IN() lookup. Mirrors /api/offices' rationale:
- *  200 UUIDs (~7.5KB) stays well under proxy header/URL budgets (Cloudflare
- *  ~8KB headers, Vercel ~16KB total) even at this route's larger scale. */
-const VISITS_IN_CHUNK = 200;
-
 export async function GET(req: Request) {
   try {
     const me = await requireAeToolAccess(req);
@@ -94,20 +97,22 @@ export async function GET(req: Request) {
     const supabase = getServerSupabase();
 
     // Every assigned, non-archived, mappable office — no distance filter.
-    // Fetch one row past the cap so `truncated` can be computed without a
-    // separate COUNT query.
-    const officesRes = await supabase
-      .from(OFFICES_TABLE)
-      .select(
-        "id, name, street, city, state, zip, latitude, longitude, next_action, next_action_due_date",
-      )
-      .eq("salesperson_id", me.id)
-      .eq("environment", environment)
-      .is("archived_at", null)
-      .not("latitude", "is", null)
-      .not("longitude", "is", null)
-      .order("name", { ascending: true })
-      .limit(MAP_ALL_RESULT_LIMIT + 1);
+    // Paged to completion (see PAGING above); sliced to the cap afterwards
+    // so `truncated` can be computed without a separate COUNT query.
+    const officesRes = await selectAllPages<OfficeMapRow>(() =>
+      supabase
+        .from(OFFICES_TABLE)
+        .select(
+          "id, name, street, city, state, zip, latitude, longitude, next_action, next_action_due_date",
+        )
+        .eq("salesperson_id", me.id)
+        .eq("environment", environment)
+        .is("archived_at", null)
+        .not("latitude", "is", null)
+        .not("longitude", "is", null)
+        .order("name", { ascending: true })
+        .order("id", { ascending: true }),
+    );
 
     if (officesRes.error) {
       console.warn(
@@ -116,7 +121,7 @@ export async function GET(req: Request) {
       throw new ApiError(500, "Could not load your offices.");
     }
 
-    const allRows = (officesRes.data ?? []) as OfficeMapRow[];
+    const allRows = officesRes.data;
     const truncated = allRows.length > MAP_ALL_RESULT_LIMIT;
     if (truncated) {
       console.warn(
@@ -129,49 +134,54 @@ export async function GET(req: Request) {
     // CLOSED, same rationale as /api/offices/nearby: this feeds the
     // 30/60/90/Never/Custom visit-age filters directly, so a silent
     // last_visit_at=null on failure would make every office look "never
-    // visited" — wrong, not just degraded. Chunked IN() so a large
-    // territory can't overflow the proxy's header/URL budget.
+    // visited" — wrong, not just degraded.
+    //
+    // ONE AE-scoped read, paged — NOT an `.in(office_id, …)` per 200 offices.
+    // An AE's visit log is small next to their office set, so for a
+    // multi-thousand-office territory this is a couple of requests instead
+    // of dozens of sequential round trips on every Map open. Visits for
+    // offices not on the map (archived / no coordinates) are simply ignored
+    // by the lookup below.
     const lastByOffice = new Map<string, string>();
     if (rows.length > 0) {
-      const ids = rows.map((o) => o.id);
-      for (let i = 0; i < ids.length; i += VISITS_IN_CHUNK) {
-        const chunk = ids.slice(i, i + VISITS_IN_CHUNK);
-        const chunkStartedAt = Date.now();
-        let visitsRes;
-        try {
-          visitsRes = await supabase
+      const visitsStartedAt = Date.now();
+      let visitsRes;
+      try {
+        visitsRes = await selectAllPages<{
+          office_id: string;
+          visited_at: string;
+        }>(() =>
+          supabase
             .from(OFFICE_VISITS_TABLE)
             .select("office_id, visited_at")
             .eq("salesperson_id", me.id)
             .eq("environment", environment)
-            .in("office_id", chunk);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(
-            `[offices-map] visits chunk threw ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} err=${msg}`,
-          );
-          throw new ApiError(
-            502,
-            "Couldn't load office visit history. Map filters are unavailable right now.",
-          );
-        }
-        if (visitsRes.error) {
-          console.warn(
-            `[offices-map] visits chunk failed ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
-          );
-          throw new ApiError(
-            502,
-            "Couldn't load office visit history. Map filters are unavailable right now.",
-          );
-        }
-        for (const v of (visitsRes.data ?? []) as Array<{
-          office_id: string;
-          visited_at: string;
-        }>) {
-          const existing = lastByOffice.get(v.office_id);
-          if (!existing || v.visited_at > existing) {
-            lastByOffice.set(v.office_id, v.visited_at);
-          }
+            .order("visited_at", { ascending: false })
+            .order("id", { ascending: true }),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[offices-map] visits read threw ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
+        );
+        throw new ApiError(
+          502,
+          "Couldn't load office visit history. Map filters are unavailable right now.",
+        );
+      }
+      if (visitsRes.error) {
+        console.warn(
+          `[offices-map] visits read failed ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        );
+        throw new ApiError(
+          502,
+          "Couldn't load office visit history. Map filters are unavailable right now.",
+        );
+      }
+      for (const v of visitsRes.data) {
+        const existing = lastByOffice.get(v.office_id);
+        if (!existing || v.visited_at > existing) {
+          lastByOffice.set(v.office_id, v.visited_at);
         }
       }
     }

@@ -322,14 +322,14 @@ export type OfficeMapPinItem = {
 export type OfficeMapItem = OfficeMapPinItem;
 
 /**
- * Hard cap on rows returned by /api/offices/map. Generous relative to any
- * realistic per-AE territory (a team this size tops out at a few thousand
- * offices) — this endpoint's whole point is "load everything assigned," so
- * the cap is an anomaly backstop, not a working limit. Matches the
- * OFFICE_LIST_QUERY_LIMIT order of magnitude used elsewhere for the same
- * reason.
+ * Hard cap on rows returned by /api/offices/map. This endpoint's whole point
+ * is "load everything assigned," so the cap is an anomaly backstop, not a
+ * working limit. It sits above the largest territory we load today (a
+ * ~6,400-office San Antonio import). The route pages through PostgREST's
+ * 1,000-row response cap to reach it — a single `.limit()` above 1,000 is
+ * silently truncated server-side and never reaches this number.
  */
-export const MAP_ALL_RESULT_LIMIT = 2_000;
+export const MAP_ALL_RESULT_LIMIT = 10_000;
 
 /**
  * Hard cap on rows returned to the office-list UI. The DB query fetches
@@ -342,14 +342,13 @@ export const MAP_ALL_RESULT_LIMIT = 2_000;
 export const OFFICE_LIST_LIMIT = 200;
 
 /**
- * Pre-sort cap on rows pulled from `offices` before the JS sort runs.
- * Larger than OFFICE_LIST_LIMIT so the top-200 returned to the UI is
- * picked from a representative sample of the AE's full office set,
- * not just whichever 200 happened to come back alphabetically. For a
- * 2,000-row per-AE office set this returns the full set; for larger
- * sets the alphabetical DB-side order is good enough as a pre-filter.
+ * Pre-sort cap on rows pulled from `offices` for the alphabetical window.
+ * Pinned to PostgREST's 1,000-row response cap (the real effective limit —
+ * a larger `.limit()` is silently clamped) so `truncated` is honest. The
+ * list route additionally fetches every VISITED office outside this window,
+ * so "visited first" holds for an AE whose territory exceeds it.
  */
-export const OFFICE_LIST_QUERY_LIMIT = 2_000;
+export const OFFICE_LIST_QUERY_LIMIT = 1_000;
 
 /**
  * Normalizes a string for dedupe-key composition: lowercase, collapse
@@ -357,7 +356,7 @@ export const OFFICE_LIST_QUERY_LIMIT = 2_000;
  * and "12 main st suite 4" both produce "12 main st suite 4" so they
  * dedupe against each other.
  */
-function normalizeForDedupe(value: string | null | undefined): string {
+export function normalizeForDedupe(value: string | null | undefined): string {
   if (typeof value !== "string") return "";
   return value
     .toLowerCase()
@@ -571,3 +570,71 @@ export function buildOfficeRouteUrl(
     (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : "");
   return { url };
 }
+
+
+// ---------------------------------------------------------------------------
+// Coordinate validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates a latitude/longitude pair as WGS84 degrees.
+ *
+ *   * Both missing (null / undefined) is VALID — an office without coordinates
+ *     is fine; it simply isn't placed on the Map (it stays in List + search).
+ *   * A pair must be complete: one half without the other is rejected, since a
+ *     lone latitude can never be placed on a map and usually signals a broken
+ *     column mapping.
+ *   * Each half must be a finite number in range (lat -90..90, lng -180..180).
+ *   * (0, 0) is rejected. It is the classic "geocoder failed" placeholder
+ *     ("Null Island" in the Gulf of Guinea) and is never a real office.
+ *
+ * Callers decide the policy for an invalid pair: the bulk importer drops the
+ * coordinates and flags the row (the office itself still imports); the
+ * add/edit routes reject the request.
+ */
+export function validateCoordinatePair(
+  latitude: unknown,
+  longitude: unknown,
+):
+  | { ok: true; latitude: number | null; longitude: number | null }
+  | { ok: false; reason: string } {
+  const missing = (v: unknown) => v === null || v === undefined;
+  if (missing(latitude) && missing(longitude)) {
+    return { ok: true, latitude: null, longitude: null };
+  }
+  if (missing(latitude) || missing(longitude)) {
+    return {
+      ok: false,
+      reason: "Latitude and longitude must be supplied together.",
+    };
+  }
+  if (
+    typeof latitude !== "number" ||
+    typeof longitude !== "number" ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude)
+  ) {
+    return { ok: false, reason: "Latitude and longitude must be numbers." };
+  }
+  if (latitude < -90 || latitude > 90) {
+    return { ok: false, reason: "Latitude must be between -90 and 90." };
+  }
+  if (longitude < -180 || longitude > 180) {
+    return { ok: false, reason: "Longitude must be between -180 and 180." };
+  }
+  if (latitude === 0 && longitude === 0) {
+    return {
+      ok: false,
+      reason: "Coordinates 0,0 are a geocoder placeholder, not a location.",
+    };
+  }
+  return { ok: true, latitude, longitude };
+}
+
+/**
+ * A re-import whose coordinates differ from a stored office's by more than
+ * this is treated as a CONFLICT (flagged for review, stored value kept), not a
+ * silent move. ~160 m: comfortably larger than geocoder jitter for the same
+ * address, far smaller than "a different building."
+ */
+export const COORDINATE_CONFLICT_MILES = 0.1;

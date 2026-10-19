@@ -12,11 +12,15 @@ import {
   Popup,
   TileLayer,
   useMap,
+  useMapEvents,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { formatActivityStamp } from "@/lib/dates";
+import { OfficeStackList } from "@/components/office-stack-list";
+import { clusterForView, padBounds, type PinGroup } from "@/lib/map-cluster";
+import { addressLine, formatDueDate, mapsUrlFor } from "@/lib/office-map-display";
 import type { OfficeMapPinItem, OfficeMapScope } from "@/lib/offices";
 
 // ---------------------------------------------------------------------------
@@ -80,6 +84,140 @@ function renderPinHtml(variant: PinVariant): string {
 // ---------------------------------------------------------------------------
 // Lasso (freehand area select)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Clustering (large territories) + stacks (offices sharing one address)
+//
+// Pure grouping logic lives in src/lib/map-cluster.ts. This section is the
+// Leaflet glue: it tracks the visible viewport, asks that module what to draw,
+// and renders count bubbles. Territories at or under CLUSTER_MIN_ITEMS pins
+// render exactly as before — individual pins — except that offices sharing the
+// same coordinates collapse into one tappable stack so none is hidden.
+// ---------------------------------------------------------------------------
+
+type MapView = {
+  zoom: number;
+  bounds: { south: number; west: number; north: number; east: number };
+};
+
+function readView(map: L.Map): MapView {
+  const b = map.getBounds();
+  return {
+    zoom: map.getZoom(),
+    bounds: {
+      south: b.getSouth(),
+      west: b.getWest(),
+      north: b.getNorth(),
+      east: b.getEast(),
+    },
+  };
+}
+
+/** Bubble for a cluster / stack. Orange like the pins; green when it holds an
+ *  office already chosen for the route; sized by how many offices it holds. */
+function buildGroupIcon(count: number, hasSelected: boolean): L.DivIcon {
+  const size = count < 10 ? 34 : count < 100 ? 40 : count < 1000 ? 46 : 52;
+  const fill = hasSelected ? "#16a34a" : "#ff7a00";
+  const label = count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
+  return L.divIcon({
+    className: "nearby-office-cluster",
+    html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${fill};color:#fff;border:3px solid rgba(255,255,255,0.95);box-shadow:0 1px 4px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;font:600 ${size > 40 ? 14 : 13}px/1 system-ui,sans-serif;">${label}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -size / 2],
+  });
+}
+
+/** Icons are keyed by (count, selected) — thousands of bubbles share a few
+ *  dozen distinct icons, so build each once. Module scope: this file is only
+ *  ever loaded client-side (next/dynamic ssr:false). */
+const groupIconCache = new Map<string, L.DivIcon>();
+function cachedGroupIcon(count: number, hasSelected: boolean): L.DivIcon {
+  const key = `${count}:${hasSelected}`;
+  let icon = groupIconCache.get(key);
+  if (!icon) {
+    icon = buildGroupIcon(count, hasSelected);
+    groupIconCache.set(key, icon);
+  }
+  return icon;
+}
+
+/**
+ * Draws the office pins for the current viewport. Lives inside <MapContainer>
+ * so it can follow pan/zoom; only the pins in (padded) view are mounted, which
+ * is what keeps a multi-thousand-office territory responsive on a phone.
+ */
+function ClusteredPins({
+  items,
+  selectedIds,
+  renderSingle,
+  renderStack,
+}: {
+  items: OfficeMapPinItem[];
+  selectedIds?: ReadonlySet<string>;
+  renderSingle: (item: OfficeMapPinItem) => React.ReactNode;
+  renderStack: (items: OfficeMapPinItem[]) => React.ReactNode;
+}) {
+  const map = useMap();
+  const [view, setView] = useState<MapView>(() => readView(map));
+  useMapEvents({
+    moveend: () => setView(readView(map)),
+    zoomend: () => setView(readView(map)),
+    resize: () => setView(readView(map)),
+  });
+
+  const result = useMemo(
+    () =>
+      clusterForView(items, {
+        zoom: view.zoom,
+        // 25% padding each side so pins just off-screen are already mounted
+        // when the user pans.
+        bounds: padBounds(view.bounds, 0.25),
+      }),
+    [items, view],
+  );
+
+  const groupIcon = (g: PinGroup<OfficeMapPinItem>) =>
+    cachedGroupIcon(
+      g.items.length,
+      g.items.some((i) => selectedIds?.has(i.id)),
+    );
+
+  return (
+    <>
+      {result.groups.map((g) =>
+        g.colocated ? (
+          <Marker
+            key={g.key}
+            position={[g.latitude, g.longitude]}
+            icon={groupIcon(g)}
+          >
+            <Popup maxWidth={300} minWidth={260}>
+              {renderStack(g.items)}
+            </Popup>
+          </Marker>
+        ) : (
+          <Marker
+            key={g.key}
+            position={[g.latitude, g.longitude]}
+            icon={groupIcon(g)}
+            eventHandlers={{
+              click: () =>
+                map.fitBounds(
+                  [
+                    [g.bounds.south, g.bounds.west],
+                    [g.bounds.north, g.bounds.east],
+                  ],
+                  { padding: [48, 48], maxZoom: 18 },
+                ),
+            }}
+          />
+        ),
+      )}
+      {result.singles.map((item) => renderSingle(item))}
+    </>
+  );
+}
 
 type ScreenPoint = { x: number; y: number };
 
@@ -279,48 +417,10 @@ function MapResizer() {
   return null;
 }
 
-/** YYYY-MM-DD → "Jun 5, 2026" — local-TZ safe (no `new Date(str)`
- *  TZ-shift). Mirrors the helper in the page module. */
-function formatDueDate(value: string | null): string | null {
-  if (!value) return null;
-  const [yStr, mStr, dStr] = value.split("-");
-  const y = Number(yStr);
-  const m = Number(mStr);
-  const d = Number(dStr);
-  if (!y || !m || !d) return null;
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
 /** Compact mile distance string. Mirrors the page helper. */
 function formatDistance(miles: number): string {
   if (miles < 10) return `${miles.toFixed(1)} mi`;
   return `${Math.round(miles)} mi`;
-}
-
-/** Builds a Google Maps URL for an office row. Mirrors the page
- *  helper so the Map view's Directions button behaves identically. */
-function mapsUrlFor(item: OfficeMapPinItem): string | null {
-  const address = [
-    item.street,
-    [item.city, item.state].filter(Boolean).join(", "),
-    item.zip,
-  ]
-    .map((p) => (p ?? "").trim())
-    .filter((p) => p.length > 0)
-    .join(", ");
-  if (address.length > 0) {
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-      `${item.name} ${address}`,
-    )}`;
-  }
-  if (Number.isFinite(item.latitude) && Number.isFinite(item.longitude)) {
-    return `https://www.google.com/maps/search/?api=1&query=${item.latitude},${item.longitude}`;
-  }
-  return null;
 }
 
 export type NearbyOfficesMapProps = {
@@ -487,7 +587,23 @@ export default function NearbyOfficesMap({
 
         {/* Office pins. Tap a pin → branded popup with the same
             actions the List view's card row carries. */}
-        {items.map((item) => {
+        <ClusteredPins
+          items={items}
+          selectedIds={selectedIds}
+          renderStack={(stackItems) => (
+            <OfficeStackList
+              items={stackItems}
+              selectedIds={selectedIds}
+              onToggleSelect={onToggleSelect}
+              loggingId={loggingId}
+              logNoticeById={logNoticeById}
+              logErrorById={logErrorById}
+              isLogDisabled={isLogDisabled}
+              onLogVisit={onLogVisit}
+              onLogVisitWithNote={onLogVisitWithNote}
+            />
+          )}
+          renderSingle={(item) => {
           const selected = selectedIds?.has(item.id) ?? false;
           const variant = pinVariantFor(item, selected);
           const mapsHref = mapsUrlFor(item);
@@ -515,6 +631,11 @@ export default function NearbyOfficesMap({
                       </span>
                     )}
                   </div>
+                  {addressLine(item) && (
+                    <p className="text-xs text-slate-600">
+                      {addressLine(item)}
+                    </p>
+                  )}
                   {item.last_visit_at ? (
                     <p className="text-[11px] text-slate-600">
                       Last visit{" "}
@@ -631,7 +752,8 @@ export default function NearbyOfficesMap({
               </Popup>
             </Marker>
           );
-        })}
+          }}
+        />
 
         <MapRecenter
           center={[center.lat, center.lng]}

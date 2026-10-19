@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getServerSupabase } from "@/lib/supabase/server";
+import { selectAllPages, selectAllPagesForIds } from "@/lib/server/paginate";
 import {
   ApiError,
   badRequest,
@@ -10,6 +11,7 @@ import {
 } from "@/lib/server/auth";
 import {
   buildOfficeDedupeKey,
+  validateCoordinatePair,
   officeEnvironmentFor,
   OFFICES_TABLE,
   OFFICE_VISITS_TABLE,
@@ -52,19 +54,22 @@ import {
 //   1. Visited offices first, most-recently-visited at top.
 //   2. Then never-visited offices, alphabetical by name.
 //
-//   The DB pre-fetches alphabetically and the JS sort promotes
-//   visited rows to the top. Doing the sort in JS avoids needing a
-//   denormalized `last_visited_at` column on `offices` (which would
-//   need a trigger + backfill migration); for a 2,000-row per-AE
-//   office set the in-process aggregation is cheap.
+//   The DB pre-fetches an alphabetical window (PostgREST clamps every
+//   response to 1,000 rows, so that is the real window size) and the JS
+//   sort promotes visited rows to the top. Every VISITED office outside
+//   that window is fetched separately and merged in, so "visited first"
+//   holds even when an AE's territory is far larger than the window.
+//   Doing the sort in JS avoids needing a denormalized `last_visited_at`
+//   column on `offices` (which would need a trigger + backfill migration).
 //
 // RESPONSE
 //   * `offices`        — up to OFFICE_LIST_LIMIT items (200), sorted.
 //   * `total_matched`  — total rows that passed the filter before the
 //                        OFFICE_LIST_LIMIT slice, so the UI can show
 //                        "200+ matches — refine your search."
-//   * `truncated`      — true when more rows existed than the DB
-//                        query pulled (>= OFFICE_LIST_QUERY_LIMIT).
+//   * `truncated`      — true when the alphabetical window was full
+//                        (>= OFFICE_LIST_QUERY_LIMIT), i.e. more
+//                        never-visited rows may exist than were pulled.
 //                        Hint to the UI that an even broader sort
 //                        across the AE's full office set would need
 //                        a tighter search.
@@ -144,35 +149,40 @@ export async function GET(req: Request) {
 
     const supabase = getServerSupabase();
 
+    const OFFICE_SELECT =
+      "id, name, street, city, state, zip, next_action, next_action_due_date";
+
+    // Search predicate shared by the alphabetical window and the visited-
+    // offices merge below, so a visited office only surfaces when it matches.
+    //
+    // PostgREST `or` filter expects an unquoted list of
+    // `column.op.value` pairs separated by commas. The value is
+    // already sanitized above, so the only metacharacter we have to
+    // be careful with is `%` — we want literal-`%` stripped (handled
+    // by sanitizeSearchTerm) and our own leading/trailing `%`
+    // wildcards added here.
+    const searchOr =
+      cleanQ.length > 0
+        ? `name.ilike.%${cleanQ}%,city.ilike.%${cleanQ}%,zip.ilike.%${cleanQ}%`
+        : null;
+
     // Base query: this AE's offices in their slice (production for
     // real AEs, test for the test account — derived per-caller by
     // officeEnvironmentFor so test data never bleeds into production
-    // AEs' lists and vice-versa). Alphabetical pre-fetch.
+    // AEs' lists and vice-versa). Alphabetical pre-fetch window.
     // Archived offices (`archived_at IS NOT NULL`) are excluded so a
     // soft-deleted row disappears from the List view immediately.
     let officeQuery = supabase
       .from(OFFICES_TABLE)
-      .select(
-        "id, name, street, city, state, zip, next_action, next_action_due_date",
-      )
+      .select(OFFICE_SELECT)
       .eq("salesperson_id", me.id)
       .eq("environment", environment)
       .is("archived_at", null)
       .order("name", { ascending: true })
+      .order("id", { ascending: true })
       .limit(OFFICE_LIST_QUERY_LIMIT);
 
-    if (cleanQ.length > 0) {
-      // PostgREST `or` filter expects an unquoted list of
-      // `column.op.value` pairs separated by commas. The value is
-      // already sanitized above, so the only metacharacter we have to
-      // be careful with is `%` — we want literal-`%` stripped (handled
-      // by sanitizeSearchTerm) and our own leading/trailing `%`
-      // wildcards added here.
-      const needle = `%${cleanQ}%`;
-      officeQuery = officeQuery.or(
-        `name.ilike.${needle},city.ilike.${needle},zip.ilike.${needle}`,
-      );
-    }
+    if (searchOr) officeQuery = officeQuery.or(searchOr);
 
     const officesRes = await officeQuery;
 
@@ -183,75 +193,108 @@ export async function GET(req: Request) {
       throw new ApiError(500, "Could not load offices.");
     }
 
-    const offices = (officesRes.data ?? []) as OfficeBaseRow[];
+    const windowOffices = (officesRes.data ?? []) as OfficeBaseRow[];
 
     // Visit-aggregate pass. Keyed by office_id, accumulates per-AE
     // count + most-recent visited_at. Scoped to this AE + env so a
     // future shared-office model can't contaminate the personal sort.
     //
-    // CHUNKED IN(): for an AE with thousands of imported offices
-    // (Chanel/Hilary post-rollout), passing every office_id in a
-    // single `.in(...)` clause builds a multi-tens-of-KB query
-    // string that overflows the upstream proxy's URL/header budget
-    // (Cloudflare ~8KB headers, Vercel ~16KB total) and surfaces as
-    // a request error long before Postgres sees it. Chunking keeps
-    // each request small and lets the visit map merge across pages.
+    // ONE AE-scoped, paged read — not an `.in(office_id, …)` per 200
+    // offices. For an AE with thousands of imported offices that was dozens
+    // of sequential round trips per page load (and, before this was paged,
+    // each IN() chunk also risked the proxy's URL/header budget). An AE's
+    // visit log is small next to their office set, so this is a couple of
+    // requests. Visits for offices outside the result set are harmless:
+    // the lookup below is keyed by office id.
     //
     // NON-FATAL: a failure here used to 500 the entire list page
     // — misleading copy ("Could not load visit history.") for what
-    // is really a sort-degradation. We now log + skip the failing
-    // chunk and continue. Worst case the list renders without the
-    // "visited first" promotion for offices in the failed chunk,
-    // which matches the same office_set's fresh-import baseline
-    // (never-visited rows sort alphabetical) and never blocks the
-    // page from loading.
+    // is really a sort-degradation. We log and continue with an empty map.
+    // Worst case the list renders without the "visited first" promotion,
+    // which matches a fresh-import baseline (never-visited rows sort
+    // alphabetical) and never blocks the page from loading.
     const visitMap = new Map<string, { last: string; count: number }>();
-    if (offices.length > 0) {
-      const officeIds = offices.map((o) => o.id);
-      // 200 UUIDs (~37 chars each + commas) ≈ 7.5KB query — well
-      // under the conservative 8KB header floor and small enough
-      // to keep request latency steady.
-      const VISITS_IN_CHUNK = 200;
-      for (let i = 0; i < officeIds.length; i += VISITS_IN_CHUNK) {
-        const chunk = officeIds.slice(i, i + VISITS_IN_CHUNK);
-        const chunkStartedAt = Date.now();
-        try {
-          const visitsRes = await supabase
-            .from(OFFICE_VISITS_TABLE)
-            .select("office_id, visited_at")
-            .eq("salesperson_id", me.id)
-            .eq("environment", environment)
-            .in("office_id", chunk);
-
-          if (visitsRes.error) {
-            console.warn(
-              `[office-list] visits chunk failed ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
-            );
+    const visitsStartedAt = Date.now();
+    try {
+      const visitsRes = await selectAllPages<VisitTimestampRow>(() =>
+        supabase
+          .from(OFFICE_VISITS_TABLE)
+          .select("office_id, visited_at")
+          .eq("salesperson_id", me.id)
+          .eq("environment", environment)
+          .order("visited_at", { ascending: false })
+          .order("id", { ascending: true }),
+      );
+      if (visitsRes.error) {
+        console.warn(
+          `[office-list] visits read failed ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} code=${visitsRes.error.code ?? "?"} msg=${visitsRes.error.message}`,
+        );
+      } else {
+        for (const v of visitsRes.data) {
+          const existing = visitMap.get(v.office_id);
+          if (!existing) {
+            visitMap.set(v.office_id, { last: v.visited_at, count: 1 });
             continue;
           }
-
-          for (const v of (visitsRes.data ?? []) as VisitTimestampRow[]) {
-            const existing = visitMap.get(v.office_id);
-            if (!existing) {
-              visitMap.set(v.office_id, { last: v.visited_at, count: 1 });
-              continue;
-            }
-            existing.count += 1;
-            // ISO 8601 sorts lexically — comparing strings is
-            // correct and avoids the cost of Date construction per
-            // visit.
-            if (v.visited_at > existing.last) existing.last = v.visited_at;
-          }
-        } catch (err) {
-          // Thrown exceptions (network/timeout/aborted fetch) land
-          // here — same degradation as the row-error path.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(
-            `[office-list] visits chunk threw ae=${me.id} chunk_start=${i} chunk_size=${chunk.length} elapsed_ms=${Date.now() - chunkStartedAt} err=${msg}`,
-          );
+          existing.count += 1;
+          // ISO 8601 sorts lexically — comparing strings is
+          // correct and avoids the cost of Date construction per
+          // visit.
+          if (v.visited_at > existing.last) existing.last = v.visited_at;
         }
       }
+    } catch (err) {
+      // Thrown exceptions (network/timeout/aborted fetch) land
+      // here — same degradation as the row-error path.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[office-list] visits read threw ae=${me.id} elapsed_ms=${Date.now() - visitsStartedAt} err=${msg}`,
+      );
     }
+
+    // Visited offices that fall OUTSIDE the alphabetical window. Without
+    // this, once an AE's territory exceeds the window a freshly visited
+    // office near the end of the alphabet would never reach the top of the
+    // list. Same scope + archived filter + search predicate as the window.
+    // NON-FATAL for the same reason as the visits read above.
+    const inWindow = new Set(windowOffices.map((o) => o.id));
+    const missingVisitedIds = Array.from(visitMap.keys()).filter(
+      (id) => !inWindow.has(id),
+    );
+    let visitedExtras: OfficeBaseRow[] = [];
+    if (missingVisitedIds.length > 0) {
+      try {
+        const extraRes = await selectAllPagesForIds<OfficeBaseRow>(
+          missingVisitedIds,
+          (chunk) => {
+            let q = supabase
+              .from(OFFICES_TABLE)
+              .select(OFFICE_SELECT)
+              .eq("salesperson_id", me.id)
+              .eq("environment", environment)
+              .is("archived_at", null)
+              .in("id", chunk)
+              .order("id", { ascending: true });
+            if (searchOr) q = q.or(searchOr);
+            return q;
+          },
+        );
+        if (extraRes.error) {
+          console.warn(
+            `[office-list] visited-offices merge failed ae=${me.id} code=${extraRes.error.code ?? "?"} msg=${extraRes.error.message}`,
+          );
+        } else {
+          visitedExtras = extraRes.data;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[office-list] visited-offices merge threw ae=${me.id} err=${msg}`,
+        );
+      }
+    }
+
+    const offices = [...windowOffices, ...visitedExtras];
 
     const items: OfficeListItem[] = offices.map((o) => {
       const v = visitMap.get(o.id);
@@ -285,7 +328,7 @@ export async function GET(req: Request) {
     });
 
     const trimmed = items.slice(0, OFFICE_LIST_LIMIT);
-    const truncated = offices.length >= OFFICE_LIST_QUERY_LIMIT;
+    const truncated = windowOffices.length >= OFFICE_LIST_QUERY_LIMIT;
 
     return Response.json(
       {
@@ -388,6 +431,12 @@ const CreateOfficeSchema = z.object({
   office_notes: OPTIONAL_TEXT(10_000),
   next_action: OPTIONAL_TEXT(2_000),
   next_action_due_date: OPTIONAL_DUE_DATE,
+}).superRefine((body, ctx) => {
+  // Coordinates are a complete, valid WGS84 pair or absent — never half.
+  const pair = validateCoordinatePair(body.latitude, body.longitude);
+  if (!pair.ok) {
+    ctx.addIssue({ code: "custom", message: pair.reason, path: ["latitude"] });
+  }
 });
 
 const NEW_OFFICE_COLUMNS =
