@@ -13,6 +13,7 @@ import {
   weeklyTargetsFrom,
   type WeeklyGoal,
 } from "@/lib/goals";
+import { isRosteredDuring } from "@/lib/roster-window";
 import { weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
 import {
@@ -58,18 +59,6 @@ export type ActivityReportRow = {
 /** A user-safe error for any underlying data-read failure. Raw provider
  *  messages are logged server-side, never returned. */
 const REPORT_READ_ERROR = "Could not load the activity report.";
-
-function appDateOnly(iso: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Denver",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(iso));
-  const get = (type: string) =>
-    parts.find((part) => part.type === type)?.value ?? "01";
-  return `${get("year")}-${get("month")}-${get("day")}`;
-}
 
 /**
  * THE per-AE weekly scoring, shared by the team report below and the
@@ -214,7 +203,7 @@ export async function buildActivityReport(
   // current-only selectors elsewhere.
   const peopleRes = await supabase
     .from("salespeople")
-    .select("id, first_name, deactivated_at")
+    .select("id, first_name, deactivated_at, started_on")
     .eq("role", "ae")
     .eq("is_test", false)
     .order("first_name", { ascending: true });
@@ -228,6 +217,7 @@ export async function buildActivityReport(
     id: string;
     first_name: string;
     deactivated_at: string | null;
+    started_on: string | null;
   }>;
   const rosterIds = people.map((p) => p.id);
 
@@ -274,13 +264,11 @@ export async function buildActivityReport(
   }
 
   const rows: ActivityReportRow[] = people
-    .filter((p) => {
-      if (p.deactivated_at == null) return true;
-      // Live-roster filters should not erase HISTORY: if the selected
-      // activity week overlaps the AE's final active day, keep their row so
-      // past reports still render correctly after offboarding.
-      return appDateOnly(p.deactivated_at) >= activity.since;
-    })
+    // Was this person on the team during the selected activity week? Keeps a
+    // departed AE on any week overlapping their final active day (history is
+    // never erased by offboarding) and keeps a newly hired AE OFF weeks before
+    // they started (no phantom 0% rows for periods they weren't part of).
+    .filter((p) => isRosteredDuring(p, activity.since, activity.through))
     .map((p) =>
       scoreActivityWeek({
         salesperson: p,

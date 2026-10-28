@@ -25,5 +25,9 @@ export type Salesperson = {
   // deactivated row and `requireSalesperson` 401s every API request from
   // one. See supabase/salespeople_deactivated_at.sql.
   deactivated_at: string | null;
+  // First day this person belongs on the reporting roster (yyyy-MM-dd); null =
+  // no start boundary. Reports for a past window leave out anyone who had not
+  // started by the window's end. See supabase/salespeople_started_on.sql.
+  started_on: string | null;
   created_at: string;
 };

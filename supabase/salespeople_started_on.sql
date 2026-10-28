@@ -1,0 +1,44 @@
+-- ===========================================================================
+-- salespeople.started_on — the first day someone is part of the reporting roster.
+-- ===========================================================================
+-- WHY THIS EXISTS
+--   Reports that render a PAST period build their roster from the salespeople
+--   table. Until now the only roster boundary was the END of someone's tenure
+--   (`deactivated_at`, migration #43). There was no START boundary, so an AE
+--   hired after history already existed (e.g. a replacement for someone who
+--   left) would be listed — with zero activity and a 0% score — in every week
+--   BEFORE they joined, dragging down team totals and averages for periods
+--   they were never part of.
+--
+--   `started_on` is that start boundary. A report window [since, through]
+--   includes a person when
+--       started_on IS NULL OR started_on <= through          (had started)
+--   AND (deactivated_at IS NULL OR date(deactivated_at) >= since)  (hadn't left)
+--   (src/lib/roster-window.ts is the single implementation).
+--
+-- NULL MEANS "NO RESTRICTION" — NOTHING EXISTING CHANGES
+--   The column is nullable with no default and NO BACKFILL. Every existing
+--   salesperson keeps NULL, which behaves exactly as before. Only a person
+--   onboarded with an explicit start date is bounded.
+--
+-- WHAT IT IS NOT
+--   * Not an access control. Login and every API guard are unchanged — a
+--     person with a future started_on can still sign in; only the reporting
+--     windows before that date leave them out.
+--   * Not a history rewrite. No activity, goal or message row is read or
+--     written by this migration.
+--
+-- ACCESS MODEL
+--   No RLS / policy / grant change (same posture as deactivated_at: the table's
+--   existing column-level rules apply; this is a non-sensitive date).
+--
+-- DEPLOY ORDER — APPLY BEFORE THE MATCHING APP CODE SHIPS
+--   The reporting code selects `started_on`; until the column exists those
+--   reads fail with `column salespeople.started_on does not exist` (42703).
+--   Applying it early is harmless: with every value NULL, behaviour is
+--   identical to before. Additive and idempotent.
+-- See supabase/README.md for migration order.
+-- ===========================================================================
+
+ALTER TABLE salespeople
+  ADD COLUMN IF NOT EXISTS started_on DATE;

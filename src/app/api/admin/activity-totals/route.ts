@@ -12,6 +12,7 @@ import {
 } from "@/lib/activities";
 import { averagePercent, type WeeklyGoal } from "@/lib/goals";
 import { buildRangeTargets } from "@/lib/range-targets";
+import { isRosteredDuring } from "@/lib/roster-window";
 import { fetchRangeAdjustments } from "@/lib/server/working-days";
 
 // GET /api/admin/activity-totals?from=YYYY-MM-DD&to=YYYY-MM-DD&salesperson=<id|all>
@@ -55,10 +56,9 @@ export async function GET(req: Request) {
     //    any viewer). A single-AE filter narrows it; it can't widen it.
     const peopleRes = await supabase
       .from("salespeople")
-      .select("id, first_name")
+      .select("id, first_name, deactivated_at, started_on")
       .eq("role", "ae")
       .eq("is_test", false)
-      .is("deactivated_at", null)
       .order("first_name", { ascending: true });
     if (peopleRes.error) {
       console.error(
@@ -66,7 +66,21 @@ export async function GET(req: Request) {
       );
       return Response.json({ error: "Could not load activity totals." }, { status: 500 });
     }
-    const roster = (peopleRes.data ?? []) as Array<{ id: string; first_name: string }>;
+    // Admin report over an arbitrary range: include everyone who was on the
+    // team at any point in [from, to] — a departed AE's results stay in past
+    // ranges, and a newly hired AE stays out of ranges before they started
+    // (src/lib/roster-window.ts). Live "who is active now" selectors elsewhere
+    // are unchanged.
+    const roster = (
+      (peopleRes.data ?? []) as Array<{
+        id: string;
+        first_name: string;
+        deactivated_at: string | null;
+        started_on: string | null;
+      }>
+    )
+      .filter((p) => isRosteredDuring(p, from, to))
+      .map(({ id, first_name }) => ({ id, first_name }));
     const scopeIds = roster
       .map((p) => p.id)
       .filter((id) => salesperson === "all" || id === salesperson);

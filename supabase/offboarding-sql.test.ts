@@ -33,6 +33,7 @@ function statements(text: string): string {
 const DEACTIVATE = statements(sql("deactivate_chanel.sql"));
 const COLUMN = statements(sql("salespeople_deactivated_at.sql"));
 const LEAH = statements(sql("add_leah_juice_box_only.sql"));
+const STARTED_ON = statements(sql("salespeople_started_on.sql"));
 
 /** Tables whose rows are historical authorship — never deleted, never moved. */
 const HISTORY_TABLES = [
@@ -133,5 +134,18 @@ describe("add_leah_juice_box_only.sql", () => {
     expect(LEAH).not.toMatch(/is_admin/i);
     expect(LEAH).not.toMatch(/can_import_offices/i);
     expect(LEAH).not.toMatch(/role\s*=\s*'ae'/i);
+  });
+});
+
+describe("salespeople_started_on.sql is additive and changes nobody", () => {
+  it("adds one nullable column with no default and no backfill", () => {
+    expect(STARTED_ON).toMatch(/ADD COLUMN IF NOT EXISTS started_on DATE/i);
+    expect(STARTED_ON).not.toMatch(/NOT NULL/i);
+    expect(STARTED_ON).not.toMatch(/DEFAULT/i);
+    // No backfill: existing people keep NULL (= "no start boundary").
+    expect(STARTED_ON).not.toMatch(/\bUPDATE\b/i);
+    expect(STARTED_ON).not.toMatch(/\bINSERT\b/i);
+    expect(STARTED_ON).not.toMatch(/\bDROP\b/i);
+    expect(STARTED_ON).not.toMatch(/DELETE\s+FROM/i);
   });
 });

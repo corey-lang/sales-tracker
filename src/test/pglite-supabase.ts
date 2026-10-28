@@ -77,6 +77,7 @@ export const MIGRATIONS = [
   "working_day_adjustments.sql",
   "salespeople_state_code.sql",
   "salespeople_deactivated_at.sql",
+  "salespeople_started_on.sql",
   "gold_list.sql",
   "one_on_one_meetings.sql",
   "one_on_one_workspace_v2.sql",
@@ -89,10 +90,12 @@ export const MIGRATIONS = [
   "team_message_reads.sql",
   "juice_box_pass4_conversations.sql",
   "juice_box_pass5_media.sql",
+  "juice_box_pass6_push.sql",
   "juice_box_multi_image.sql",
   "juice_box_channels.sql",
   "private_test_accounts.sql",
   "juice_box_seen_by.sql",
+  "ownership_transfer_provenance.sql",
 ];
 
 /** Just enough of Supabase's `storage` schema for business_card_scans.sql. */

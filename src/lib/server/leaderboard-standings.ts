@@ -12,6 +12,7 @@ import {
   resolveActiveGoal,
   type WeeklyGoal,
 } from "@/lib/goals";
+import { isRosteredDuring } from "@/lib/roster-window";
 import { weekAvailability } from "@/lib/working-days";
 import { fetchWeekAdjustments } from "@/lib/server/working-days";
 import {
@@ -87,21 +88,35 @@ export async function computeStandings(
   // juice_box_only guests (Travis, Rizz, …) off every leaderboard surface and
   // means any future role can't accidentally leak in. `is_test = false`
   // keeps test accounts (private sandboxes) out for EVERY viewer.
-  // `deactivated_at IS NULL` drops people who have left the company — they
-  // no longer compete, but their historical entries are untouched.
+  // Tenure boundaries (see src/lib/roster-window.ts):
+  //   * A person who has not STARTED by the end of the window is left out — a
+  //     newly hired AE does not appear (as a 0% row) in weeks before they joined.
+  //   * A person who has LEFT: for a week that is already fully in the past they
+  //     stay on the board (history is never erased by offboarding — coaching
+  //     views and scorecards re-score past weeks through here); for the live
+  //     current week they no longer compete, as before. Their historical
+  //     entries are untouched either way.
   const peopleRes = await supabase
     .from("salespeople")
-    .select("id, first_name")
+    .select("id, first_name, deactivated_at, started_on")
     .eq("role", "ae")
-    .eq("is_test", false)
-    .is("deactivated_at", null);
+    .eq("is_test", false);
   if (peopleRes.error) {
     console.error(
       `[leaderboard] standings roster read failed since=${since} through=${through} code=${peopleRes.error.code ?? "?"} msg=${peopleRes.error.message}`,
     );
     return { standings: [], error: "Could not load leaderboard right now." };
   }
-  const rosterIds = ((peopleRes.data ?? []) as Person[]).map((p) => p.id);
+  const weekIsPast = activity.through < today;
+  const roster = ((peopleRes.data ?? []) as Array<
+    Person & { deactivated_at: string | null; started_on: string | null }
+  >).filter((p) =>
+    weekIsPast
+      ? isRosteredDuring(p, activity.since, activity.through)
+      : p.deactivated_at == null &&
+        isRosteredDuring({ started_on: p.started_on }, activity.since, activity.through),
+  );
+  const rosterIds = roster.map((p) => p.id);
 
   // 2) Everything else is fetched ONLY for those ids and paged to
   // completion, so no volume of test (or other non-roster) rows can push a
@@ -151,7 +166,7 @@ export async function computeStandings(
   }
   const adjustments = adjustmentsRes.adjustments;
 
-  const people = (peopleRes.data ?? []) as Person[];
+  const people: Person[] = roster;
   const entries = entriesRes.data;
   const allGoals = goalsRes.data;
 
